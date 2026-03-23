@@ -12,6 +12,23 @@ from shared.permissions import is_ops_user, is_requester
 from shared.sessions import create_server_session, get_valid_session_by_token, invalidate_session
 
 
+class BrowserRedirectRequired(Exception):
+    def __init__(self, location: str):
+        self.location = location
+        super().__init__(location)
+
+
+def _wants_browser_redirect(request: Request) -> bool:
+    if request.headers.get("HX-Request", "").lower() == "true":
+        return True
+    accept = request.headers.get("accept", "").lower()
+    if not accept:
+        return True
+    if "application/json" in accept and "text/html" not in accept:
+        return False
+    return True
+
+
 def get_settings_dependency() -> Settings:
     return get_settings()
 
@@ -24,21 +41,29 @@ def get_optional_auth_session(
 
 
 def get_current_user(
+    request: Request,
     auth_session: SessionRecord | None = Depends(get_optional_auth_session),
     db: Session = Depends(db_session_dependency),
 ) -> User:
     if auth_session is None:
+        if _wants_browser_redirect(request):
+            raise BrowserRedirectRequired("/login")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     user = db.execute(select(User).where(User.id == auth_session.user_id, User.is_active.is_(True))).scalar_one_or_none()
     if user is None:
+        if _wants_browser_redirect(request):
+            raise BrowserRedirectRequired("/login")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session is no longer valid")
     return user
 
 
 def get_required_auth_session(
+    request: Request,
     auth_session: SessionRecord | None = Depends(get_optional_auth_session),
 ) -> SessionRecord:
     if auth_session is None:
+        if _wants_browser_redirect(request):
+            raise BrowserRedirectRequired("/login")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     return auth_session
 

@@ -5,8 +5,11 @@ import time
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from fastapi.responses import RedirectResponse
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
+from app.auth import BrowserRedirectRequired
 from app.routes_auth import router as auth_router
 from app.routes_ops import router as ops_router
 from app.routes_requester import router as requester_router
@@ -23,6 +26,12 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(requester_router)
     app.include_router(ops_router)
+
+    @app.exception_handler(BrowserRedirectRequired)
+    async def handle_browser_redirect_required(request: Request, exc: BrowserRedirectRequired) -> Response:
+        if request.headers.get("HX-Request", "").lower() == "true":
+            return Response(status_code=200, headers={"HX-Redirect": exc.location})
+        return RedirectResponse(exc.location, status_code=303)
 
     @app.middleware("http")
     async def structured_request_logging(request: Request, call_next):

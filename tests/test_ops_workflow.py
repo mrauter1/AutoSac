@@ -408,6 +408,51 @@ def test_requester_cannot_access_ops_routes():
     assert response.status_code == 403
 
 
+def test_ops_list_route_redirects_to_login_without_session():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+
+
+def test_ops_list_route_returns_hx_redirect_for_htmx_without_session():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops", headers={"HX-Request": "true"}, follow_redirects=False)
+
+    assert response.status_code == 200
+    assert response.headers["hx-redirect"] == "/login"
+    assert "location" not in response.headers
+
+
+def test_ops_list_route_returns_401_for_json_clients_without_session():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops", headers={"Accept": "application/json"}, follow_redirects=False)
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Authentication required"}
+    assert "location" not in response.headers
+    assert "hx-redirect" not in response.headers
+
+
 def test_requester_cannot_access_ops_board():
     stack = _load_web_stack()
     app = stack["create_app"]()
