@@ -1,43 +1,65 @@
-# Stage 1 AI Triage MVP
+# Auto SAC: Automated Support Triage Engine
 
-Greenfield implementation of the Stage 1 internal AI triage system described in `Autosac_PRD.md`.
+Auto SAC is a production-ready, open-source helpdesk orchestration engine. It moves beyond "chat-wrapper" architectures by implementing strict state management, cryptographic input validation, and agentic workflows to automate ticket routing and resolution.
 
-## Stack
+---
 
-- Python 3.12
-- FastAPI + Jinja2 + HTMX
-- PostgreSQL 16
-- SQLAlchemy 2.x + Alembic
-- Custom PostgreSQL-backed session auth
-- Separate worker process for Codex orchestration
+### Key Technical Differentiators
 
-## Repository layout
+#### 1. Deterministic State Hashing (Idempotency)
+Instead of re-running the agent on every webhook update, Auto SAC computes a SHA-256 fingerprint of the ticket’s public state (messages, attachments, and status).
+* **Cost Efficiency:** The agent only executes when the ticket fingerprint changes.
+* **Race Condition Protection:** If a ticket status or message changes while an agent is mid-execution, the system detects the fingerprint mismatch upon completion. It automatically invalidates the stale output and queues a fresh run, preventing the agent from replying to outdated context.
 
-```text
-app/      FastAPI app surface and web-layer helpers
-worker/   Queue, ticket loading, fingerprinting, and Codex execution helpers
-shared/   Config, DB, models, migrations, security, permissions, workspace contracts
-scripts/  Bootstrap, admin/user management, and local run entry points
-```
+#### 2. Pydantic-Backed Output Guardrails
+The agent is constrained by a strict Pydantic model (`TriageResult`).
+* **Schema Enforcement:** The agent cannot produce arbitrary text; it must yield valid, structured JSON.
+* **Business Logic Validation:** We use `model_validator(mode="after")` to enforce cross-field dependencies. For example, if the agent selects `ask_clarification` but fails to provide a question, the application layer catches the logical contradiction before it reaches the end-user, triggering a `TriageValidationError` and routing the ticket to a human queue instead.
 
-## Local setup
+#### 3. Separation of Concerns (Dual-Channel Output)
+The agent is architected to produce two distinct output channels:
+* **Public Channel:** Drafts or automatic responses optimized for the end-user.
+* **Internal Channel:** A structured diagnostic summary, relevant file paths from the repository, and internal reasoning.
+This ensures the agent never leaks private diagnostics or internal notes to the requester.
 
-1. Copy `.env.example` to `.env` and fill in required values.
-2. Install dependencies from `requirements.txt`.
-3. Run Alembic migrations.
-4. Run `python scripts/bootstrap_workspace.py`.
-5. Create an admin with `python scripts/create_admin.py`.
-6. Start the web and worker processes with `python scripts/run_web.py` and `python scripts/run_worker.py`.
+#### 4. Human-in-the-Loop Fallback
+The system uses tiered confidence thresholds (configurable via `Settings`).
+* **High Confidence:** Triggers `auto_public_reply` for immediate resolution.
+* **Low Confidence / Ambiguity:** Automatically moves the ticket to a `pending_approval` state for human review.
+* **Drafting Engine:** Humans act as the final judge, using an "Approve/Reject" interface for AI-generated drafts.
 
-## Acceptance Validation
+#### 5. Sandboxed Context Loading
+The worker node uses strict boundary enforcement. It maps local mounts for `app/` and `manuals/` into the agent's context.
+* **Read-only Constraints:** The agent is given a read-only view of the codebase, preventing unauthorized code modification.
+* **Artifact Attribution:** Every AI-generated message is cryptographically linked to the `AIRun` ID that produced it, ensuring full auditability of the agent's decision-making process.
 
-Run the same local checks used for the hardening phase:
+---
 
-1. Ensure `.env` contains the required Stage 1 variables from `.env.example`.
-2. Run `python scripts/bootstrap_workspace.py` and confirm it prints the workspace contract paths.
-3. Run `python scripts/run_web.py --check` to validate the web entrypoint, `/healthz`, and `/readyz` against the current local environment.
-4. Verify `GET /readyz` returns `{"status":"ready"}` only when the database and required workspace paths are available.
-5. Run `python scripts/run_worker.py --check` to validate the worker entrypoint against the current local environment, then start the long-running worker with `python scripts/run_worker.py`.
-6. Run `pytest` to execute the regression suite for auth/session, uploads, requester/ops permissions, worker queueing, stale-run suppression, drafts, bootstrap exactness, rendering sanitization, and readiness behavior.
+### Tech Stack
+* **Runtime:** Python 3.11+, FastAPI (Async/Await)
+* **Storage:** PostgreSQL (JSONB support for state metadata)
+* **ORM:** SQLAlchemy 2.0 (Constraint-based enum validation)
+* **Orchestration:** Decoupled background workers with dedicated heartbeat monitoring
+* **Frontend:** Server-side rendered Jinja2 + HTMX (zero-JS overhead)
 
-The repository now includes the Stage 1 scaffold, shared workflow logic, Codex worker integration, structured logging, readiness checks, and regression coverage for the main PRD invariants.
+---
+
+### Getting Started
+
+1. **Bootstrap Workspace:**
+   Maps your repo and manuals for the agent.
+   ```bash
+   python scripts/bootstrap_workspace.py
+   ```
+
+2. **Run Services:**
+   ```bash
+   # Start the web interface
+   python scripts/run_web.py
+
+   # Start the worker (processes the pending queue)
+   python scripts/run_worker.py
+   ```
+
+3. **Verify:**
+   Use the `/readyz` endpoint to confirm database connectivity, workspace availability, and agent contract compliance.
