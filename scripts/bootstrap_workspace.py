@@ -9,6 +9,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from shared.config import get_settings
+from shared.contracts import WORKSPACE_BOOTSTRAP_VERSION
+from shared.db import session_scope
+from shared.ticketing import ensure_system_state_defaults
 from shared.workspace import bootstrap_workspace, ensure_uploads_dir, workspace_contract_snapshot
 
 
@@ -16,6 +19,8 @@ def main() -> None:
     settings = get_settings()
     ensure_uploads_dir(settings)
     bootstrap_workspace(settings)
+    with session_scope(settings) as db:
+        ensure_system_state_defaults(db, WORKSPACE_BOOTSTRAP_VERSION)
     print(json.dumps(workspace_contract_snapshot(settings), indent=2))
 
 

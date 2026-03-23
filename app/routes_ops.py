@@ -11,7 +11,13 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.auth import get_required_auth_session, require_ops_user, validate_csrf_token
+from app.auth import (
+    get_required_auth_session,
+    get_required_browser_auth_session,
+    require_browser_ops_user,
+    require_ops_user,
+    validate_csrf_token,
+)
 from app.render import render_markdown_to_html
 from app.ui import build_template_context, ops_author_label, ops_status_label, templates
 from shared.db import db_session_dependency
@@ -290,32 +296,35 @@ def _template_or_partial_response(
 @router.get("/ops", response_class=HTMLResponse)
 def ops_ticket_list(
     request: Request,
-    current_user: User = Depends(require_ops_user),
-    auth_session=Depends(get_required_auth_session),
+    current_user: User = Depends(require_browser_ops_user),
+    auth_session=Depends(get_required_browser_auth_session),
     db: Session = Depends(db_session_dependency),
 ):
     filters = _read_filters(request)
     db.commit()
-    return templates.TemplateResponse(
+    context = build_template_context(
+        request=request,
+        current_user=current_user,
+        auth_session=auth_session,
+        extra={
+            **_ops_filter_context(db, current_user=current_user, filters=filters),
+            "filters_action": "/ops",
+            "filters_target_id": "ops-ticket-rows",
+        },
+    )
+    return _template_or_partial_response(
         request,
-        "ops_ticket_list.html",
-        build_template_context(
-            request=request,
-            current_user=current_user,
-            auth_session=auth_session,
-            extra={
-                **_ops_filter_context(db, current_user=current_user, filters=filters),
-                "filters_action": "/ops",
-            },
-        ),
+        template_name="ops_ticket_list.html",
+        partial_name="ops_ticket_rows.html",
+        context=context,
     )
 
 
 @router.get("/ops/board", response_class=HTMLResponse)
 def ops_board(
     request: Request,
-    current_user: User = Depends(require_ops_user),
-    auth_session=Depends(get_required_auth_session),
+    current_user: User = Depends(require_browser_ops_user),
+    auth_session=Depends(get_required_browser_auth_session),
     db: Session = Depends(db_session_dependency),
 ):
     filters = _read_filters(request)
@@ -327,6 +336,7 @@ def ops_board(
         extra={
             **_ops_filter_context(db, current_user=current_user, filters=filters),
             "filters_action": "/ops/board",
+            "filters_target_id": "ops-board-columns",
             "ops_status_label": ops_status_label,
         },
     )
@@ -342,8 +352,8 @@ def ops_board(
 def ops_ticket_detail(
     reference: str,
     request: Request,
-    current_user: User = Depends(require_ops_user),
-    auth_session=Depends(get_required_auth_session),
+    current_user: User = Depends(require_browser_ops_user),
+    auth_session=Depends(get_required_browser_auth_session),
     db: Session = Depends(db_session_dependency),
 ):
     ticket = _load_ops_ticket_or_404(db, reference=reference)

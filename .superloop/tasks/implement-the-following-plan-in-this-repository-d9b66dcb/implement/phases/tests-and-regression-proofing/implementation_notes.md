@@ -1,0 +1,35 @@
+# Implementation Notes
+
+- Task ID: implement-the-following-plan-in-this-repository-d9b66dcb
+- Pair: implement
+- Phase ID: tests-and-regression-proofing
+- Phase Directory Key: tests-and-regression-proofing
+- Phase Title: Tests And Regression Proofing
+- Scope: phase-local producer artifact
+- Files changed:
+  - `app/routes_auth.py`
+  - `tests/test_auth_requester.py`
+  - `.superloop/tasks/implement-the-following-plan-in-this-repository-d9b66dcb/decisions.txt`
+- Symbols touched:
+  - `app.routes_auth.login_action`
+  - `tests.test_auth_requester.test_login_route_invalid_credentials_rotate_preauth_and_preserve_safe_next`
+- Checklist mapping:
+  - Workstream B / G: locked login CSRF failure semantics so missing-token browser submissions follow the rotated-preauth login response instead of a framework 422.
+  - Workstream G: expanded auth/browser regression coverage for failed-login preauth rotation and safe `next` preservation.
+- Assumptions:
+  - The prior shared decision from auth-browser-ux remains authoritative: missing login CSRF should behave the same as invalid login CSRF.
+- Preserved invariants:
+  - Successful login/session behavior is unchanged.
+  - Invalid or missing login CSRF still returns the login page with rotated preauth state and no SessionMiddleware.
+  - Browser `next` handling remains sanitized and internal-only.
+- Intended behavior changes:
+  - Missing `csrf_token` on `POST /login` no longer short-circuits at FastAPI validation with `422`; it now reaches the app-level `403` expired-session response path.
+- Known non-changes:
+  - No route/table/state-machine changes outside the login failure path.
+  - No broad auth refactor; JSON/health semantics remain untouched.
+- Expected side effects:
+  - Browser clients that omit the login CSRF field now receive the same UX as mismatched-token submissions, including preauth cookie rotation.
+- Validation performed:
+  - `pytest -q tests/test_auth_requester.py tests/test_ops_workflow.py tests/test_ai_worker.py tests/test_hardening_validation.py`
+- Deduplication / centralization:
+  - Reused the existing `_login_error_response()` path instead of adding a second missing-CSRF branch.

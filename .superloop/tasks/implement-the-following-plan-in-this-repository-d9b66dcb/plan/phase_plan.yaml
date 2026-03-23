@@ -1,0 +1,198 @@
+version: 1
+task_id: implement-the-following-plan-in-this-repository-d9b66dcb
+request_snapshot_ref: /workspace/AutoSac/.superloop/tasks/implement-the-following-plan-in-this-repository-d9b66dcb/runs/run-20260323T135631Z-19059a68/request.md
+phases:
+  - phase_id: foundations
+    title: Foundations Hardening
+    objective: Remove cwd-sensitive behavior and fail-unsafe auth/worker edges before changing browser UX.
+    status: planned
+    in_scope:
+      - Make static/template resolution module-relative in app startup and template setup.
+      - Broaden malformed password-hash handling in shared.security.verify_password without changing its signature.
+      - Remove full-prompt argv transport from worker.codex_runner while preserving prompt.txt, final.json, and required Codex flags.
+    out_of_scope:
+      - Browser redirects or login CSRF flow.
+      - HTMX fragment rendering.
+      - README or .env contract updates.
+    dependencies: []
+    acceptance_criteria:
+      - id: AC-1
+        text: create_app() and python scripts/run_web.py --check work when invoked outside the repository root.
+      - id: AC-2
+        text: verify_password returns False for malformed or invalid hashes and login no longer risks a 500 on bad stored hashes.
+      - id: AC-3
+        text: Codex runs no longer pass the full prompt as argv input while prompt.txt, final.json, image flags, schema output, and worker state behavior remain intact.
+    deliverables:
+      - app/main.py and app/ui.py path-resolution changes
+      - shared/security.py malformed-hash handling
+      - worker/codex_runner.py prompt transport update
+    risks:
+      - Codex CLI stdin behavior may differ across environments.
+      - Path resolution changes could break static/template loading if partial.
+    rollback:
+      - Revert the path-resolution edits as a unit if create_app static/template loading regresses.
+      - Revert the Codex transport change only together with its contract tests.
+  - phase_id: auth-browser-ux
+    title: Browser Auth UX
+    objective: Add login CSRF and safe browser redirects without altering non-browser auth semantics.
+    status: planned
+    in_scope:
+      - Add a dedicated preauth session table/model, cookie, and login CSRF token lifecycle.
+      - Redirect unauthenticated protected HTML requests to /login with sanitized internal next values.
+      - Redirect successful login to the sanitized internal next value when present, with fallback to the existing role-based destination when next is absent or invalid.
+      - Return browser 403 for authenticated wrong-role access without redirect loops.
+    out_of_scope:
+      - SessionMiddleware, OAuth/SSO, or auth changes for JSON/health endpoints.
+      - Changing authenticated POST-form CSRF for existing app/ops actions.
+    dependencies:
+      - foundations
+    acceptance_criteria:
+      - id: AC-1
+        text: GET /login creates or refreshes a preauth session and embeds the current login CSRF token.
+      - id: AC-2
+        text: POST /login rejects missing or invalid login CSRF, rotates or refreshes the preauth state on failure, clears preauth on successful auth-session creation, and redirects to the sanitized next target when it is present and valid.
+      - id: AC-3
+        text: Unauthenticated browser requests to protected HTML routes redirect to /login with only safe internal next targets, logged-in visits to /login preserve the same safe-next behavior, and wrong-role authenticated browser requests return 403.
+    deliverables:
+      - auth-layer browser guard helpers and safe-next sanitizer
+      - new preauth session persistence and migration
+      - login route/template updates with explicit next-consumption behavior
+    risks:
+      - Cookie confusion between preauth and auth sessions.
+      - Redirect behavior could accidentally alter existing 401/403 API semantics.
+      - Next sanitization and next consumption could diverge if they are not wired through one shared path.
+    rollback:
+      - Revert the preauth table/migration, safe-next handling, and browser-only guard wiring together if login behavior regresses.
+  - phase_id: htmx-ops-ui
+    title: HTMX Ops Filters
+    objective: Add local HTMX-powered list and board filtering while preserving non-JS behavior and read tracking.
+    status: planned
+    in_scope:
+      - Vendor HTMX locally and load it from the shared base template.
+      - Update /ops and /ops/board filters to use hx-get, stable fragment targets, and hx-push-url=true.
+      - Return rows or board-columns fragments on HX requests only.
+    out_of_scope:
+      - SPA behavior or broader frontend redesign.
+      - Any change to ticket detail read-tracking semantics.
+    dependencies:
+      - auth-browser-ux
+    acceptance_criteria:
+      - id: AC-1
+        text: Normal GET /ops and /ops/board responses still return full templates and non-JS filtering still works.
+      - id: AC-2
+        text: HX-Request=true responses return only the intended rows or board-columns fragment with stable swap targets.
+      - id: AC-3
+        text: /ops list and board filtering does not update ticket_views.last_viewed_at.
+    deliverables:
+      - vendored HTMX asset under app static files
+      - base.html and ops filter/template updates
+      - /ops list partial-response handling aligned with existing board helper
+    risks:
+      - Fragment responses may accidentally include full-page shell markup.
+      - Filter rewiring may introduce read-tracking side effects.
+    rollback:
+      - Remove HX-specific response branches while keeping full GET routes intact.
+  - phase_id: ai-safety-policy
+    title: AI Action Validation
+    objective: Enforce the stricter Stage 1 action matrix for triage results without changing the surrounding run lifecycle.
+    status: planned
+    in_scope:
+      - Tighten validate_triage_result for clarification, draft, auto-reply, auto-confirm, and route actions.
+      - Reject contradictory field combinations and more than three clarifying questions.
+      - Preserve the existing after-two-clarification-rounds route_dev_ti override.
+    out_of_scope:
+      - New ticket classes or new worker actions.
+      - Changes to fingerprinting, stale-run handling, or publication ordering.
+    dependencies:
+      - htmx-ops-ui
+    acceptance_criteria:
+      - id: AC-1
+        text: auto_public_reply is allowed only for support and access_config tickets that satisfy evidence, reply text, permission flag, and confidence threshold requirements.
+      - id: AC-2
+        text: ask_clarification, auto_confirm_and_route, draft_public_reply, and route_dev_ti each enforce the requested cross-field invariants and reject contradictory combinations.
+      - id: AC-3
+        text: The current clarification-round override still forces route_dev_ti after two prior clarification rounds.
+    deliverables:
+      - worker/triage.py validation updates
+      - expanded validation-matrix tests
+    risks:
+      - Over-tight validation could turn previously accepted outputs into failures.
+    rollback:
+      - Revert validation rules together with the new matrix tests if the contract is shown to be too strict.
+  - phase_id: bootstrap-system-state
+    title: Bootstrap And System State
+    objective: Make the documented bootstrap path deterministic and ensure system-state defaults exist before worker activity.
+    status: planned
+    in_scope:
+      - Invoke ensure_system_state_defaults from bootstrap and worker startup.
+      - Add an idempotent admin bootstrap path, preferring --if-missing in create_admin.py.
+      - Define the deterministic bootstrap sequence used by docs and smoke tests.
+    out_of_scope:
+      - New runtime state keys beyond bootstrap_version and worker_heartbeat.
+      - Changes to worker queue semantics or workspace contract files beyond what bootstrap already owns.
+    dependencies:
+      - ai-safety-policy
+    acceptance_criteria:
+      - id: AC-1
+        text: bootstrap_version and worker_heartbeat defaults exist after documented bootstrap and before the worker poll loop runs.
+      - id: AC-2
+        text: create_admin.py supports an idempotent admin bootstrap path without creating duplicates.
+      - id: AC-3
+        text: The bootstrap sequence is deterministic enough for smoke-check tests to rely on it.
+    deliverables:
+      - bootstrap script and worker startup integration
+      - idempotent create_admin CLI behavior
+      - explicit bootstrap runbook inputs for docs/tests
+    risks:
+      - Ordering mistakes could seed defaults only after worker startup.
+    rollback:
+      - Revert startup seeding to bootstrap-only if worker startup integration proves unstable, while keeping the helper idempotent.
+  - phase_id: docs-env-contract
+    title: Docs And Env Contract
+    objective: Bring operator-facing documentation and example environment configuration in line with actual Stage 1 behavior.
+    status: planned
+    in_scope:
+      - Complete .env.example with the required variable set.
+      - Rewrite README.md around actual purpose, stack, bootstrap, migrations, admin creation, smoke checks, tests, and Stage 1 boundaries.
+    out_of_scope:
+      - Marketing copy beyond the shipped Stage 1 contract.
+      - New deployment automation.
+    dependencies:
+      - bootstrap-system-state
+    acceptance_criteria:
+      - id: AC-1
+        text: .env.example includes every variable named in the request snapshot.
+      - id: AC-2
+        text: README.md documents migrations, bootstrap workspace, admin creation, web/worker smoke checks, tests, and the Stage 1 non-goals called out in scope.
+    deliverables:
+      - updated .env.example
+      - updated README.md
+    risks:
+      - README drift could misstate current capabilities or workflow order.
+    rollback:
+      - Revert docs/env updates if implementation scope changes, then restate the contract from the actual code before shipping.
+  - phase_id: tests-and-regression-proofing
+    title: Tests And Regression Proofing
+    objective: Lock in the requested behavior with focused tests across auth, worker, bootstrap, docs, and HTMX flows.
+    status: planned
+    in_scope:
+      - Add or update tests for browser redirect/CSRF behavior, cwd path resolution, malformed hashes, HTMX fragments, ticket-view invariants, AI validation, Codex transport, and bootstrap/docs checks.
+      - Keep existing smoke-check and route-contract assertions passing.
+    out_of_scope:
+      - Broad refactors unrelated to the requested gaps.
+      - New end-to-end infrastructure beyond the current pytest/script pattern.
+    dependencies:
+      - docs-env-contract
+    acceptance_criteria:
+      - id: AC-1
+        text: Tests cover every requested workstream gap and preserve unchanged Stage 1 boundaries.
+      - id: AC-2
+        text: Bootstrap, web check, and worker check remain runnable as deterministic smoke checks after the documented sequence.
+      - id: AC-3
+        text: Regression tests explicitly protect browser auth semantics, HTMX fragment behavior, ticket view tracking, Codex command contract, and AI validation rules.
+    deliverables:
+      - updated pytest coverage across tests/test_auth_requester.py, tests/test_ops_workflow.py, tests/test_ai_worker.py, tests/test_hardening_validation.py, and related suites
+    risks:
+      - Tests may overfit to implementation details instead of contract behavior.
+    rollback:
+      - Relax or replace brittle assertions while preserving contract-level coverage if implementation changes remain within scope.

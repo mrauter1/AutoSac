@@ -11,7 +11,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.formparsers import MultiPartException
 
-from app.auth import get_current_user, get_required_auth_session, require_requester_user, validate_csrf_token
+from app.auth import (
+    get_current_user,
+    get_required_auth_session,
+    get_required_browser_auth_session,
+    require_browser_requester_user,
+    require_requester_user,
+    validate_csrf_token,
+)
 from app.render import render_markdown_to_html
 from app.ui import build_template_context, requester_author_label, templates
 from app.uploads import (
@@ -161,8 +168,8 @@ def _ticket_list_rows(db: Session, *, requester_id) -> list[dict[str, object]]:
 @router.get("/app/tickets", response_class=HTMLResponse)
 def requester_ticket_list(
     request: Request,
-    current_user: User = Depends(require_requester_user),
-    auth_session: SessionRecord = Depends(get_required_auth_session),
+    current_user: User = Depends(require_browser_requester_user),
+    auth_session: SessionRecord = Depends(get_required_browser_auth_session),
     db: Session = Depends(db_session_dependency),
 ):
     db.commit()
@@ -181,8 +188,8 @@ def requester_ticket_list(
 @router.get("/app/tickets/new", response_class=HTMLResponse)
 def requester_ticket_new_page(
     request: Request,
-    current_user: User = Depends(require_requester_user),
-    auth_session: SessionRecord = Depends(get_required_auth_session),
+    current_user: User = Depends(require_browser_requester_user),
+    auth_session: SessionRecord = Depends(get_required_browser_auth_session),
     db: Session = Depends(db_session_dependency),
 ):
     db.commit()
@@ -256,8 +263,8 @@ async def requester_ticket_create(
 def requester_ticket_detail(
     reference: str,
     request: Request,
-    current_user: User = Depends(require_requester_user),
-    auth_session: SessionRecord = Depends(get_required_auth_session),
+    current_user: User = Depends(require_browser_requester_user),
+    auth_session: SessionRecord = Depends(get_required_browser_auth_session),
     db: Session = Depends(db_session_dependency),
 ):
     ticket = _load_requester_ticket_or_404(db, reference=reference, requester_id=current_user.id)

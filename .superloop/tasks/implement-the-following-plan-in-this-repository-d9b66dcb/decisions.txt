@@ -1,0 +1,43 @@
+<superloop-decisions-header version="1" block_seq="1" owner="planner" phase_id="task-global" pair="plan" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T13:56:31.142253+00:00" />
+Apply unauthenticated redirects only to protected HTML browser routes; keep /healthz, /readyz, and non-browser/API-style auth failures on their existing status-code behavior.
+Use a dedicated preauth session table and cookie for login CSRF instead of reusing the authenticated session or adding SessionMiddleware.
+HTMX list and board filtering must remain read-only with respect to ticket_views; only detail routes and existing state-changing actions should move last_viewed_at.
+Codex prompt transport must preserve prompt.txt and final.json as the canonical artifacts while removing the large prompt payload from the process argv tail.
+<superloop-decisions-header version="1" block_seq="2" owner="planner" phase_id="task-global" pair="plan" turn_seq="2" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:01:08.917588+00:00" />
+Sanitized browser `next` targets must be consumed on successful login and on logged-in `/login` visits, with fallback to `post_login_redirect_path(user)` only when `next` is absent or invalid.
+<superloop-decisions-header version="1" block_seq="3" owner="implementer" phase_id="foundations" pair="implement" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:02:21.239494+00:00" />
+Codex prompt transport now uses Codex exec stdin mode with a fixed "-" prompt arg, keeping prompt.txt and final.json canonical while removing the large prompt payload from argv.
+The existing README/.env acceptance test failure remains deferred to the later docs/env phase because foundations is limited to cwd-paths, password verification, and Codex prompt transport.
+<superloop-decisions-header version="1" block_seq="4" owner="test_author" phase_id="foundations" pair="test" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:06:09.022238+00:00" />
+Foundation AC-1 coverage includes an actual `/login` template render after reloading app modules from a non-repo cwd, using dependency overrides to keep the test focused on path resolution rather than later auth/session changes.
+Foundation phase validation intentionally excludes the known README/.env contract test because docs/env updates are explicitly out of scope for this phase.
+<superloop-decisions-header version="1" block_seq="5" owner="implementer" phase_id="auth-browser-ux" pair="implement" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:08:06.107812+00:00" />
+Safe browser `next` handling accepts only internal absolute paths plus optional query strings, strips unsafe values entirely, and falls back instead of preserving `/login` as a post-login target to avoid redirect loops.
+Login preauth sessions reuse the existing non-remembered session expiry window on the server and issue an HttpOnly session cookie, so failed logins can rotate CSRF state without adding a new config surface.
+<superloop-decisions-header version="1" block_seq="6" owner="test_author" phase_id="auth-browser-ux" pair="test" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:15:19.514270+00:00" />
+AC-2 coverage treats missing login CSRF the same as invalid login CSRF: the app should reissue the login page with refreshed preauth state instead of letting FastAPI return a bare 422 validation error.
+<superloop-decisions-header version="1" block_seq="7" owner="implementer" phase_id="htmx-ops-ui" pair="implement" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:17:27.140320+00:00" />
+HTMX swaps target stable wrapper divs in the full list/board templates via innerHTML, while `ops_ticket_rows.html` and `ops_board_columns.html` remain the canonical fragment-only responses for HX requests.
+<superloop-decisions-header version="1" block_seq="8" owner="implementer" phase_id="ai-safety-policy" pair="implement" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:22:00.487327+00:00" />
+Non-clarification actions now fail closed when `needs_clarification=true` or `clarifying_questions` is non-empty, so contradictory clarification metadata cannot slip through to publication/routing.
+`auto_public_reply` is restricted to `support` and `access_config`; `data_ops`, `bug`, `feature`, and `unknown` must use a non-auto-reply action even if other reply fields look valid.
+<superloop-decisions-header version="1" block_seq="9" owner="test_author" phase_id="ai-safety-policy" pair="test" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:25:38.050195+00:00" />
+AI-safety-policy test coverage stays at the `validate_triage_result()` unit boundary, because the changed behavior is fully localized there and the two-round route override is already isolated in `_effective_next_action()`.
+<superloop-decisions-header version="1" block_seq="10" owner="implementer" phase_id="bootstrap-system-state" pair="implement" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:27:32.560382+00:00" />
+System-state default seeding now self-creates only the `system_state` table when absent, so bootstrap and worker startup stay deterministic on the SQLite smoke-check path without broad schema bootstrapping.
+`create_admin.py --if-missing` is idempotent only for an existing admin with the same normalized email; an existing non-admin user with that email still exits non-zero to avoid silently changing account role semantics.
+<superloop-decisions-header version="1" block_seq="11" owner="implementer" phase_id="bootstrap-system-state" pair="implement" turn_seq="2" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:34:34.704003+00:00" />
+Superseding the prior bootstrap-system-state shortcut: runtime and CLI paths do not create schema tables; the deterministic bootstrap contract is migration-first.
+Bootstrap smoke/runbook order for this phase is `alembic upgrade head` -> `python scripts/bootstrap_workspace.py` -> `python scripts/create_admin.py --if-missing ...` -> web/worker smoke checks.
+The initial Alembic migration now uses SQLite-compatible JSON/sequence handling only where needed for the smoke-test database, while keeping the existing PostgreSQL DDL path intact.
+<superloop-decisions-header version="1" block_seq="12" owner="test_author" phase_id="bootstrap-system-state" pair="test" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:37:50.691350+00:00" />
+Bootstrap-system-state coverage treats migration order as part of AC-3 by asserting `bootstrap_workspace.py` fails before `alembic upgrade head` and succeeds afterward.
+AC-2 failure-path coverage locks the shared decision that `create_admin.py --if-missing` must reject an existing non-admin email instead of silently promoting or mutating that account.
+<superloop-decisions-header version="1" block_seq="13" owner="implementer" phase_id="docs-env-contract" pair="implement" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:39:29.716543+00:00" />
+README now documents the migration-first bootstrap runbook and script-level smoke checks as the canonical Stage 1 operator path, rather than describing broader or future-facing product capabilities.
+<superloop-decisions-header version="1" block_seq="14" owner="test_author" phase_id="docs-env-contract" pair="test" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:41:49.308684+00:00" />
+Docs/env coverage stays as a deterministic file-content contract test in `tests/test_hardening_validation.py`, expanded to assert every required env var plus the README runbook and Stage 1 non-goal strings rather than introducing a separate docs-only test module.
+<superloop-decisions-header version="1" block_seq="15" owner="implementer" phase_id="tests-and-regression-proofing" pair="implement" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:43:13.372817+00:00" />
+The login POST form now accepts a missing `csrf_token` field at routing time and handles it in the application error path, so missing-token submissions rotate preauth state and return the same 403 login-page response as mismatched tokens instead of FastAPI's 422 validation failure.
+<superloop-decisions-header version="1" block_seq="16" owner="test_author" phase_id="tests-and-regression-proofing" pair="test" turn_seq="1" run_id="run-20260323T135631Z-19059a68" ts="2026-03-23T14:46:30.344132+00:00" />
+Tests-and-regression-proofing coverage now locks both GET and POST `/login` behavior for already-authenticated browsers, so sanitized `next` consumption cannot regress on one branch while remaining correct on the other.

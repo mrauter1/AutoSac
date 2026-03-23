@@ -1,0 +1,126 @@
+{
+  "task_id": "implement-the-following-plan-in-this-repository-d9b66dcb",
+  "created_at": "2026-03-23T13:56:31.060025+00:00",
+  "request_text": "Implement the following plan in this repository exactly, preserving existing behavior unless explicitly changed. \n\n[PLAN]\nFramework and CLI assumptions in this plan were checked against the current official FastAPI, Starlette, argon2-cffi, and Codex documentation.\n\n1. Goal: fully align with PRD and close gaps.\nCorrections:\n1) HTMX integration for Ops UI\n2) CSRF on login\n3) unauthenticated browser redirects to /login\n4) add README.md and .env.example if missing/incomplete\n5) initialize system_state.bootstrap_version\n6) complete deterministic bootstrap/runbook path\n7) harden AI action validation for unsafe auto-public replies\n8) remove fragile prompt transport via large CLI arg\n9) make static/template paths cwd-independent\n10) broaden password verification error handling for malformed hashes\n\n2. Non-goals: no SPA, SessionMiddleware auth, OAuth/SSO, Slack/SMTP notifications, web search in worker, repo writes by Codex worker, OCR, non-image attachments, edit/delete ticket content, patch generation by Codex.\n\n3. Work order:\n1. foundations\n2. auth/browser UX\n3. HTMX\n4. AI safety policy\n5. bootstrap/system-state\n6. docs/env files\n7. tests\n\n4. Workstream A:\nA1 path resolution module-relative in app/main.py + app/ui.py using Path(__file__).resolve(); keep /static + template names unchanged; create_app and scripts/run_web.py --check must work outside repo root.\nA2 shared/security.py verify_password returns False for malformed/invalid hashes; no signature change; add tests; no info leaks.\nA3 worker/codex_runner.py stop passing full prompt as argv tail; keep prompt.txt persisted and final.json canonical; keep required codex flags and worker state behavior; prefer stdin if supported else short fixed arg instructing read prompt.txt.\n\n5. Workstream B:\nB1 Add server-side login CSRF with preauth session table + cookie. GET /login creates/refreshes preauth session + embeds csrf token. POST /login validates csrf; success creates auth session, invalidates preauth, clears preauth cookie; failure stays on login and rotates/refreshes csrf. No SessionMiddleware.\nB2 Unauth browser access to protected HTML routes redirects to /login with safe internal next; reject external/protocol next. Wrong-role authenticated access gets browser 403 (no redirect loop). Keep JSON/health behavior unchanged.\n\n6. Workstream C:\nC1 load local vendored HTMX in base template.\nC2 /ops filter form: hx-get, hx-target, hx-push-url=true; stable rows container id; GET /ops returns full template normally and rows partial for HX-Request true; non-JS fallback preserved.\nC3 same for /ops/board with columns fragment.\nC4 do not change view-tracking semantics; filters/list-board must not update ticket_views.last_viewed_at.\n\n7. Workstream D:\nD1 tighten worker/triage.py validate_triage_result enforcing:\n- ask_clarification => needs_clarification true + non-empty public_reply_markdown\n- non-clarification should require needs_clarification false (or strict safe behavior)\n- auto_public_reply => auto_public_reply_allowed true, evidence_found true, non-empty reply, confidence >= AUTO_SUPPORT_REPLY_MIN_CONFIDENCE\n- auto_public_reply allowed only for support + access_config; reject bug/feature/unknown (+data_ops unless explicitly approved)\n- auto_confirm_and_route => auto_public_reply_allowed true, non-empty reply, confidence >= AUTO_CONFIRM_INTENT_MIN_CONFIDENCE\n- draft_public_reply => auto_public_reply_allowed false + non-empty reply\n- route_dev_ti may have empty public reply\n- reject >3 clarifying questions and contradictory combos\n- preserve existing after-2-clarification-rounds route-to-Dev/TI override.\n\n8. Workstream E:\nE1 ensure system_state defaults include bootstrap_version and worker_heartbeat via ensure_system_state_defaults called in idempotent startup/bootstrapping spots at least scripts/bootstrap_workspace.py and worker startup before poll loop (optional web startup).\nE2 deterministic bootstrap path + docs; either explicit sequence or convenience script. Admin bootstrap idempotent/prefer --if-missing in create_admin.py.\n\n9. Workstream F:\nF1 .env.example complete required vars:\nAPP_BASE_URL APP_SECRET_KEY DATABASE_URL UPLOADS_DIR TRIAGE_WORKSPACE_DIR REPO_MOUNT_DIR MANUALS_MOUNT_DIR CODEX_BIN CODEX_API_KEY CODEX_MODEL CODEX_TIMEOUT_SECONDS WORKER_POLL_SECONDS AUTO_SUPPORT_REPLY_MIN_CONFIDENCE AUTO_CONFIRM_INTENT_MIN_CONFIDENCE MAX_IMAGES_PER_MESSAGE MAX_IMAGE_BYTES SESSION_DEFAULT_HOURS SESSION_REMEMBER_DAYS\nF2 README.md include purpose/scope, stack, env vars, bootstrap sequence, migrations, bootstrap workspace, create admin, run web/worker smoke checks, tests, read-only repo-aware worker, no Slack/email/SSO in stage 1.\n\n10. Workstream G tests:\n- auth/browser redirect + csrf + safe next + role 403 tests\n- cwd path-resolution test\n- malformed hash verify_password false and no login 500\n- HTMX fragment response tests for /ops and /ops/board, full templates on normal GET, no ticket_views updates from list/board\n- AI validation matrix tests\n- Codex prompt transport tests (no full prompt argv tail; prompt.txt and final.json behavior + flags)\n- bootstrap/system_state defaults tests + existence/content checks for .env.example + README + smoke checks after bootstrap\n\n11. Keep minimal local changes; stable routes/table names/state transitions unless required; preserve stage-1 boundaries.\n\n12. Acceptance checklist: complete all items implied above before done.",
+  "request_updated_at": "2026-03-23T13:56:31.060071+00:00",
+  "phase_plan_path": "/workspace/AutoSac/.superloop/tasks/implement-the-following-plan-in-this-repository-d9b66dcb/plan/phase_plan.yaml",
+  "phase_plan_version": 1,
+  "active_phase_selection": {
+    "run_id": "run-20260323T135631Z-19059a68",
+    "mode": "single",
+    "phase_ids": [
+      "foundations",
+      "auth-browser-ux",
+      "htmx-ops-ui",
+      "ai-safety-policy",
+      "bootstrap-system-state",
+      "docs-env-contract",
+      "tests-and-regression-proofing"
+    ],
+    "explicit": true,
+    "current_phase_index": 7,
+    "current_phase_id": null
+  },
+  "phase_status": {
+    "foundations": "completed",
+    "auth-browser-ux": "completed",
+    "htmx-ops-ui": "completed",
+    "ai-safety-policy": "completed",
+    "bootstrap-system-state": "completed",
+    "docs-env-contract": "completed",
+    "tests-and-regression-proofing": "completed"
+  },
+  "phase_history": [
+    {
+      "phase_id": "foundations",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "in_progress",
+      "ts": "2026-03-23T14:02:21.194498+00:00"
+    },
+    {
+      "phase_id": "foundations",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "completed",
+      "ts": "2026-03-23T14:08:06.063204+00:00",
+      "pair": "test"
+    },
+    {
+      "phase_id": "auth-browser-ux",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "in_progress",
+      "ts": "2026-03-23T14:08:06.064276+00:00"
+    },
+    {
+      "phase_id": "auth-browser-ux",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "completed",
+      "ts": "2026-03-23T14:17:27.098919+00:00",
+      "pair": "test"
+    },
+    {
+      "phase_id": "htmx-ops-ui",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "in_progress",
+      "ts": "2026-03-23T14:17:27.099983+00:00"
+    },
+    {
+      "phase_id": "htmx-ops-ui",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "completed",
+      "ts": "2026-03-23T14:22:00.448866+00:00",
+      "pair": "test"
+    },
+    {
+      "phase_id": "ai-safety-policy",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "in_progress",
+      "ts": "2026-03-23T14:22:00.449837+00:00"
+    },
+    {
+      "phase_id": "ai-safety-policy",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "completed",
+      "ts": "2026-03-23T14:27:32.516837+00:00",
+      "pair": "test"
+    },
+    {
+      "phase_id": "bootstrap-system-state",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "in_progress",
+      "ts": "2026-03-23T14:27:32.517903+00:00"
+    },
+    {
+      "phase_id": "bootstrap-system-state",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "completed",
+      "ts": "2026-03-23T14:39:29.669160+00:00",
+      "pair": "test"
+    },
+    {
+      "phase_id": "docs-env-contract",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "in_progress",
+      "ts": "2026-03-23T14:39:29.670438+00:00"
+    },
+    {
+      "phase_id": "docs-env-contract",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "completed",
+      "ts": "2026-03-23T14:43:13.322503+00:00",
+      "pair": "test"
+    },
+    {
+      "phase_id": "tests-and-regression-proofing",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "in_progress",
+      "ts": "2026-03-23T14:43:13.324016+00:00"
+    },
+    {
+      "phase_id": "tests-and-regression-proofing",
+      "run_id": "run-20260323T135631Z-19059a68",
+      "status": "completed",
+      "ts": "2026-03-23T14:48:30.849656+00:00",
+      "pair": "test"
+    }
+  ]
+}

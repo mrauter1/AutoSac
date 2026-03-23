@@ -5,7 +5,7 @@ import hashlib
 import secrets
 
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import InvalidHashError, VerificationError
 
 from shared.config import Settings
 
@@ -23,7 +23,7 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, password_hash: str) -> bool:
     try:
         return _PASSWORD_HASHER.verify(password_hash, password)
-    except VerifyMismatchError:
+    except (InvalidHashError, VerificationError):
         return False
 
 

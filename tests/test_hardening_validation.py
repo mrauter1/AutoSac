@@ -3,12 +3,53 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
+import importlib
 
 import pytest
 
 from shared.config import Settings
+
+_DOCS_ENV_VARIABLES = (
+    "APP_BASE_URL",
+    "APP_SECRET_KEY",
+    "DATABASE_URL",
+    "UPLOADS_DIR",
+    "TRIAGE_WORKSPACE_DIR",
+    "REPO_MOUNT_DIR",
+    "MANUALS_MOUNT_DIR",
+    "CODEX_BIN",
+    "CODEX_API_KEY",
+    "CODEX_MODEL",
+    "CODEX_TIMEOUT_SECONDS",
+    "WORKER_POLL_SECONDS",
+    "AUTO_SUPPORT_REPLY_MIN_CONFIDENCE",
+    "AUTO_CONFIRM_INTENT_MIN_CONFIDENCE",
+    "MAX_IMAGES_PER_MESSAGE",
+    "MAX_IMAGE_BYTES",
+    "SESSION_DEFAULT_HOURS",
+    "SESSION_REMEMBER_DAYS",
+)
+
+_README_REQUIRED_SNIPPETS = (
+    ".env.example",
+    "python -m alembic -c alembic.ini upgrade head",
+    "python scripts/bootstrap_workspace.py",
+    "python scripts/create_admin.py",
+    "--if-missing",
+    "python scripts/run_web.py --check",
+    "python scripts/run_worker.py --check",
+    "GET /readyz",
+    "pytest",
+    "Slack or email",
+    "OAuth or SSO",
+    "SPA frontend",
+    "worker web search",
+    "non-image attachments",
+    "automated patch generation",
+)
 
 
 def _make_settings(tmp_path: Path) -> Settings:
@@ -152,26 +193,120 @@ def test_healthz_request_is_structured_logged(monkeypatch):
     )
 
 
+def test_verify_password_returns_false_for_malformed_hash():
+    pytest.importorskip("argon2")
+    from shared.security import hash_password, verify_password
+
+    valid_hash = hash_password("correct horse battery staple")
+
+    assert verify_password("correct horse battery staple", valid_hash) is True
+    assert verify_password("wrong-password", valid_hash) is False
+    assert verify_password("any-password", "not-an-argon2-hash") is False
+
+
+def test_create_app_and_template_paths_are_module_relative(monkeypatch, tmp_path):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("sqlalchemy")
+    pytest.importorskip("argon2")
+
+    import app.ui as app_ui
+    import app.main as app_main
+
+    monkeypatch.chdir(tmp_path)
+    app_ui = importlib.reload(app_ui)
+    app_main = importlib.reload(app_main)
+
+    app = app_main.create_app()
+
+    assert app_ui.templates.env.loader.searchpath == [str(Path(app_ui.__file__).resolve().parent / "templates")]
+    assert any(getattr(route, "path", None) == "/static" for route in app.routes)
+
+
+def test_login_template_renders_outside_repo_root(monkeypatch, tmp_path):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("sqlalchemy")
+    pytest.importorskip("argon2")
+    from fastapi.testclient import TestClient
+
+    import app.ui as app_ui
+    import app.routes_auth as routes_auth
+    import app.routes_ops as routes_ops
+    import app.routes_requester as routes_requester
+    import app.main as app_main
+
+    monkeypatch.chdir(tmp_path)
+    app_ui = importlib.reload(app_ui)
+    routes_auth = importlib.reload(routes_auth)
+    importlib.reload(routes_ops)
+    importlib.reload(routes_requester)
+    app_main = importlib.reload(app_main)
+
+    app = app_main.create_app()
+    app.dependency_overrides[routes_auth.get_settings_dependency] = lambda: _make_settings(tmp_path)
+    app.dependency_overrides[routes_auth.db_session_dependency] = lambda: type("FakeDb", (), {"commit": lambda self: None})()
+    app.dependency_overrides[routes_auth.get_optional_auth_session] = lambda: None
+    app.dependency_overrides[routes_auth.get_current_user_optional] = lambda: None
+    monkeypatch.setattr(
+        routes_auth,
+        "issue_login_preauth_session",
+        lambda **_kwargs: type("PreAuth", (), {"csrf_token": "csrf-1"})(),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/login")
+
+    assert response.status_code == 200
+    assert '<form method="post" action="/login"' in response.text
+
+
+def test_run_web_check_works_outside_repo_root_after_bootstrap(tmp_path):
+    env = _script_env(tmp_path)
+
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", str(Path.cwd() / "alembic.ini"), "upgrade", "head"],
+        cwd=Path.cwd(),
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    bootstrap = subprocess.run(
+        [sys.executable, "/workspace/AutoSac/scripts/bootstrap_workspace.py"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert '"bootstrap_version": "stage1-v1"' in bootstrap.stdout
+
+    web = subprocess.run(
+        [sys.executable, "/workspace/AutoSac/scripts/run_web.py", "--check"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert _last_json_line(web.stdout) == {
+        "script": "run_web.py",
+        "status": "ok",
+        "healthz_status": 200,
+        "readyz_status": 200,
+    }
+
+
 def test_env_example_and_readme_capture_acceptance_contract():
     env_source = Path(".env.example").read_text(encoding="utf-8")
     readme_source = Path("README.md").read_text(encoding="utf-8")
 
-    for name in (
-        "APP_BASE_URL",
-        "APP_SECRET_KEY",
-        "DATABASE_URL",
-        "CODEX_API_KEY",
-        "MAX_IMAGE_BYTES",
-        "SESSION_REMEMBER_DAYS",
-    ):
+    for name in _DOCS_ENV_VARIABLES:
         assert f"{name}=" in env_source
 
-    assert ".env.example" in readme_source
-    assert "GET /readyz" in readme_source
-    assert "python scripts/bootstrap_workspace.py" in readme_source
-    assert "python scripts/run_web.py --check" in readme_source
-    assert "python scripts/run_worker.py --check" in readme_source
-    assert "pytest" in readme_source
+    for snippet in _README_REQUIRED_SNIPPETS:
+        assert snippet in readme_source
 
 
 def _script_env(tmp_path: Path) -> dict[str, str]:
@@ -221,6 +356,29 @@ def _run_script(args: list[str], *, env: dict[str, str], check: bool = True) -> 
     )
 
 
+def _run_alembic_upgrade(*, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", str(Path.cwd() / "alembic.ini"), "upgrade", "head"],
+        cwd=Path.cwd(),
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
+def _system_state_rows(db_path: Path) -> dict[str, str]:
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute("SELECT key, value_json FROM system_state ORDER BY key").fetchall()
+    return {str(key): str(value_json) for key, value_json in rows}
+
+
+def _user_rows(db_path: Path) -> list[tuple[str, str, int]]:
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute("SELECT email, role, is_active FROM users ORDER BY email").fetchall()
+    return [(str(email), str(role), int(is_active)) for email, role, is_active in rows]
+
+
 def _last_json_line(output: str) -> dict[str, object]:
     for line in reversed([line.strip() for line in output.splitlines() if line.strip()]):
         try:
@@ -230,11 +388,128 @@ def _last_json_line(output: str) -> dict[str, object]:
     raise AssertionError(f"No JSON line found in output: {output}")
 
 
+def test_bootstrap_workspace_script_seeds_required_system_state_defaults(tmp_path):
+    env = _script_env(tmp_path)
+    db_path = tmp_path / "triage.db"
+
+    _run_alembic_upgrade(env=env)
+    bootstrap = _run_script(["scripts/bootstrap_workspace.py"], env=env)
+
+    assert '"bootstrap_version": "stage1-v1"' in bootstrap.stdout
+    assert _system_state_rows(db_path) == {
+        "bootstrap_version": '{"version": "stage1-v1"}',
+        "worker_heartbeat": '{"status": "unknown"}',
+    }
+
+
+def test_bootstrap_workspace_script_requires_migrations_first(tmp_path):
+    env = _script_env(tmp_path)
+
+    bootstrap = _run_script(["scripts/bootstrap_workspace.py"], env=env, check=False)
+
+    assert bootstrap.returncode != 0
+    assert "system_state" in bootstrap.stderr
+
+
+def test_create_admin_if_missing_is_idempotent(tmp_path):
+    env = _script_env(tmp_path)
+    db_path = tmp_path / "triage.db"
+
+    _run_alembic_upgrade(env=env)
+    _run_script(["scripts/bootstrap_workspace.py"], env=env)
+
+    first = _run_script(
+        [
+            "scripts/create_admin.py",
+            "--email",
+            "Admin@example.com",
+            "--display-name",
+            "Stage One Admin",
+            "--password",
+            "correct horse battery staple",
+            "--if-missing",
+        ],
+        env=env,
+    )
+    second = _run_script(
+        [
+            "scripts/create_admin.py",
+            "--email",
+            "admin@example.com",
+            "--display-name",
+            "Ignored Name",
+            "--password",
+            "another-password",
+            "--if-missing",
+        ],
+        env=env,
+    )
+
+    assert "Created admin user admin@example.com" in first.stdout
+    assert "Admin user already exists: admin@example.com" in second.stdout
+    assert _user_rows(db_path) == [("admin@example.com", "admin", 1)]
+
+
+def test_create_admin_if_missing_rejects_existing_non_admin(tmp_path):
+    env = _script_env(tmp_path)
+
+    _run_alembic_upgrade(env=env)
+    _run_script(["scripts/bootstrap_workspace.py"], env=env)
+    _run_script(
+        [
+            "scripts/create_user.py",
+            "--email",
+            "requester@example.com",
+            "--display-name",
+            "Requester",
+            "--password",
+            "correct horse battery staple",
+            "--role",
+            "requester",
+        ],
+        env=env,
+    )
+
+    create_admin = _run_script(
+        [
+            "scripts/create_admin.py",
+            "--email",
+            "requester@example.com",
+            "--display-name",
+            "Should Not Promote",
+            "--password",
+            "another-password",
+            "--if-missing",
+        ],
+        env=env,
+        check=False,
+    )
+
+    assert create_admin.returncode != 0
+    assert "Existing user is not an admin: requester@example.com" in create_admin.stderr
+
+
 def test_bootstrap_web_and_worker_scripts_validate_end_to_end(tmp_path):
     env = _script_env(tmp_path)
 
+    _run_alembic_upgrade(env=env)
     bootstrap = _run_script(["scripts/bootstrap_workspace.py"], env=env)
     assert '"bootstrap_version": "stage1-v1"' in bootstrap.stdout
+
+    create_admin = _run_script(
+        [
+            "scripts/create_admin.py",
+            "--email",
+            "admin@example.com",
+            "--display-name",
+            "Stage One Admin",
+            "--password",
+            "correct horse battery staple",
+            "--if-missing",
+        ],
+        env=env,
+    )
+    assert "admin@example.com" in create_admin.stdout
 
     web = _run_script(["scripts/run_web.py", "--check"], env=env)
     web_payload = _last_json_line(web.stdout)

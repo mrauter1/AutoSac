@@ -4,7 +4,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from shared.config import Settings
-from shared.models import SessionRecord, User
+from shared.models import PreAuthSessionRecord, SessionRecord, User
 from shared.security import calculate_session_expiry, generate_csrf_token, generate_opaque_token, hash_token, utc_now
 
 
@@ -48,7 +48,66 @@ def get_valid_session_by_token(db: Session, raw_token: str | None) -> SessionRec
     return record
 
 
+def create_preauth_session(
+    db: Session,
+    *,
+    settings: Settings,
+    user_agent: str | None,
+    ip_address: str | None,
+) -> tuple[PreAuthSessionRecord, str]:
+    raw_token = generate_opaque_token()
+    now = utc_now()
+    session_record = PreAuthSessionRecord(
+        token_hash=hash_token(raw_token),
+        csrf_token=generate_csrf_token(),
+        expires_at=calculate_session_expiry(settings, False, now=now),
+        last_seen_at=now,
+        created_at=now,
+        user_agent=user_agent,
+        ip_address=ip_address,
+    )
+    db.add(session_record)
+    return session_record, raw_token
+
+
+def refresh_preauth_session(
+    session_record: PreAuthSessionRecord,
+    *,
+    settings: Settings,
+    user_agent: str | None,
+    ip_address: str | None,
+) -> PreAuthSessionRecord:
+    now = utc_now()
+    session_record.csrf_token = generate_csrf_token()
+    session_record.expires_at = calculate_session_expiry(settings, False, now=now)
+    session_record.last_seen_at = now
+    session_record.user_agent = user_agent
+    session_record.ip_address = ip_address
+    return session_record
+
+
+def get_valid_preauth_session_by_token(db: Session, raw_token: str | None) -> PreAuthSessionRecord | None:
+    if not raw_token:
+        return None
+    token_hash = hash_token(raw_token)
+    now = utc_now()
+    statement = select(PreAuthSessionRecord).where(
+        PreAuthSessionRecord.token_hash == token_hash,
+        PreAuthSessionRecord.expires_at > now,
+    )
+    record = db.execute(statement).scalar_one_or_none()
+    if record is not None:
+        record.last_seen_at = now
+    return record
+
+
 def invalidate_session(db: Session, raw_token: str | None) -> None:
     if not raw_token:
         return
     db.execute(delete(SessionRecord).where(SessionRecord.token_hash == hash_token(raw_token)))
+
+
+def invalidate_preauth_session(db: Session, raw_token: str | None) -> None:
+    if not raw_token:
+        return
+    db.execute(delete(PreAuthSessionRecord).where(PreAuthSessionRecord.token_hash == hash_token(raw_token)))

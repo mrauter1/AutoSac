@@ -1,4 +1,11 @@
-<form method="get" action="{{ filters_action }}" class="panel ops-filters">
+<form
+  method="get"
+  action="{{ filters_action }}"
+  class="panel ops-filters"
+  hx-get="{{ filters_action }}"
+  hx-target="#{{ filters_target_id }}"
+  hx-push-url="true"
+>
   <div class="ops-filters__grid">
     <label class="field">
       <span>Status</span>

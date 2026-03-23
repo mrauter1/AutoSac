@@ -105,6 +105,11 @@ def validate_triage_result(payload: dict[str, object], settings: Settings) -> Tr
         raise TriageResultError("internal_note_markdown must not be blank")
 
     action = result.recommended_next_action
+    if action != "ask_clarification" and result.needs_clarification:
+        raise TriageResultError(f"{action} requires needs_clarification=false")
+    if action != "ask_clarification" and result.clarifying_questions:
+        raise TriageResultError(f"{action} requires clarifying_questions=[]")
+
     if action == "ask_clarification":
         if not result.needs_clarification:
             raise TriageResultError("ask_clarification requires needs_clarification=true")
@@ -119,6 +124,8 @@ def validate_triage_result(payload: dict[str, object], settings: Settings) -> Tr
             raise TriageResultError("auto_public_reply requires a non-empty public reply")
         if result.confidence < settings.auto_support_reply_min_confidence:
             raise TriageResultError("auto_public_reply confidence is below the configured threshold")
+        if result.ticket_class not in {"support", "access_config"}:
+            raise TriageResultError("auto_public_reply is allowed only for support and access_config tickets")
     elif action == "auto_confirm_and_route":
         if not result.auto_public_reply_allowed:
             raise TriageResultError("auto_confirm_and_route requires auto_public_reply_allowed=true")
@@ -136,8 +143,6 @@ def validate_triage_result(payload: dict[str, object], settings: Settings) -> Tr
     else:
         raise TriageResultError(f"Unsupported recommended_next_action: {action}")
 
-    if result.ticket_class == "unknown" and action == "auto_public_reply":
-        raise TriageResultError("unknown tickets cannot use auto_public_reply")
     return result
 
 

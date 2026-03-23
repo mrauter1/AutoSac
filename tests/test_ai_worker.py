@@ -41,7 +41,7 @@ def _load_worker_symbols():
     pytest.importorskip("argon2")
     pytest.importorskip("pydantic")
 
-    from worker.main import heartbeat_loop
+    from worker.main import heartbeat_loop, main as worker_main
     from worker.codex_runner import CodexRunError, build_codex_command, build_triage_prompt, prepare_codex_run
     from worker.triage import (
         _apply_success_result,
@@ -66,6 +66,7 @@ def _load_worker_symbols():
         "prepare_codex_run": prepare_codex_run,
         "process_ai_run": process_ai_run,
         "validate_triage_result": validate_triage_result,
+        "worker_main": worker_main,
     }
 
 
@@ -169,6 +170,262 @@ def test_validate_triage_result_enforces_auto_reply_threshold(tmp_path):
         )
 
 
+@pytest.mark.parametrize("ticket_class", ["support", "access_config"])
+def test_validate_triage_result_allows_auto_public_reply_only_for_safe_classes(ticket_class, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    result = symbols["validate_triage_result"](_valid_payload(ticket_class=ticket_class), settings)
+
+    assert result.ticket_class == ticket_class
+
+
+@pytest.mark.parametrize("ticket_class", ["data_ops", "bug", "feature", "unknown"])
+def test_validate_triage_result_rejects_auto_public_reply_for_unsafe_classes(ticket_class, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    with pytest.raises(RuntimeError, match="allowed only for support and access_config"):
+        symbols["validate_triage_result"](_valid_payload(ticket_class=ticket_class), settings)
+
+
+def test_validate_triage_result_allows_ask_clarification_with_reply(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    result = symbols["validate_triage_result"](
+        _valid_payload(
+            recommended_next_action="ask_clarification",
+            needs_clarification=True,
+            clarifying_questions=["Which report should be enabled?"],
+            auto_public_reply_allowed=False,
+            evidence_found=False,
+            public_reply_markdown="Please confirm which report needs access so we can verify the correct steps.",
+        ),
+        settings,
+    )
+
+    assert result.recommended_next_action == "ask_clarification"
+    assert result.needs_clarification is True
+
+
+def test_validate_triage_result_allows_auto_confirm_and_route_when_threshold_met(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    result = symbols["validate_triage_result"](
+        _valid_payload(
+            recommended_next_action="auto_confirm_and_route",
+            confidence=0.90,
+            public_reply_markdown="We confirmed the request and routed it to Dev/TI for follow-up.",
+        ),
+        settings,
+    )
+
+    assert result.recommended_next_action == "auto_confirm_and_route"
+
+
+def test_validate_triage_result_allows_draft_public_reply_with_manual_send_only(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    result = symbols["validate_triage_result"](
+        _valid_payload(
+            recommended_next_action="draft_public_reply",
+            auto_public_reply_allowed=False,
+            public_reply_markdown="Draft reply for Dev/TI review before sending.",
+        ),
+        settings,
+    )
+
+    assert result.recommended_next_action == "draft_public_reply"
+    assert result.auto_public_reply_allowed is False
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {
+                "recommended_next_action": "ask_clarification",
+                "needs_clarification": False,
+                "public_reply_markdown": "Please confirm the report name.",
+            },
+            "ask_clarification requires needs_clarification=true",
+        ),
+        (
+            {
+                "recommended_next_action": "ask_clarification",
+                "needs_clarification": True,
+                "public_reply_markdown": "   ",
+            },
+            "ask_clarification requires a non-empty public reply",
+        ),
+        (
+            {
+                "recommended_next_action": "auto_public_reply",
+                "auto_public_reply_allowed": False,
+            },
+            "auto_public_reply requires auto_public_reply_allowed=true",
+        ),
+        (
+            {
+                "recommended_next_action": "auto_public_reply",
+                "evidence_found": False,
+            },
+            "auto_public_reply requires evidence_found=true",
+        ),
+        (
+            {
+                "recommended_next_action": "auto_public_reply",
+                "public_reply_markdown": " ",
+            },
+            "auto_public_reply requires a non-empty public reply",
+        ),
+        (
+            {
+                "recommended_next_action": "auto_public_reply",
+                "needs_clarification": True,
+                "clarifying_questions": ["Which report is missing?"],
+            },
+            "auto_public_reply requires needs_clarification=false",
+        ),
+        (
+            {
+                "recommended_next_action": "auto_confirm_and_route",
+                "needs_clarification": True,
+                "clarifying_questions": ["Which environment is affected?"],
+            },
+            "auto_confirm_and_route requires needs_clarification=false",
+        ),
+        (
+            {
+                "recommended_next_action": "draft_public_reply",
+                "needs_clarification": True,
+                "clarifying_questions": ["Which page did you open?"],
+                "auto_public_reply_allowed": False,
+            },
+            "draft_public_reply requires needs_clarification=false",
+        ),
+        (
+            {
+                "recommended_next_action": "route_dev_ti",
+                "needs_clarification": True,
+                "clarifying_questions": ["Can you retry now?"],
+                "auto_public_reply_allowed": False,
+                "public_reply_markdown": "",
+            },
+            "route_dev_ti requires needs_clarification=false",
+        ),
+        (
+            {
+                "recommended_next_action": "auto_confirm_and_route",
+                "clarifying_questions": ["Which team owns this?"],
+            },
+            "auto_confirm_and_route requires clarifying_questions=\\[\\]",
+        ),
+        (
+            {
+                "recommended_next_action": "draft_public_reply",
+                "clarifying_questions": ["Which page failed?"],
+                "auto_public_reply_allowed": False,
+            },
+            "draft_public_reply requires clarifying_questions=\\[\\]",
+        ),
+        (
+            {
+                "recommended_next_action": "route_dev_ti",
+                "clarifying_questions": ["Which dataset is wrong?"],
+                "auto_public_reply_allowed": False,
+                "public_reply_markdown": "",
+            },
+            "route_dev_ti requires clarifying_questions=\\[\\]",
+        ),
+        (
+            {
+                "recommended_next_action": "auto_confirm_and_route",
+                "auto_public_reply_allowed": False,
+            },
+            "auto_confirm_and_route requires auto_public_reply_allowed=true",
+        ),
+        (
+            {
+                "recommended_next_action": "auto_confirm_and_route",
+                "public_reply_markdown": " ",
+            },
+            "auto_confirm_and_route requires a non-empty public reply",
+        ),
+        (
+            {
+                "recommended_next_action": "auto_confirm_and_route",
+                "confidence": 0.89,
+            },
+            "auto_confirm_and_route confidence is below the configured threshold",
+        ),
+        (
+            {
+                "recommended_next_action": "draft_public_reply",
+                "auto_public_reply_allowed": True,
+            },
+            "draft_public_reply requires auto_public_reply_allowed=false",
+        ),
+        (
+            {
+                "recommended_next_action": "draft_public_reply",
+                "auto_public_reply_allowed": False,
+                "public_reply_markdown": " ",
+            },
+            "draft_public_reply requires a non-empty public reply",
+        ),
+    ],
+)
+def test_validate_triage_result_rejects_invalid_action_matrix(overrides, message, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    with pytest.raises(RuntimeError, match=message):
+        symbols["validate_triage_result"](_valid_payload(**overrides), settings)
+
+
+def test_validate_triage_result_allows_route_dev_ti_without_public_reply(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    result = symbols["validate_triage_result"](
+        _valid_payload(
+            recommended_next_action="route_dev_ti",
+            auto_public_reply_allowed=False,
+            public_reply_markdown="",
+            evidence_found=False,
+        ),
+        settings,
+    )
+
+    assert result.recommended_next_action == "route_dev_ti"
+    assert result.public_reply_markdown == ""
+
+
+def test_validate_triage_result_rejects_more_than_three_clarifying_questions(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    with pytest.raises(RuntimeError, match="at most 3 items"):
+        symbols["validate_triage_result"](
+            _valid_payload(
+                recommended_next_action="ask_clarification",
+                needs_clarification=True,
+                clarifying_questions=[
+                    "Which report is affected?",
+                    "Which environment are you using?",
+                    "What exact error do you see?",
+                    "When did this start?",
+                ],
+                public_reply_markdown="Please answer the questions so we can confirm the issue.",
+            ),
+            settings,
+        )
+
+
 def test_prepare_codex_run_writes_prompt_and_schema(tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
@@ -228,7 +485,45 @@ def test_build_codex_command_matches_required_contract(tmp_path):
     assert 'web_search="disabled"' in command
     assert "--model" in command
     assert "--image" in command
+    assert command[-1] == "-"
+    assert prepared.prompt not in command
     assert env["CODEX_API_KEY"] == "test-key"
+
+
+def test_execute_codex_run_uses_stdin_instead_of_prompt_argv(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+    from worker.codex_runner import PreparedCodexRun, execute_codex_run
+
+    settings = _make_settings(tmp_path)
+    final_output_path = tmp_path / "final.json"
+    prepared = PreparedCodexRun(
+        run_dir=tmp_path,
+        prompt="Prompt from prompt.txt",
+        prompt_path=tmp_path / "prompt.txt",
+        schema_path=tmp_path / "schema.json",
+        final_output_path=final_output_path,
+        stdout_jsonl_path=tmp_path / "stdout.jsonl",
+        stderr_path=tmp_path / "stderr.txt",
+        image_paths=[],
+    )
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        final_output_path.write_text('{"ok": true}', encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout='{"event":"done"}\n', stderr="")
+
+    monkeypatch.setattr("worker.codex_runner.subprocess.run", fake_run)
+
+    artifacts = execute_codex_run(settings, prepared=prepared)
+
+    assert observed["command"][-1] == "-"
+    assert prepared.prompt not in observed["command"]
+    assert observed["kwargs"]["input"] == prepared.prompt
+    assert observed["kwargs"]["cwd"] == settings.triage_workspace_dir
+    assert observed["kwargs"]["text"] is True
+    assert artifacts.output_payload == {"ok": True}
 
 
 def test_prepare_run_skips_when_last_processed_hash_matches(monkeypatch, tmp_path):
@@ -508,6 +803,26 @@ def test_process_ai_run_marks_failed_when_publication_step_raises(monkeypatch, t
     assert observed["error_text"] == "Unexpected worker error: publish failed"
 
 
+def test_effective_next_action_preserves_two_round_clarification_override(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(clarification_rounds=2)
+
+    result = symbols["validate_triage_result"](
+        _valid_payload(
+            recommended_next_action="ask_clarification",
+            needs_clarification=True,
+            clarifying_questions=["Which report should be enabled?"],
+            public_reply_markdown="Please confirm which report needs access so we can verify the right steps.",
+        ),
+        settings,
+    )
+
+    from worker.triage import _effective_next_action
+
+    assert _effective_next_action(ticket, result) == "route_dev_ti"
+
+
 def test_process_ai_run_marks_failed_when_codex_errors(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
@@ -595,3 +910,50 @@ def test_heartbeat_loop_emits_while_stop_event_controls_exit(monkeypatch, tmp_pa
     symbols["heartbeat_loop"](settings, stop_event=stop_event, interval_seconds=0)
 
     assert observed["heartbeats"] == 1
+
+
+def test_worker_main_seeds_system_state_before_heartbeat_and_poll_loop(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    events: list[str] = []
+    fake_db = object()
+
+    @contextmanager
+    def fake_session_scope(resolved_settings):
+        assert resolved_settings == settings
+        events.append("session_open")
+        yield fake_db
+        events.append("session_close")
+
+    def fake_ensure_system_state_defaults(db, bootstrap_version):
+        assert db is fake_db
+        assert bootstrap_version == "stage1-v1"
+        events.append("seed_defaults")
+
+    def fake_start_heartbeat_thread(resolved_settings):
+        assert resolved_settings == settings
+        events.append("start_heartbeat")
+        return object()
+
+    def fake_claim_oldest_pending_run(db):
+        assert db is fake_db
+        events.append("claim_run")
+        raise KeyboardInterrupt("stop after first poll attempt")
+
+    monkeypatch.setattr("worker.main.get_settings", lambda: settings)
+    monkeypatch.setattr("worker.main.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.main.ensure_system_state_defaults", fake_ensure_system_state_defaults)
+    monkeypatch.setattr("worker.main.start_heartbeat_thread", fake_start_heartbeat_thread)
+    monkeypatch.setattr("worker.main.claim_oldest_pending_run", fake_claim_oldest_pending_run)
+    monkeypatch.setattr("worker.main.log_worker_event", lambda event, **payload: events.append(f"log:{event}"))
+    monkeypatch.setattr(
+        "worker.main.process_ai_run",
+        lambda *_args, **_kwargs: pytest.fail("process_ai_run should not run when no run was claimed"),
+    )
+    monkeypatch.setattr("worker.main.time.sleep", lambda _seconds: pytest.fail("poll loop should stop before sleeping"))
+
+    with pytest.raises(KeyboardInterrupt, match="stop after first poll attempt"):
+        symbols["worker_main"]()
+
+    assert events.index("seed_defaults") < events.index("start_heartbeat")
+    assert events.index("seed_defaults") < events.index("claim_run")

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
 import time
 
 from fastapi import FastAPI
 from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.auth import BrowserRedirectRequired
 from app.routes_auth import router as auth_router
 from app.routes_ops import router as ops_router
 from app.routes_requester import router as requester_router
@@ -15,14 +17,21 @@ from shared.db import ping_database
 from shared.logging import log_web_event
 from shared.workspace import verify_workspace_contract_paths
 
+APP_DIR = Path(__file__).resolve().parent
+STATIC_DIR = APP_DIR / "static"
+
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Stage 1 AI Triage MVP")
-    app.mount("/static", StaticFiles(directory="app/static"), name="static")
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     app.include_router(auth_router)
     app.include_router(requester_router)
     app.include_router(ops_router)
+
+    @app.exception_handler(BrowserRedirectRequired)
+    async def browser_redirect_handler(_: Request, exc: BrowserRedirectRequired):
+        return RedirectResponse(exc.location, status_code=303)
 
     @app.middleware("http")
     async def structured_request_logging(request: Request, call_next):

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 
 from fastapi.templating import Jinja2Templates
 
 from shared.models import SessionRecord, User
 from shared.permissions import is_ops_user
 
-templates = Jinja2Templates(directory="app/templates")
+APP_DIR = Path(__file__).resolve().parent
+TEMPLATES_DIR = APP_DIR / "templates"
+
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 REQUESTER_STATUS_LABELS = {
     "new": "Reviewing",

@@ -17,7 +17,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("CREATE SEQUENCE ticket_reference_num_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1")
+    dialect_name = op.get_bind().dialect.name
+    is_sqlite = dialect_name == "sqlite"
+    json_type = sa.JSON() if is_sqlite else postgresql.JSONB(astext_type=sa.Text())
+
+    if not is_sqlite:
+        op.execute("CREATE SEQUENCE ticket_reference_num_seq START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1")
 
     op.create_table(
         "users",
@@ -38,7 +43,7 @@ def upgrade() -> None:
     op.create_table(
         "system_state",
         sa.Column("key", sa.Text(), nullable=False),
-        sa.Column("value_json", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("value_json", json_type, nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.PrimaryKeyConstraint("key", name=op.f("pk_system_state")),
     )
@@ -226,6 +231,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    dialect_name = op.get_bind().dialect.name
+
     op.drop_index("ix_ai_drafts_ai_run_id", table_name="ai_drafts")
     op.execute("DROP INDEX ix_ai_drafts_ticket_id_status_created_at_desc")
     op.drop_table("ai_drafts")
@@ -261,4 +268,5 @@ def downgrade() -> None:
     op.drop_table("system_state")
     op.drop_table("users")
 
-    op.execute("DROP SEQUENCE ticket_reference_num_seq")
+    if dialect_name != "sqlite":
+        op.execute("DROP SEQUENCE ticket_reference_num_seq")

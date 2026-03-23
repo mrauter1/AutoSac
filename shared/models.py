@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     Numeric,
     Sequence,
     Text,
@@ -75,6 +76,19 @@ class SessionRecord(Base):
     token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     csrf_token: Mapped[str] = mapped_column(Text, nullable=False)
     remember_me: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class PreAuthSessionRecord(Base):
+    __tablename__ = "preauth_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    csrf_token: Mapped[str] = mapped_column(Text, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
@@ -252,5 +266,5 @@ class SystemState(Base):
     __tablename__ = "system_state"
 
     key: Mapped[str] = mapped_column(Text, primary_key=True)
-    value_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    value_json: Mapped[dict] = mapped_column(JSON().with_variant(JSONB, "postgresql"), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now, server_default=text("now()"))

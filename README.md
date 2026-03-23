@@ -1,65 +1,161 @@
-# Auto SAC: Automated Support Triage Engine
+# AutoSac Stage 1
 
-Auto SAC is a production-ready, open-source helpdesk orchestration engine. It moves beyond "chat-wrapper" architectures by implementing strict state management, cryptographic input validation, and agentic workflows to automate ticket routing and resolution.
+AutoSac Stage 1 is a server-rendered support triage application. Requesters can open tickets with image attachments, ops users can review and respond through the browser, and a background worker can classify tickets and draft safe replies within a tightly scoped read-only workspace.
 
----
+This repository ships the Stage 1 contract only:
+- FastAPI web app with Jinja templates and HTMX-enhanced ops views
+- PostgreSQL-first schema managed by Alembic, with SQLite used in smoke tests
+- Background worker that calls the Codex CLI against a read-only workspace mount
+- Browser login, CSRF protection, requester and ops role separation, and attachment validation
 
-### Key Technical Differentiators
+Stage 1 does not include Slack or email delivery, OAuth or SSO, a SPA frontend, OCR, non-image attachments, worker web search, repo writes by the Codex worker, or automated patch generation.
 
-#### 1. Deterministic State Hashing (Idempotency)
-Instead of re-running the agent on every webhook update, Auto SAC computes a SHA-256 fingerprint of the ticket’s public state (messages, attachments, and status).
-* **Cost Efficiency:** The agent only executes when the ticket fingerprint changes.
-* **Race Condition Protection:** If a ticket status or message changes while an agent is mid-execution, the system detects the fingerprint mismatch upon completion. It automatically invalidates the stale output and queues a fresh run, preventing the agent from replying to outdated context.
+## Stack
 
-#### 2. Pydantic-Backed Output Guardrails
-The agent is constrained by a strict Pydantic model (`TriageResult`).
-* **Schema Enforcement:** The agent cannot produce arbitrary text; it must yield valid, structured JSON.
-* **Business Logic Validation:** We use `model_validator(mode="after")` to enforce cross-field dependencies. For example, if the agent selects `ask_clarification` but fails to provide a question, the application layer catches the logical contradiction before it reaches the end-user, triggering a `TriageValidationError` and routing the ticket to a human queue instead.
+- Python 3.11+
+- FastAPI and Starlette
+- SQLAlchemy 2.x and Alembic
+- Jinja2 templates plus vendored HTMX
+- argon2-cffi password hashing
+- Codex CLI for ticket triage runs
 
-#### 3. Separation of Concerns (Dual-Channel Output)
-The agent is architected to produce two distinct output channels:
-* **Public Channel:** Drafts or automatic responses optimized for the end-user.
-* **Internal Channel:** A structured diagnostic summary, relevant file paths from the repository, and internal reasoning.
-This ensures the agent never leaks private diagnostics or internal notes to the requester.
+## Environment
 
-#### 4. Human-in-the-Loop Fallback
-The system uses tiered confidence thresholds (configurable via `Settings`).
-* **High Confidence:** Triggers `auto_public_reply` for immediate resolution.
-* **Low Confidence / Ambiguity:** Automatically moves the ticket to a `pending_approval` state for human review.
-* **Drafting Engine:** Humans act as the final judge, using an "Approve/Reject" interface for AI-generated drafts.
+Copy [`.env.example`](/workspace/AutoSac/.env.example) and fill in every required value before running the app.
 
-#### 5. Sandboxed Context Loading
-The worker node uses strict boundary enforcement. It maps local mounts for `app/` and `manuals/` into the agent's context.
-* **Read-only Constraints:** The agent is given a read-only view of the codebase, preventing unauthorized code modification.
-* **Artifact Attribution:** Every AI-generated message is cryptographically linked to the `AIRun` ID that produced it, ensuring full auditability of the agent's decision-making process.
+Required variables:
+- `APP_BASE_URL`
+- `APP_SECRET_KEY`
+- `DATABASE_URL`
+- `UPLOADS_DIR`
+- `TRIAGE_WORKSPACE_DIR`
+- `REPO_MOUNT_DIR`
+- `MANUALS_MOUNT_DIR`
+- `CODEX_BIN`
+- `CODEX_API_KEY`
+- `CODEX_MODEL`
+- `CODEX_TIMEOUT_SECONDS`
+- `WORKER_POLL_SECONDS`
+- `AUTO_SUPPORT_REPLY_MIN_CONFIDENCE`
+- `AUTO_CONFIRM_INTENT_MIN_CONFIDENCE`
+- `MAX_IMAGES_PER_MESSAGE`
+- `MAX_IMAGE_BYTES`
+- `SESSION_DEFAULT_HOURS`
+- `SESSION_REMEMBER_DAYS`
 
----
+Notes:
+- `CODEX_MODEL` may be left blank to use the Codex CLI default model selection.
+- `REPO_MOUNT_DIR` and `MANUALS_MOUNT_DIR` are mounted into the worker workspace for read-only analysis; Stage 1 instructions explicitly forbid the worker from editing those trees.
+- `TRIAGE_WORKSPACE_DIR` is where bootstrap creates `AGENTS.md`, the Stage 1 skill file, the `runs/` directory, and the workspace git repository used by Codex runs.
 
-### Tech Stack
-* **Runtime:** Python 3.11+, FastAPI (Async/Await)
-* **Storage:** PostgreSQL (JSONB support for state metadata)
-* **ORM:** SQLAlchemy 2.0 (Constraint-based enum validation)
-* **Orchestration:** Decoupled background workers with dedicated heartbeat monitoring
-* **Frontend:** Server-side rendered Jinja2 + HTMX (zero-JS overhead)
+## Bootstrap Sequence
 
----
+The bootstrap path is migration-first and deterministic. Run these commands in order:
 
-### Getting Started
+```bash
+python -m alembic -c alembic.ini upgrade head
+python scripts/bootstrap_workspace.py
+python scripts/create_admin.py \
+  --email admin@example.com \
+  --display-name "Stage One Admin" \
+  --password "change-me-now" \
+  --if-missing
+```
 
-1. **Bootstrap Workspace:**
-   Maps your repo and manuals for the agent.
-   ```bash
-   python scripts/bootstrap_workspace.py
-   ```
+What each step does:
+- `python -m alembic -c alembic.ini upgrade head` creates the schema, including the auth and preauth session tables.
+- `python scripts/bootstrap_workspace.py` creates the uploads directory, verifies the repo/manual mounts, bootstraps the triage workspace files, and seeds `system_state.bootstrap_version` plus `system_state.worker_heartbeat`.
+- `python scripts/create_admin.py --if-missing ...` creates the initial admin user exactly once. If the normalized email already belongs to an admin, it exits successfully without changing the account. If that email belongs to a non-admin user, it fails closed.
 
-2. **Run Services:**
-   ```bash
-   # Start the web interface
-   python scripts/run_web.py
+`python scripts/bootstrap_workspace.py` requires migrations to have run first. It is not a schema creation shortcut.
 
-   # Start the worker (processes the pending queue)
-   python scripts/run_worker.py
-   ```
+## Running The App
 
-3. **Verify:**
-   Use the `/readyz` endpoint to confirm database connectivity, workspace availability, and agent contract compliance.
+Start the web app:
+
+```bash
+python scripts/run_web.py
+```
+
+Start the worker in a separate shell:
+
+```bash
+python scripts/run_worker.py
+```
+
+Browser entry points:
+- `/login`
+- `/app` for requester views
+- `/ops` and `/ops/board` for ops views
+
+Health endpoints:
+- `GET /healthz` returns `{"status": "ok"}` when the process is up.
+- `GET /readyz` returns `{"status": "ready"}` only when settings validation, database connectivity, and workspace contract checks all pass.
+
+## Smoke Checks
+
+The repository includes deterministic script-level smoke checks:
+
+```bash
+python scripts/run_web.py --check
+python scripts/run_worker.py --check
+```
+
+Expected behavior:
+- `python scripts/run_web.py --check` instantiates the app and verifies `GET /healthz` and `GET /readyz`.
+- `python scripts/run_worker.py --check` validates the configured database and the required workspace contract paths.
+- Both checks fail before the workspace bootstrap is complete, and the web check also fails if readiness prerequisites are missing.
+
+## Workspace Contract
+
+`python scripts/bootstrap_workspace.py` creates a dedicated Stage 1 triage workspace under `TRIAGE_WORKSPACE_DIR` with:
+- `AGENTS.md`
+- `.agents/skills/stage1-triage/SKILL.md`
+- `runs/`
+- a git repository initialized for the workspace itself
+
+The worker uses that workspace to run Codex with:
+- read-only sandboxing
+- web search disabled
+- the local repo and manuals mounted as evidence sources
+- prompt and result artifacts persisted per run, including `prompt.txt` and `final.json`
+
+Stage 1 worker boundaries remain intentionally narrow:
+- no repository writes
+- no browsing the public web
+- no OCR
+- no non-image attachments
+- no patch generation
+
+## Tests
+
+Run the full test suite with:
+
+```bash
+pytest
+```
+
+Targeted validation during setup work is usually:
+
+```bash
+pytest tests/test_hardening_validation.py -q
+pytest tests/test_auth_requester.py -q
+pytest tests/test_ops_workflow.py -q
+pytest tests/test_ai_worker.py -q
+```
+
+The hardening/validation coverage includes:
+- env and README contract checks
+- migration-first bootstrap enforcement
+- idempotent admin bootstrap
+- web and worker smoke checks
+- readiness behavior
+- system-state default seeding
+
+## Stage 1 Boundaries
+
+Keep the repository expectations aligned with the shipped implementation:
+- Stage 1 is browser-based and server-rendered; there is no SPA or session middleware auth layer.
+- Ops list and board filtering use HTMX fragments, but ticket read tracking only advances on detail views and existing state-changing actions.
+- The Codex worker may inspect `app/` and `manuals/` through the mounted workspace, but it is repo-aware and read-only by contract.
+- Automatic public replies are restricted by the worker validation rules; unsupported or unsafe cases fall back to clarification, draft, or routing flows instead of publishing.

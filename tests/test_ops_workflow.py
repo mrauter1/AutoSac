@@ -392,6 +392,26 @@ class _RouteDb:
         self.commit_calls += 1
 
 
+def _empty_ops_filter_context():
+    return {
+        "rows": [],
+        "grouped_rows": {key: [] for key in ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")},
+        "filters": {
+            "status": "",
+            "ticket_class": "",
+            "assigned_to": "",
+            "urgent": False,
+            "unassigned_only": False,
+            "created_by_me": False,
+            "needs_approval": False,
+            "updated_since_viewed": False,
+        },
+        "ops_users": [],
+        "status_options": [],
+        "class_options": [],
+    }
+
+
 def test_requester_cannot_access_ops_routes():
     stack = _load_web_stack()
     app = stack["create_app"]()
@@ -399,8 +419,8 @@ def test_requester_cannot_access_ops_routes():
     requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester", is_active=True)
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
-    app.dependency_overrides[stack["auth"].get_current_user] = lambda: requester
-    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: SimpleNamespace(csrf_token="csrf")
+    app.dependency_overrides[stack["auth"].require_browser_user] = lambda: requester
+    app.dependency_overrides[stack["routes_ops"].get_required_browser_auth_session] = lambda: SimpleNamespace(csrf_token="csrf")
 
     with stack["TestClient"](app) as client:
         response = client.get("/ops")
@@ -415,8 +435,8 @@ def test_requester_cannot_access_ops_board():
     requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester", is_active=True)
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
-    app.dependency_overrides[stack["auth"].get_current_user] = lambda: requester
-    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: SimpleNamespace(csrf_token="csrf")
+    app.dependency_overrides[stack["auth"].require_browser_user] = lambda: requester
+    app.dependency_overrides[stack["routes_ops"].get_required_browser_auth_session] = lambda: SimpleNamespace(csrf_token="csrf")
 
     with stack["TestClient"](app) as client:
         response = client.get("/ops/board")
@@ -431,13 +451,27 @@ def test_requester_cannot_access_ops_ticket_detail():
     requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester", is_active=True)
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
-    app.dependency_overrides[stack["auth"].get_current_user] = lambda: requester
-    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: SimpleNamespace(csrf_token="csrf")
+    app.dependency_overrides[stack["auth"].require_browser_user] = lambda: requester
+    app.dependency_overrides[stack["routes_ops"].get_required_browser_auth_session] = lambda: SimpleNamespace(csrf_token="csrf")
 
     with stack["TestClient"](app) as client:
         response = client.get("/ops/tickets/T-000999")
 
     assert response.status_code == 403
+
+
+def test_unauthenticated_browser_ops_route_redirects_to_login_with_safe_next():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops/board?status=new", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login?next=%2Fops%2Fboard%3Fstatus%3Dnew"
 
 
 def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):
@@ -451,23 +485,7 @@ def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):
     monkeypatch.setattr(
         stack["routes_ops"],
         "_ops_filter_context",
-        lambda *args, **kwargs: {
-            "rows": [],
-            "grouped_rows": {key: [] for key in ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")},
-            "filters": {
-                "status": "",
-                "ticket_class": "",
-                "assigned_to": "",
-                "urgent": False,
-                "unassigned_only": False,
-                "created_by_me": False,
-                "needs_approval": False,
-                "updated_since_viewed": False,
-            },
-            "ops_users": [],
-            "status_options": [],
-            "class_options": [],
-        },
+        lambda *args, **kwargs: _empty_ops_filter_context(),
     )
     monkeypatch.setattr(
         stack["routes_ops"],
@@ -476,8 +494,8 @@ def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):
     )
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
-    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
-    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].require_browser_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_browser_auth_session] = lambda: auth_session
 
     with stack["TestClient"](app) as client:
         response = client.get("/ops")
@@ -498,23 +516,7 @@ def test_ops_board_route_does_not_mark_ticket_as_read(monkeypatch):
     monkeypatch.setattr(
         stack["routes_ops"],
         "_ops_filter_context",
-        lambda *args, **kwargs: {
-            "rows": [],
-            "grouped_rows": {key: [] for key in ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")},
-            "filters": {
-                "status": "",
-                "ticket_class": "",
-                "assigned_to": "",
-                "urgent": False,
-                "unassigned_only": False,
-                "created_by_me": False,
-                "needs_approval": False,
-                "updated_since_viewed": False,
-            },
-            "ops_users": [],
-            "status_options": [],
-            "class_options": [],
-        },
+        lambda *args, **kwargs: _empty_ops_filter_context(),
     )
     monkeypatch.setattr(
         stack["routes_ops"],
@@ -523,8 +525,8 @@ def test_ops_board_route_does_not_mark_ticket_as_read(monkeypatch):
     )
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
-    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
-    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].require_browser_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_browser_auth_session] = lambda: auth_session
 
     with stack["TestClient"](app) as client:
         response = client.get("/ops/board")
@@ -559,8 +561,8 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
     )
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
-    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
-    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].require_browser_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_browser_auth_session] = lambda: auth_session
 
     with stack["TestClient"](app) as client:
         response = client.get(f"/ops/tickets/{ticket.reference}")
@@ -570,8 +572,115 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
     assert db.commit_calls == 1
 
 
+def test_ops_list_route_returns_full_template_for_normal_get(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    monkeypatch.setattr(stack["routes_ops"], "_ops_filter_context", lambda *args, **kwargs: _empty_ops_filter_context())
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_browser_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_browser_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops")
+
+    assert response.status_code == 200
+    assert "<!doctype html>" in response.text
+    assert 'src="/static/vendor/htmx.min.js"' in response.text
+    assert 'method="get"' in response.text
+    assert 'action="/ops"' in response.text
+    assert 'hx-get="/ops"' in response.text
+    assert 'hx-target="#ops-ticket-rows"' in response.text
+    assert 'hx-push-url="true"' in response.text
+    assert 'id="ops-ticket-rows"' in response.text
+    assert "Ticket queue" in response.text
+
+
+def test_ops_list_route_returns_rows_fragment_for_hx_request(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    monkeypatch.setattr(stack["routes_ops"], "_ops_filter_context", lambda *args, **kwargs: _empty_ops_filter_context())
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_browser_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_browser_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops?status=new", headers={"HX-Request": "true"})
+
+    assert response.status_code == 200
+    assert "<!doctype html>" not in response.text
+    assert "Ticket queue" not in response.text
+    assert "Apply filters" not in response.text
+    assert 'hx-get="/ops"' not in response.text
+    assert 'id="ops-ticket-rows"' not in response.text
+    assert "No matching tickets" in response.text
+
+
+def test_ops_board_route_returns_full_template_for_normal_get(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    monkeypatch.setattr(stack["routes_ops"], "_ops_filter_context", lambda *args, **kwargs: _empty_ops_filter_context())
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_browser_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_browser_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops/board")
+
+    assert response.status_code == 200
+    assert "<!doctype html>" in response.text
+    assert 'src="/static/vendor/htmx.min.js"' in response.text
+    assert 'method="get"' in response.text
+    assert 'action="/ops/board"' in response.text
+    assert 'hx-get="/ops/board"' in response.text
+    assert 'hx-target="#ops-board-columns"' in response.text
+    assert 'hx-push-url="true"' in response.text
+    assert 'id="ops-board-columns"' in response.text
+    assert "Ops board" in response.text
+
+
+def test_ops_board_route_returns_columns_fragment_for_hx_request(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    monkeypatch.setattr(stack["routes_ops"], "_ops_filter_context", lambda *args, **kwargs: _empty_ops_filter_context())
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_browser_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_browser_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops/board?status=new", headers={"HX-Request": "true"})
+
+    assert response.status_code == 200
+    assert "<!doctype html>" not in response.text
+    assert "Ops board" not in response.text
+    assert "Apply filters" not in response.text
+    assert 'hx-get="/ops/board"' not in response.text
+    assert 'id="ops-board-columns"' not in response.text
+    assert "No tickets" in response.text
+
+
 def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate():
     source = Path("app/routes_ops.py").read_text(encoding="utf-8")
+    base_template = Path("app/templates/base.html").read_text(encoding="utf-8")
     filters_template = Path("app/templates/ops_filters.html").read_text(encoding="utf-8")
     detail_template = Path("app/templates/ops_ticket_detail.html").read_text(encoding="utf-8")
     board_template = Path("app/templates/ops_board_columns.html").read_text(encoding="utf-8")
@@ -586,6 +695,10 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert "add_ops_internal_note" in source
     assert "assign_ticket_for_ops" in source
     assert "set_ticket_status_for_ops" in source
+    assert "/static/vendor/htmx.min.js" in base_template
+    assert "hx-get" in filters_template
+    assert "hx-target" in filters_template
+    assert 'hx-push-url="true"' in filters_template
     assert "Status" in filters_template
     assert "Class" in filters_template
     assert "Assigned to" in filters_template
@@ -599,5 +712,7 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert "AI analysis" in detail_template
     assert "Relevant repo/docs paths" in detail_template
     assert "Pending AI draft" in detail_template
+    assert 'id="ops-ticket-rows"' in list_template
     assert "Ticket queue" in list_template
+    assert 'id="ops-board-columns"' in Path("app/templates/ops_board.html").read_text(encoding="utf-8")
     assert "Pending draft approval" in board_template

@@ -1,0 +1,32 @@
+# Test Strategy
+
+- Task ID: implement-the-following-plan-in-this-repository-d9b66dcb
+- Pair: test
+- Phase ID: tests-and-regression-proofing
+- Phase Directory Key: tests-and-regression-proofing
+- Phase Title: Tests And Regression Proofing
+- Scope: phase-local producer artifact
+- Behavior-to-test coverage map:
+  - Auth/browser semantics:
+    - `tests/test_auth_requester.py` covers login preauth issuance, invalid/missing CSRF rotation, invalid-credential rotation, sanitized `next` handling on unauthenticated redirects, successful login redirects, wrong-role browser `403`, malformed-hash login failure, and logged-in GET/POST `/login` safe-next fallback behavior.
+  - HTMX and view tracking:
+    - `tests/test_ops_workflow.py` covers full-template vs fragment responses for `/ops` and `/ops/board`, vendored HTMX hooks, unauthenticated redirects, wrong-role `403`, and the invariant that list/board routes do not update `ticket_views` while detail does.
+  - AI safety and Codex transport:
+    - `tests/test_ai_worker.py` covers the triage action matrix, clarification limits, unsafe auto-reply rejection, preserved two-round override, Codex stdin transport with no prompt argv tail, and worker startup seeding behavior.
+  - Bootstrap/docs/path hardening:
+    - `tests/test_hardening_validation.py` covers cwd-independent app/template loading, malformed password hashes returning `False`, migration-first bootstrap/run-script checks, system-state defaults, and README/.env contract assertions.
+- Preserved invariants checked:
+  - Browser redirects remain HTML-route-specific and wrong-role requests stay `403`.
+  - HTMX list/board filtering remains read-only with respect to `ticket_views`.
+  - `prompt.txt` and `final.json` remain canonical Codex artifacts while prompt argv transport stays removed.
+  - Bootstrap remains migration-first and deterministic for smoke checks.
+- Edge cases and failure paths:
+  - Missing login CSRF is treated the same as invalid CSRF instead of normalizing FastAPI `422`.
+  - Invalid login credentials rotate preauth state without losing a safe internal `next`.
+  - Logged-in `/login` GET and POST both sanitize `next` and fall back by role for unsafe values.
+  - Bootstrap and script smoke checks are asserted both before and after required setup.
+- Flake-risk controls:
+  - Tests isolate time/process-sensitive behavior with monkeypatches, fake DB/session objects, and subprocess-based smoke checks against temp directories.
+  - No network calls or nondeterministic ordering are introduced.
+- Known gaps:
+  - No broader end-to-end browser automation is added; coverage remains at deterministic route/unit/script boundaries per phase scope.

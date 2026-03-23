@@ -6,10 +6,12 @@ import time
 from sqlalchemy.orm import Session
 
 from shared.config import get_settings
+from shared.contracts import WORKSPACE_BOOTSTRAP_VERSION
 from shared.db import session_scope
 from shared.logging import log_worker_event
 from shared.models import SystemState
 from shared.security import utc_now
+from shared.ticketing import ensure_system_state_defaults
 from worker.queue import claim_oldest_pending_run
 from worker.triage import process_ai_run
 
@@ -60,6 +62,8 @@ def start_heartbeat_thread(settings) -> threading.Thread:
 
 def main() -> None:
     settings = get_settings()
+    with session_scope(settings) as db:
+        ensure_system_state_defaults(db, WORKSPACE_BOOTSTRAP_VERSION)
     log_worker_event("worker_started", poll_seconds=settings.worker_poll_seconds)
     start_heartbeat_thread(settings)
     while True:
