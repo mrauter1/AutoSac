@@ -18,6 +18,9 @@ class BrowserRedirectRequired(Exception):
         super().__init__(location)
 
 
+LOGIN_URL = "/login"
+
+
 def _wants_browser_redirect(request: Request) -> bool:
     if request.headers.get("HX-Request", "").lower() == "true":
         return True
@@ -27,6 +30,12 @@ def _wants_browser_redirect(request: Request) -> bool:
     if "application/json" in accept and "text/html" not in accept:
         return False
     return True
+
+
+def _raise_authentication_required(request: Request, detail: str) -> None:
+    if _wants_browser_redirect(request):
+        raise BrowserRedirectRequired(LOGIN_URL)
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
 
 
 def get_settings_dependency() -> Settings:
@@ -46,14 +55,10 @@ def get_current_user(
     db: Session = Depends(db_session_dependency),
 ) -> User:
     if auth_session is None:
-        if _wants_browser_redirect(request):
-            raise BrowserRedirectRequired("/login")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+        _raise_authentication_required(request, "Authentication required")
     user = db.execute(select(User).where(User.id == auth_session.user_id, User.is_active.is_(True))).scalar_one_or_none()
     if user is None:
-        if _wants_browser_redirect(request):
-            raise BrowserRedirectRequired("/login")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session is no longer valid")
+        _raise_authentication_required(request, "Session is no longer valid")
     return user
 
 
@@ -62,9 +67,7 @@ def get_required_auth_session(
     auth_session: SessionRecord | None = Depends(get_optional_auth_session),
 ) -> SessionRecord:
     if auth_session is None:
-        if _wants_browser_redirect(request):
-            raise BrowserRedirectRequired("/login")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+        _raise_authentication_required(request, "Authentication required")
     return auth_session
 
 
