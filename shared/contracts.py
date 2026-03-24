@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 SESSION_COOKIE_NAME = "triage_session"
+PREAUTH_LOGIN_COOKIE_NAME = "triage_preauth_login"
 CSRF_FORM_FIELD = "csrf_token"
 WORKSPACE_BOOTSTRAP_VERSION = "stage1-v1"
 

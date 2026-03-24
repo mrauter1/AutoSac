@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from shared.models import USER_ROLES, User
-from shared.security import hash_password, utc_now
+from shared.security import hash_password, utc_now, verify_password
 
 
 def normalize_email(email: str) -> str:
@@ -34,6 +34,32 @@ def create_user(db: Session, *, email: str, display_name: str, password: str, ro
     )
     db.add(user)
     return user
+
+
+def ensure_admin_user(db: Session, *, email: str, display_name: str, password: str) -> tuple[User, str]:
+    normalized_email = normalize_email(email)
+    normalized_display_name = display_name.strip()
+    existing = get_user_by_email(db, normalized_email)
+    if existing is None:
+        return (
+            create_user(
+                db,
+                email=normalized_email,
+                display_name=normalized_display_name,
+                password=password,
+                role="admin",
+            ),
+            "created",
+        )
+    if existing.role != "admin":
+        raise ValueError(f"Existing user {normalized_email} has role {existing.role}, not admin")
+    if not existing.is_active:
+        raise ValueError(f"Existing admin {normalized_email} is inactive")
+    if existing.display_name.strip() != normalized_display_name:
+        raise ValueError(f"Existing admin {normalized_email} has a different display name")
+    if not verify_password(password, existing.password_hash):
+        raise ValueError(f"Existing admin {normalized_email} has a different password")
+    return existing, "unchanged"
 
 
 def set_password(db: Session, *, email: str, password: str) -> User:

@@ -1,65 +1,138 @@
-# Auto SAC: Automated Support Triage Engine
+# AutoSac Stage 1
 
-Auto SAC is a production-ready, open-source helpdesk orchestration engine. It moves beyond "chat-wrapper" architectures by implementing strict state management, cryptographic input validation, and agentic workflows to automate ticket routing and resolution.
+AutoSac Stage 1 is an internal ticket triage app built around server-rendered FastAPI pages, PostgreSQL-backed server-side sessions, and a separate worker that runs Codex in a read-only workspace. The product scope is intentionally narrow:
 
----
+- Requesters create tickets, reply, and resolve their own requests.
+- Dev/TI and admins work the queue from `/ops` and `/ops/board`.
+- The worker classifies tickets, asks clarifying questions, drafts replies, or routes work to Dev/TI.
+- Each AI run keeps `prompt.txt`, `schema.json`, `stdout.jsonl`, `stderr.txt`, and `final.json`; `final.json` is the canonical output contract.
 
-### Key Technical Differentiators
+## Runtime Shape
 
-#### 1. Deterministic State Hashing (Idempotency)
-Instead of re-running the agent on every webhook update, Auto SAC computes a SHA-256 fingerprint of the ticket’s public state (messages, attachments, and status).
-* **Cost Efficiency:** The agent only executes when the ticket fingerprint changes.
-* **Race Condition Protection:** If a ticket status or message changes while an agent is mid-execution, the system detects the fingerprint mismatch upon completion. It automatically invalidates the stale output and queues a fresh run, preventing the agent from replying to outdated context.
+- Web app: FastAPI + Jinja templates + local static assets.
+- Auth: opaque server-side session cookie plus a separate short-lived preauth login cookie for `/login` CSRF.
+- Database: PostgreSQL in normal operation, managed through Alembic migrations.
+- Worker: polls pending AI runs, seeds missing `system_state` defaults, then processes Codex runs from the mounted workspace.
+- HTMX: vendored locally at `/static/htmx.min.js`; `/ops` and `/ops/board` return full HTML for normal navigation and fragment responses for HTMX filter refreshes.
 
-#### 2. Pydantic-Backed Output Guardrails
-The agent is constrained by a strict Pydantic model (`TriageResult`).
-* **Schema Enforcement:** The agent cannot produce arbitrary text; it must yield valid, structured JSON.
-* **Business Logic Validation:** We use `model_validator(mode="after")` to enforce cross-field dependencies. For example, if the agent selects `ask_clarification` but fails to provide a question, the application layer catches the logical contradiction before it reaches the end-user, triggering a `TriageValidationError` and routing the ticket to a human queue instead.
+Unauthenticated browser navigation to protected HTML pages redirects to `/login` with a sanitized relative `next` value. Authenticated users with the wrong role still receive `403`.
 
-#### 3. Separation of Concerns (Dual-Channel Output)
-The agent is architected to produce two distinct output channels:
-* **Public Channel:** Drafts or automatic responses optimized for the end-user.
-* **Internal Channel:** A structured diagnostic summary, relevant file paths from the repository, and internal reasoning.
-This ensures the agent never leaks private diagnostics or internal notes to the requester.
+## Local Setup
 
-#### 4. Human-in-the-Loop Fallback
-The system uses tiered confidence thresholds (configurable via `Settings`).
-* **High Confidence:** Triggers `auto_public_reply` for immediate resolution.
-* **Low Confidence / Ambiguity:** Automatically moves the ticket to a `pending_approval` state for human review.
-* **Drafting Engine:** Humans act as the final judge, using an "Approve/Reject" interface for AI-generated drafts.
+1. Install dependencies:
 
-#### 5. Sandboxed Context Loading
-The worker node uses strict boundary enforcement. It maps local mounts for `app/` and `manuals/` into the agent's context.
-* **Read-only Constraints:** The agent is given a read-only view of the codebase, preventing unauthorized code modification.
-* **Artifact Attribution:** Every AI-generated message is cryptographically linked to the `AIRun` ID that produced it, ensuring full auditability of the agent's decision-making process.
+   ```bash
+   python -m pip install -r requirements.txt
+   ```
 
----
+2. Export the variables from `.env.example`.
 
-### Tech Stack
-* **Runtime:** Python 3.11+, FastAPI (Async/Await)
-* **Storage:** PostgreSQL (JSONB support for state metadata)
-* **ORM:** SQLAlchemy 2.0 (Constraint-based enum validation)
-* **Orchestration:** Decoupled background workers with dedicated heartbeat monitoring
-* **Frontend:** Server-side rendered Jinja2 + HTMX (zero-JS overhead)
+   Required values:
+   - `APP_BASE_URL`
+   - `APP_SECRET_KEY`
+   - `DATABASE_URL`
+   - `CODEX_BIN`
+   - `CODEX_API_KEY`
 
----
+3. Ensure the workspace mount directories exist before bootstrapping:
+   - `REPO_MOUNT_DIR`
+   - `MANUALS_MOUNT_DIR`
 
-### Getting Started
+4. Apply the schema:
 
-1. **Bootstrap Workspace:**
-   Maps your repo and manuals for the agent.
+   ```bash
+   alembic upgrade head
+   ```
+
+## Deterministic Bootstrap Flow
+
+Run these steps in order on a new environment:
+
+1. Bootstrap the workspace files and runs directory:
+
    ```bash
    python scripts/bootstrap_workspace.py
    ```
 
-2. **Run Services:**
-   ```bash
-   # Start the web interface
-   python scripts/run_web.py
+   The script creates the workspace contract files, initializes the workspace git repository if needed, and prints a JSON snapshot that includes `"bootstrap_version": "stage1-v1"`.
 
-   # Start the worker (processes the pending queue)
+2. Create the initial admin account:
+
+   ```bash
+   python scripts/create_admin.py --email admin@example.com --display-name "Admin" --password "change-me"
+   ```
+
+   This step is deterministic and idempotent:
+   - Missing admin: created.
+   - Matching existing admin: succeeds without changing state.
+   - Conflicting existing record: fails explicitly instead of mutating the user in place.
+
+3. Create any additional local users:
+
+   ```bash
+   python scripts/create_user.py --email requester@example.com --display-name "Requester" --password "change-me" --role requester
+   python scripts/create_user.py --email devti@example.com --display-name "Dev TI" --password "change-me" --role dev_ti
+   ```
+
+4. Start services:
+
+   ```bash
+   python scripts/run_web.py
    python scripts/run_worker.py
    ```
 
-3. **Verify:**
-   Use the `/readyz` endpoint to confirm database connectivity, workspace availability, and agent contract compliance.
+The worker initializes missing `system_state` defaults, including `bootstrap_version`, before heartbeat emission and queue processing. The admin bootstrap script seeds the same defaults before user creation.
+
+## User Management CLI
+
+- Create another user:
+
+  ```bash
+  python scripts/create_user.py --email user@example.com --display-name "Example User" --password "change-me" --role requester
+  ```
+
+- Rotate a password:
+
+  ```bash
+  python scripts/set_password.py --email user@example.com --password "new-secret"
+  ```
+
+- Deactivate a user:
+
+  ```bash
+  python scripts/deactivate_user.py --email user@example.com
+  ```
+
+## Smoke Checks
+
+Run these before starting services in a fresh environment or after changing config:
+
+```bash
+python scripts/run_web.py --check
+python scripts/run_worker.py --check
+```
+
+Expected checks:
+
+- `python scripts/run_web.py --check` verifies `/healthz` and `/readyz`.
+- `python scripts/run_worker.py --check` verifies database connectivity, workspace contract paths, and the configured worker poll interval.
+
+Useful endpoints:
+
+- `GET /healthz`
+- `GET /readyz`
+
+## Notes For Operators
+
+- `.env.example` lists every supported runtime knob and the shipped defaults.
+- `APP_BASE_URL=https://...` automatically enables secure cookies.
+- `/ops` and `/ops/board` filter refreshes do not mark tickets as viewed; ticket detail pages still do.
+- The web and worker processes expect the same database and workspace configuration.
+
+## Tests
+
+Run the regression suite with:
+
+```bash
+pytest
+```

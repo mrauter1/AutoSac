@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+import re
 import uuid
 
 import pytest
@@ -126,6 +127,31 @@ class _RouteDb:
 
     def get(self, model, key):
         return self.objects.get((model, key))
+
+
+class _FakePreauthStore:
+    def __init__(self):
+        self.records = {}
+        self.counter = 0
+
+    def create(self, db, *, next_path, user_agent, ip_address):
+        self.counter += 1
+        raw_token = f"preauth-{self.counter}"
+        record = SimpleNamespace(
+            csrf_token=f"csrf-{self.counter}",
+            next_path=next_path,
+            user_agent=user_agent,
+            ip_address=ip_address,
+        )
+        self.records[raw_token] = record
+        return record, raw_token
+
+    def get_valid(self, db, raw_token):
+        return self.records.get(raw_token)
+
+    def invalidate(self, db, raw_token):
+        if raw_token:
+            self.records.pop(raw_token, None)
 
 
 def test_create_requester_ticket_creates_initial_records(monkeypatch, tmp_path):
@@ -319,6 +345,7 @@ def test_login_route_sets_remember_me_cookie(monkeypatch, tmp_path):
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
+    preauth = _FakePreauthStore()
     requester = SimpleNamespace(
         id=uuid.uuid4(),
         email="requester@example.com",
@@ -346,24 +373,242 @@ def test_login_route_sets_remember_me_cookie(monkeypatch, tmp_path):
     monkeypatch.setattr(stack["routes_auth"], "get_user_by_email", lambda db, email: requester)
     monkeypatch.setattr(stack["routes_auth"], "verify_password", lambda password, password_hash: True)
     monkeypatch.setattr(stack["routes_auth"], "begin_user_session", fake_begin_user_session)
+    monkeypatch.setattr(stack["routes_auth"], "create_preauth_login_session", preauth.create)
+    monkeypatch.setattr(stack["routes_auth"], "get_valid_preauth_login_session", preauth.get_valid)
+    monkeypatch.setattr(stack["routes_auth"], "invalidate_preauth_login_session", preauth.invalidate)
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_auth"].get_current_user_optional] = lambda: None
-    app.dependency_overrides[stack["routes_auth"].get_optional_auth_session] = lambda: None
     app.dependency_overrides[stack["routes_auth"].get_settings_dependency] = lambda: settings
 
-    with stack["TestClient"](app) as client:
+    with stack["TestClient"](app, base_url="https://testserver") as client:
+        login_page = client.get("/login?next=/app")
+        csrf_token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
         response = client.post(
             "/login",
-            data={"email": requester.email, "password": "secret", "remember_me": "on"},
+            data={"email": requester.email, "password": "secret", "remember_me": "on", "csrf_token": csrf_token},
             follow_redirects=False,
         )
 
     assert response.status_code == 303
     assert response.headers["location"] == "/app"
-    assert "Max-Age=2592000" in response.headers["set-cookie"]
+    assert any("Max-Age=2592000" in header for header in response.headers.get_list("set-cookie"))
+    assert any("triage_preauth_login=\"\"" in header for header in response.headers.get_list("set-cookie"))
     assert observed["remember_me"] is True
+    assert db.commit_calls == 2
+
+
+def test_login_get_issues_preauth_challenge_with_sanitized_next(monkeypatch, tmp_path):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    preauth = _FakePreauthStore()
+    settings = _make_settings(tmp_path)
+
+    monkeypatch.setattr(stack["routes_auth"], "create_preauth_login_session", preauth.create)
+    monkeypatch.setattr(stack["routes_auth"], "invalidate_preauth_login_session", preauth.invalidate)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_auth"].get_current_user_optional] = lambda: None
+    app.dependency_overrides[stack["routes_auth"].get_settings_dependency] = lambda: settings
+
+    with stack["TestClient"](app, base_url="https://testserver") as client:
+        response = client.get("/login?next=https://evil.example/ops", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert re.search(r'name="csrf_token" value="csrf-1"', response.text)
+    assert "triage_preauth_login=preauth-1" in response.headers["set-cookie"]
+    assert preauth.records["preauth-1"].next_path is None
     assert db.commit_calls == 1
+
+
+def test_login_post_rejects_missing_or_invalid_preauth_csrf_before_auth(monkeypatch, tmp_path):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    preauth = _FakePreauthStore()
+    settings = _make_settings(tmp_path)
+
+    monkeypatch.setattr(stack["routes_auth"], "create_preauth_login_session", preauth.create)
+    monkeypatch.setattr(stack["routes_auth"], "get_valid_preauth_login_session", preauth.get_valid)
+    monkeypatch.setattr(stack["routes_auth"], "invalidate_preauth_login_session", preauth.invalidate)
+    monkeypatch.setattr(
+        stack["routes_auth"],
+        "get_user_by_email",
+        lambda db, email: (_ for _ in ()).throw(AssertionError("authentication should not run")),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_auth"].get_current_user_optional] = lambda: None
+    app.dependency_overrides[stack["routes_auth"].get_settings_dependency] = lambda: settings
+
+    with stack["TestClient"](app, base_url="https://testserver") as client:
+        first = client.get("/login?next=/ops")
+        initial_csrf = re.search(r'name="csrf_token" value="([^"]+)"', first.text).group(1)
+
+        invalid_csrf = client.post(
+            "/login",
+            data={"email": "ops@example.com", "password": "secret", "csrf_token": "wrong-token"},
+            follow_redirects=False,
+        )
+        assert invalid_csrf.status_code == 403
+        assert "Invalid login form token." in invalid_csrf.text
+        assert initial_csrf not in invalid_csrf.text
+        assert "triage_preauth_login=preauth-2" in invalid_csrf.headers["set-cookie"]
+
+        client.cookies.clear()
+        missing_state = client.post(
+            "/login",
+            data={"email": "ops@example.com", "password": "secret", "csrf_token": "anything"},
+            follow_redirects=False,
+        )
+
+    assert missing_state.status_code == 403
+    assert "Your login form expired." in missing_state.text
+    assert "triage_preauth_login=preauth-3" in missing_state.headers["set-cookie"]
+    assert db.commit_calls == 3
+
+
+def test_login_post_failed_credentials_rotates_preauth_challenge(monkeypatch, tmp_path):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    preauth = _FakePreauthStore()
+    requester = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="requester@example.com",
+        display_name="Requester",
+        password_hash="hash",
+        role="requester",
+        is_active=True,
+    )
+    settings = _make_settings(tmp_path)
+
+    monkeypatch.setattr(stack["routes_auth"], "create_preauth_login_session", preauth.create)
+    monkeypatch.setattr(stack["routes_auth"], "get_valid_preauth_login_session", preauth.get_valid)
+    monkeypatch.setattr(stack["routes_auth"], "invalidate_preauth_login_session", preauth.invalidate)
+    monkeypatch.setattr(stack["routes_auth"], "get_user_by_email", lambda db, email: requester)
+    monkeypatch.setattr(stack["routes_auth"], "verify_password", lambda password, password_hash: False)
+    monkeypatch.setattr(
+        stack["routes_auth"],
+        "begin_user_session",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("session should not start on invalid credentials")),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_auth"].get_current_user_optional] = lambda: None
+    app.dependency_overrides[stack["routes_auth"].get_settings_dependency] = lambda: settings
+
+    with stack["TestClient"](app, base_url="https://testserver") as client:
+        first = client.get("/login?next=/app")
+        initial_csrf = re.search(r'name="csrf_token" value="([^"]+)"', first.text).group(1)
+
+        failed = client.post(
+            "/login",
+            data={"email": requester.email, "password": "wrong-secret", "csrf_token": initial_csrf},
+            follow_redirects=False,
+        )
+
+    assert failed.status_code == 400
+    assert "Invalid email or password." in failed.text
+    assert initial_csrf not in failed.text
+    assert re.search(r'name="csrf_token" value="csrf-2"', failed.text)
+    assert "triage_preauth_login=preauth-2" in failed.headers["set-cookie"]
+    assert "preauth-1" not in preauth.records
+    assert preauth.records["preauth-2"].next_path == "/app"
+    assert db.commit_calls == 2
+
+
+def test_protected_html_get_redirects_to_login_with_safe_next(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_auth"].get_optional_auth_session] = lambda: None
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/app/tickets/new?draft=1", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login?next=%2Fapp%2Ftickets%2Fnew%3Fdraft%3D1"
+
+
+def test_protected_htmx_get_keeps_401_instead_of_redirect():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_auth"].get_optional_auth_session] = lambda: None
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/app", headers={"HX-Request": "true"}, follow_redirects=False)
+
+    assert response.status_code == 401
+    assert "location" not in response.headers
+
+
+def test_wrong_role_still_returns_403_instead_of_redirect():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+
+    def deny():
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=403, detail="Requester access required")
+
+    app.dependency_overrides[stack["routes_requester"].require_requester_user] = deny
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/app", follow_redirects=False)
+
+    assert response.status_code == 403
+    assert "location" not in response.headers
+
+
+def test_safe_next_path_rejects_external_empty_and_recursive_targets():
+    pytest.importorskip("fastapi")
+    from app.ui import sanitize_next_path
+
+    assert sanitize_next_path("/ops?status=new") == "/ops?status=new"
+    assert sanitize_next_path("https://evil.example/ops") is None
+    assert sanitize_next_path("//evil.example/ops") is None
+    assert sanitize_next_path("") is None
+    assert sanitize_next_path("/login?next=/ops") is None
+
+
+def test_module_relative_paths_support_rendering_and_static_assets(monkeypatch, tmp_path):
+    stack = _load_web_stack()
+    from app import ui
+
+    monkeypatch.chdir(tmp_path)
+    app = stack["create_app"]()
+    settings = _make_settings(tmp_path)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: _RouteDb()
+    app.dependency_overrides[stack["routes_auth"].get_current_user_optional] = lambda: None
+    app.dependency_overrides[stack["routes_auth"].get_settings_dependency] = lambda: settings
+    monkeypatch.setattr(
+        stack["routes_auth"],
+        "_issue_login_challenge",
+        lambda **kwargs: ui.templates.TemplateResponse(
+            kwargs["request"],
+            "login.html",
+            ui.build_template_context(
+                request=kwargs["request"],
+                current_user=None,
+                extra={"login_csrf_token": "csrf-token"},
+            ),
+        ),
+    )
+
+    with stack["TestClient"](app, base_url="https://testserver") as client:
+        login_response = client.get("/login")
+        static_response = client.get("/static/app.css")
+
+    assert login_response.status_code == 200
+    assert static_response.status_code == 200
 
 
 def test_logout_route_rejects_invalid_csrf_without_committing():

@@ -1,0 +1,36 @@
+{
+  "task_id": "re-run-review-and-implement-only-correct-applica-dc56c98a",
+  "created_at": "2026-03-24T01:58:24.019149+00:00",
+  "request_text": "Re-run review and implement only correct/applicable fixes from prior feedback: (1) login CSRF invalid/missing challenge should be 403 not 400; (2) rotate/refresh preauth CSRF on failed login credentials; (3) enforce auto_public_reply class allowlist in worker triage validation (support/access_config only unless explicitly allowed); (4) ensure scripts/bootstrap_workspace.py initializes system_state defaults including bootstrap_version. Update/add tests accordingly and keep behavior otherwise stable.",
+  "request_updated_at": "2026-03-24T01:58:24.019206+00:00",
+  "phase_plan_path": "/workspace/AutoSac/.superloop/tasks/re-run-review-and-implement-only-correct-applica-dc56c98a/plan/phase_plan.yaml",
+  "phase_plan_version": 1,
+  "active_phase_selection": {
+    "run_id": "run-20260324T015824Z-fd975cd7",
+    "mode": "single",
+    "phase_ids": [
+      "auth-worker-bootstrap-fixes"
+    ],
+    "explicit": true,
+    "current_phase_index": 1,
+    "current_phase_id": null
+  },
+  "phase_status": {
+    "auth-worker-bootstrap-fixes": "completed"
+  },
+  "phase_history": [
+    {
+      "phase_id": "auth-worker-bootstrap-fixes",
+      "run_id": "run-20260324T015824Z-fd975cd7",
+      "status": "in_progress",
+      "ts": "2026-03-24T02:00:24.186311+00:00"
+    },
+    {
+      "phase_id": "auth-worker-bootstrap-fixes",
+      "run_id": "run-20260324T015824Z-fd975cd7",
+      "status": "completed",
+      "ts": "2026-03-24T02:06:22.278382+00:00",
+      "pair": "test"
+    }
+  ]
+}

@@ -31,6 +31,9 @@ class TriageResultError(RuntimeError):
     """Raised when the canonical Codex output violates the Stage 1 contract."""
 
 
+AUTO_PUBLIC_ACTION_ALLOWED_CLASSES = frozenset({"support", "access_config"})
+
+
 class RelevantPathResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -101,16 +104,27 @@ def validate_triage_result(payload: dict[str, object], settings: Settings) -> Tr
 
     public_reply = result.public_reply_markdown.strip()
     internal_note = result.internal_note_markdown.strip()
+    clarifying_questions = [question.strip() for question in result.clarifying_questions if question.strip()]
     if not internal_note:
         raise TriageResultError("internal_note_markdown must not be blank")
+    if result.needs_clarification and not clarifying_questions:
+        raise TriageResultError("needs_clarification=true requires at least one clarifying question")
+    if not result.needs_clarification and clarifying_questions:
+        raise TriageResultError("clarifying_questions require needs_clarification=true")
 
     action = result.recommended_next_action
     if action == "ask_clarification":
         if not result.needs_clarification:
             raise TriageResultError("ask_clarification requires needs_clarification=true")
+        if result.auto_public_reply_allowed:
+            raise TriageResultError("ask_clarification requires auto_public_reply_allowed=false")
         if not public_reply:
             raise TriageResultError("ask_clarification requires a non-empty public reply")
     elif action == "auto_public_reply":
+        if result.needs_clarification:
+            raise TriageResultError("auto_public_reply requires needs_clarification=false")
+        if clarifying_questions:
+            raise TriageResultError("auto_public_reply requires no clarifying questions")
         if not result.auto_public_reply_allowed:
             raise TriageResultError("auto_public_reply requires auto_public_reply_allowed=true")
         if not result.evidence_found:
@@ -120,6 +134,10 @@ def validate_triage_result(payload: dict[str, object], settings: Settings) -> Tr
         if result.confidence < settings.auto_support_reply_min_confidence:
             raise TriageResultError("auto_public_reply confidence is below the configured threshold")
     elif action == "auto_confirm_and_route":
+        if result.needs_clarification:
+            raise TriageResultError("auto_confirm_and_route requires needs_clarification=false")
+        if clarifying_questions:
+            raise TriageResultError("auto_confirm_and_route requires no clarifying questions")
         if not result.auto_public_reply_allowed:
             raise TriageResultError("auto_confirm_and_route requires auto_public_reply_allowed=true")
         if not public_reply:
@@ -127,17 +145,30 @@ def validate_triage_result(payload: dict[str, object], settings: Settings) -> Tr
         if result.confidence < settings.auto_confirm_intent_min_confidence:
             raise TriageResultError("auto_confirm_and_route confidence is below the configured threshold")
     elif action == "draft_public_reply":
+        if result.needs_clarification:
+            raise TriageResultError("draft_public_reply requires needs_clarification=false")
+        if clarifying_questions:
+            raise TriageResultError("draft_public_reply requires no clarifying questions")
         if result.auto_public_reply_allowed:
             raise TriageResultError("draft_public_reply requires auto_public_reply_allowed=false")
         if not public_reply:
             raise TriageResultError("draft_public_reply requires a non-empty public reply")
     elif action == "route_dev_ti":
-        pass
+        if result.needs_clarification:
+            raise TriageResultError("route_dev_ti requires needs_clarification=false")
+        if clarifying_questions:
+            raise TriageResultError("route_dev_ti requires no clarifying questions")
+        if result.auto_public_reply_allowed:
+            raise TriageResultError("route_dev_ti requires auto_public_reply_allowed=false")
+        if public_reply:
+            raise TriageResultError("route_dev_ti requires an empty public reply")
     else:
         raise TriageResultError(f"Unsupported recommended_next_action: {action}")
 
-    if result.ticket_class == "unknown" and action == "auto_public_reply":
-        raise TriageResultError("unknown tickets cannot use auto_public_reply")
+    if result.ticket_class == "unknown" and action in {"auto_public_reply", "auto_confirm_and_route"}:
+        raise TriageResultError("unknown tickets cannot use automatic public actions")
+    if action in {"auto_public_reply", "auto_confirm_and_route"} and result.ticket_class not in AUTO_PUBLIC_ACTION_ALLOWED_CLASSES:
+        raise TriageResultError("automatic public actions are only supported for support and access_config tickets")
     return result
 
 

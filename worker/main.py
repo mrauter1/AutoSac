@@ -8,15 +8,23 @@ from sqlalchemy.orm import Session
 from shared.config import get_settings
 from shared.db import session_scope
 from shared.logging import log_worker_event
+from shared.contracts import WORKSPACE_BOOTSTRAP_VERSION
 from shared.models import SystemState
 from shared.security import utc_now
+from shared.ticketing import ensure_system_state_defaults
 from worker.queue import claim_oldest_pending_run
 from worker.triage import process_ai_run
 
 HEARTBEAT_INTERVAL_SECONDS = 60.0
 
 
+def ensure_worker_system_state(db: Session) -> None:
+    ensure_system_state_defaults(db, WORKSPACE_BOOTSTRAP_VERSION)
+
+
 def update_worker_heartbeat(db: Session) -> None:
+    ensure_worker_system_state(db)
+    db.flush()
     heartbeat = db.get(SystemState, "worker_heartbeat")
     now = utc_now()
     payload = {"status": "alive", "timestamp": now.isoformat()}
@@ -60,6 +68,8 @@ def start_heartbeat_thread(settings) -> threading.Thread:
 
 def main() -> None:
     settings = get_settings()
+    with session_scope(settings) as db:
+        ensure_worker_system_state(db)
     log_worker_event("worker_started", poll_seconds=settings.worker_poll_seconds)
     start_heartbeat_thread(settings)
     while True:

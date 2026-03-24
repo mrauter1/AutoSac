@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import secrets
+
 from fastapi import Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.ui import is_html_navigation_request, login_redirect_path, request_next_path
 from shared.config import Settings, get_settings
 from shared.contracts import SESSION_COOKIE_NAME
 from shared.db import db_session_dependency
@@ -56,7 +59,7 @@ def require_ops_user(current_user: User = Depends(get_current_user)) -> User:
 
 
 def validate_csrf_token(auth_session: SessionRecord, provided_token: str | None) -> None:
-    if not provided_token or provided_token != auth_session.csrf_token:
+    if not provided_token or not secrets.compare_digest(provided_token, auth_session.csrf_token):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid CSRF token")
 
 
@@ -102,3 +105,14 @@ def begin_user_session(
 def end_user_session(*, request: Request, response: Response, db: Session) -> None:
     invalidate_session(db, request.cookies.get(SESSION_COOKIE_NAME))
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+
+
+def should_redirect_browser_to_login(request: Request, status_code: int) -> bool:
+    return status_code == status.HTTP_401_UNAUTHORIZED and is_html_navigation_request(request)
+
+
+def browser_login_redirect(request: Request) -> Response:
+    return Response(
+        status_code=status.HTTP_303_SEE_OTHER,
+        headers={"location": login_redirect_path(request_next_path(request))},
+    )

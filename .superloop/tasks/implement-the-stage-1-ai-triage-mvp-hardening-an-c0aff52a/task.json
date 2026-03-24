@@ -1,0 +1,66 @@
+{
+  "task_id": "implement-the-stage-1-ai-triage-mvp-hardening-an-c0aff52a",
+  "created_at": "2026-03-24T01:10:55.072767+00:00",
+  "request_text": "Implement the Stage 1 AI Triage MVP hardening and PRD-alignment plan from the user request, including: module-relative static/template paths; password hash verification hardening; codex prompt transport without full argv prompt; server-side preauth login CSRF; browser redirects to /login with safe next handling and 403 for wrong role; local HTMX asset and HTMX filtering on /ops and /ops/board with fragment responses and unchanged view-tracking semantics; strengthen AI triage action validation matrix; initialize system_state.bootstrap_version defaults on bootstrap and worker startup; deterministic documented bootstrap flow with idempotent admin creation; complete .env.example and README; and comprehensive tests for auth, HTMX, paths, triage validation, prompt transport, and bootstrap. Preserve existing architecture and behavior unless explicitly changed.",
+  "request_updated_at": "2026-03-24T01:10:55.072833+00:00",
+  "phase_plan_path": "/workspace/AutoSac/.superloop/tasks/implement-the-stage-1-ai-triage-mvp-hardening-an-c0aff52a/plan/phase_plan.yaml",
+  "phase_plan_version": 1,
+  "active_phase_selection": {
+    "run_id": "run-20260324T011055Z-65f8f56b",
+    "mode": "single",
+    "phase_ids": [
+      "web-auth-ui-hardening",
+      "worker-bootstrap-hardening",
+      "docs-and-release-validation"
+    ],
+    "explicit": true,
+    "current_phase_index": 3,
+    "current_phase_id": null
+  },
+  "phase_status": {
+    "web-auth-ui-hardening": "completed",
+    "worker-bootstrap-hardening": "completed",
+    "docs-and-release-validation": "completed"
+  },
+  "phase_history": [
+    {
+      "phase_id": "web-auth-ui-hardening",
+      "run_id": "run-20260324T011055Z-65f8f56b",
+      "status": "in_progress",
+      "ts": "2026-03-24T01:17:46.839990+00:00"
+    },
+    {
+      "phase_id": "web-auth-ui-hardening",
+      "run_id": "run-20260324T011055Z-65f8f56b",
+      "status": "completed",
+      "ts": "2026-03-24T01:26:40.097237+00:00",
+      "pair": "test"
+    },
+    {
+      "phase_id": "worker-bootstrap-hardening",
+      "run_id": "run-20260324T011055Z-65f8f56b",
+      "status": "in_progress",
+      "ts": "2026-03-24T01:26:40.098378+00:00"
+    },
+    {
+      "phase_id": "worker-bootstrap-hardening",
+      "run_id": "run-20260324T011055Z-65f8f56b",
+      "status": "completed",
+      "ts": "2026-03-24T01:35:11.862661+00:00",
+      "pair": "test"
+    },
+    {
+      "phase_id": "docs-and-release-validation",
+      "run_id": "run-20260324T011055Z-65f8f56b",
+      "status": "in_progress",
+      "ts": "2026-03-24T01:35:11.863971+00:00"
+    },
+    {
+      "phase_id": "docs-and-release-validation",
+      "run_id": "run-20260324T011055Z-65f8f56b",
+      "status": "completed",
+      "ts": "2026-03-24T01:40:41.829095+00:00",
+      "pair": "test"
+    }
+  ]
+}

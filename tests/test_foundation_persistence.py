@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+import json
 from pathlib import Path
 import subprocess
 import uuid
@@ -42,6 +44,28 @@ class _FakeSession:
     def begin_nested(self):
         self.begin_nested_calls += 1
         return _FakeNestedTransaction()
+
+
+class _FakeScalarOneOrNoneResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+
+class _FakePreauthSession:
+    def __init__(self, scalar_result=None):
+        self.added = []
+        self.executed = []
+        self.scalar_result = scalar_result
+
+    def add(self, item):
+        self.added.append(item)
+
+    def execute(self, statement):
+        self.executed.append(statement)
+        return _FakeScalarOneOrNoneResult(self.scalar_result)
 
 
 def _make_settings(tmp_path: Path) -> Settings:
@@ -220,3 +244,267 @@ def test_initial_migration_contains_required_sessions_table_and_active_run_index
     assert 'op.create_table(\n        "sessions"' in migration_source
     assert 'op.create_table(\n        "ai_runs"' in migration_source
     assert "CREATE UNIQUE INDEX uq_ai_runs_active_ticket ON ai_runs (ticket_id) WHERE status IN ('pending', 'running')" in migration_source
+
+
+def test_preauth_login_session_creation_hashes_browser_token_and_sets_short_expiry(monkeypatch):
+    pytest.importorskip("sqlalchemy")
+    pytest.importorskip("argon2")
+    from datetime import datetime, timezone
+
+    from shared import preauth_login
+
+    fixed_now = datetime(2026, 3, 24, 1, 0, tzinfo=timezone.utc)
+    session = _FakePreauthSession()
+
+    monkeypatch.setattr(preauth_login, "generate_opaque_token", lambda: "opaque-browser-token")
+    monkeypatch.setattr(preauth_login, "generate_csrf_token", lambda: "csrf-token")
+    monkeypatch.setattr(preauth_login, "hash_token", lambda raw_token: f"hashed::{raw_token}")
+    monkeypatch.setattr(preauth_login, "utc_now", lambda: fixed_now)
+
+    record, raw_token = preauth_login.create_preauth_login_session(
+        session,
+        next_path="/ops?status=new",
+        user_agent="pytest-agent",
+        ip_address="127.0.0.1",
+    )
+
+    assert raw_token == "opaque-browser-token"
+    assert record.token_hash == "hashed::opaque-browser-token"
+    assert record.csrf_token == "csrf-token"
+    assert record.next_path == "/ops?status=new"
+    assert record.created_at == fixed_now
+    assert record.expires_at == fixed_now + preauth_login.PREAUTH_LOGIN_TTL
+    assert record.user_agent == "pytest-agent"
+    assert record.ip_address == "127.0.0.1"
+    assert session.added == [record]
+    assert len(session.executed) == 1
+    assert "DELETE FROM preauth_login_sessions" in str(session.executed[0])
+
+
+def test_preauth_login_lookup_and_invalidation_use_hashed_tokens(monkeypatch):
+    pytest.importorskip("sqlalchemy")
+    pytest.importorskip("argon2")
+    from datetime import datetime, timezone
+
+    from shared import preauth_login
+
+    fixed_now = datetime(2026, 3, 24, 1, 5, tzinfo=timezone.utc)
+    expected_record = object()
+    session = _FakePreauthSession(scalar_result=expected_record)
+    observed_tokens = []
+
+    monkeypatch.setattr(
+        preauth_login,
+        "hash_token",
+        lambda raw_token: observed_tokens.append(raw_token) or f"hashed::{raw_token}",
+    )
+    monkeypatch.setattr(preauth_login, "utc_now", lambda: fixed_now)
+
+    record = preauth_login.get_valid_preauth_login_session(session, "opaque-browser-token")
+    preauth_login.invalidate_preauth_login_session(session, "opaque-browser-token")
+
+    assert record is expected_record
+    assert observed_tokens == ["opaque-browser-token", "opaque-browser-token"]
+    assert len(session.executed) == 3
+    assert "DELETE FROM preauth_login_sessions" in str(session.executed[0])
+    assert "SELECT preauth_login_sessions.id" in str(session.executed[1])
+    assert "DELETE FROM preauth_login_sessions" in str(session.executed[2])
+
+
+def test_verify_password_returns_false_for_malformed_hashes():
+    pytest.importorskip("argon2")
+    from shared.security import verify_password
+
+    assert verify_password("secret", "") is False
+    assert verify_password("secret", "not-an-argon2-hash") is False
+    assert verify_password("secret", "$argon2id$v=19$m=oops,t=3,p=4$bad$hash") is False
+
+
+def test_ensure_admin_user_is_idempotent_for_matching_existing_admin():
+    pytest.importorskip("argon2")
+    from shared.user_admin import create_user, ensure_admin_user
+
+    class _AdminSession:
+        def __init__(self):
+            self.users = {}
+            self.added = []
+
+        def add(self, item):
+            self.added.append(item)
+            email = getattr(item, "email", None)
+            if email:
+                self.users[email] = item
+
+        def execute(self, statement):
+            class _Result:
+                def __init__(self, user):
+                    self._user = user
+
+                def scalar_one_or_none(self):
+                    return self._user
+
+            compiled = str(statement)
+            marker = "users.email = :email_1"
+            assert marker in compiled
+            params = statement.compile().params
+            return _Result(self.users.get(params["email_1"]))
+
+    db = _AdminSession()
+    created, status = ensure_admin_user(
+        db,
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-pass",
+    )
+    assert status == "created"
+
+    same_user, same_status = ensure_admin_user(
+        db,
+        email="admin@example.com",
+        display_name="Admin",
+        password="secret-pass",
+    )
+    assert same_status == "unchanged"
+    assert same_user is created
+
+
+def test_ensure_admin_user_rejects_conflicting_existing_user():
+    pytest.importorskip("argon2")
+    from shared.user_admin import create_user, ensure_admin_user
+
+    class _AdminSession:
+        def __init__(self):
+            self.users = {}
+
+        def add(self, item):
+            email = getattr(item, "email", None)
+            if email:
+                self.users[email] = item
+
+        def execute(self, statement):
+            class _Result:
+                def __init__(self, user):
+                    self._user = user
+
+                def scalar_one_or_none(self):
+                    return self._user
+
+            params = statement.compile().params
+            return _Result(self.users.get(params["email_1"]))
+
+    db = _AdminSession()
+    create_user(
+        db,
+        email="admin@example.com",
+        display_name="Requester",
+        password="secret-pass",
+        role="requester",
+    )
+
+    with pytest.raises(ValueError, match="not admin"):
+        ensure_admin_user(
+            db,
+            email="admin@example.com",
+            display_name="Admin",
+            password="secret-pass",
+        )
+
+
+def test_create_admin_script_reports_matching_admin_as_success(monkeypatch, capsys):
+    import argparse
+
+    from scripts import create_admin
+
+    observed = {}
+
+    @contextmanager
+    def fake_session_scope():
+        yield "db"
+
+    monkeypatch.setattr(create_admin, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        argparse.ArgumentParser,
+        "parse_args",
+        lambda self: argparse.Namespace(
+            email="admin@example.com",
+            display_name="Admin",
+            password="secret-pass",
+        ),
+    )
+    monkeypatch.setattr(
+        create_admin,
+        "ensure_system_state_defaults",
+        lambda db, version: observed.update({"defaults": (db, version)}),
+    )
+    monkeypatch.setattr(
+        create_admin,
+        "ensure_admin_user",
+        lambda db, **kwargs: (
+            type("UserStub", (), {"email": kwargs["email"]})(),
+            "unchanged",
+        ),
+    )
+
+    create_admin.main()
+
+    assert observed["defaults"] == ("db", "stage1-v1")
+    assert capsys.readouterr().out.strip() == "Admin user admin@example.com already matched the requested bootstrap state"
+
+
+def test_bootstrap_workspace_script_seeds_system_state_defaults(monkeypatch, capsys, tmp_path):
+    from scripts import bootstrap_workspace as bootstrap_script
+
+    settings = _make_settings(tmp_path)
+    observed: list[tuple[object, ...]] = []
+
+    @contextmanager
+    def fake_session_scope(resolved_settings):
+        observed.append(("session_scope", resolved_settings))
+        yield "db"
+
+    monkeypatch.setattr(bootstrap_script, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        bootstrap_script,
+        "ensure_uploads_dir",
+        lambda resolved_settings: observed.append(("ensure_uploads_dir", resolved_settings)),
+    )
+    monkeypatch.setattr(
+        bootstrap_script,
+        "bootstrap_workspace",
+        lambda resolved_settings: observed.append(("bootstrap_workspace", resolved_settings)),
+    )
+    monkeypatch.setattr(bootstrap_script, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        bootstrap_script,
+        "ensure_system_state_defaults",
+        lambda db, version: observed.append(("ensure_system_state_defaults", db, version)),
+    )
+    monkeypatch.setattr(
+        bootstrap_script,
+        "workspace_contract_snapshot",
+        lambda resolved_settings: {"bootstrap_version": "stage1-v1", "workspace_dir": str(resolved_settings.triage_workspace_dir)},
+    )
+
+    bootstrap_script.main()
+
+    assert observed == [
+        ("ensure_uploads_dir", settings),
+        ("bootstrap_workspace", settings),
+        ("session_scope", settings),
+        ("ensure_system_state_defaults", "db", "stage1-v1"),
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "bootstrap_version": "stage1-v1",
+        "workspace_dir": str(settings.triage_workspace_dir),
+    }
+
+
+def test_additive_preauth_migration_declares_store_and_expiry_index():
+    migration_source = Path("shared/migrations/versions/20260324_0002_preauth_login_sessions.py").read_text(encoding="utf-8")
+
+    assert 'op.create_table(\n        "preauth_login_sessions"' in migration_source
+    assert 'sa.Column("token_hash", sa.Text(), nullable=False)' in migration_source
+    assert 'sa.Column("csrf_token", sa.Text(), nullable=False)' in migration_source
+    assert 'sa.Column("next_path", sa.Text(), nullable=True)' in migration_source
+    assert 'sa.UniqueConstraint("token_hash"' in migration_source
+    assert 'op.create_index(\n        "ix_preauth_login_sessions_expires_at"' in migration_source

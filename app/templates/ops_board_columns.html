@@ -1,4 +1,5 @@
 {% set ordered_statuses = ["new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved"] %}
+<div id="ops-results">
 <section class="ops-board">
   {% for status in ordered_statuses %}
   <div class="ops-column">
@@ -37,3 +38,4 @@
   </div>
   {% endfor %}
 </section>
+</div>

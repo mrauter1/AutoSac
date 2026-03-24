@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 
@@ -160,17 +161,36 @@ def test_env_example_and_readme_capture_acceptance_contract():
         "APP_BASE_URL",
         "APP_SECRET_KEY",
         "DATABASE_URL",
+        "CODEX_BIN",
         "CODEX_API_KEY",
+        "CODEX_MODEL",
+        "CODEX_TIMEOUT_SECONDS",
+        "WORKER_POLL_SECONDS",
+        "AUTO_SUPPORT_REPLY_MIN_CONFIDENCE",
+        "AUTO_CONFIRM_INTENT_MIN_CONFIDENCE",
+        "MAX_IMAGES_PER_MESSAGE",
         "MAX_IMAGE_BYTES",
+        "SESSION_DEFAULT_HOURS",
         "SESSION_REMEMBER_DAYS",
+        "UPLOADS_DIR",
+        "TRIAGE_WORKSPACE_DIR",
+        "REPO_MOUNT_DIR",
+        "MANUALS_MOUNT_DIR",
     ):
         assert f"{name}=" in env_source
 
     assert ".env.example" in readme_source
+    assert "python -m pip install -r requirements.txt" in readme_source
+    assert "alembic upgrade head" in readme_source
     assert "GET /readyz" in readme_source
     assert "python scripts/bootstrap_workspace.py" in readme_source
+    assert "python scripts/create_admin.py" in readme_source
+    assert "python scripts/create_user.py" in readme_source
+    assert "python scripts/set_password.py" in readme_source
+    assert "python scripts/deactivate_user.py" in readme_source
     assert "python scripts/run_web.py --check" in readme_source
     assert "python scripts/run_worker.py --check" in readme_source
+    assert "bootstrap_version" in readme_source
     assert "pytest" in readme_source
 
 
@@ -232,9 +252,25 @@ def _last_json_line(output: str) -> dict[str, object]:
 
 def test_bootstrap_web_and_worker_scripts_validate_end_to_end(tmp_path):
     env = _script_env(tmp_path)
+    db_path = tmp_path / "triage.db"
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE system_state (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
     bootstrap = _run_script(["scripts/bootstrap_workspace.py"], env=env)
     assert '"bootstrap_version": "stage1-v1"' in bootstrap.stdout
+    with sqlite3.connect(db_path) as connection:
+        rows = dict(connection.execute("SELECT key, value_json FROM system_state").fetchall())
+    assert "bootstrap_version" in rows
+    assert "worker_heartbeat" in rows
 
     web = _run_script(["scripts/run_web.py", "--check"], env=env)
     web_payload = _last_json_line(web.stdout)
