@@ -674,23 +674,6 @@ def test_unauthenticated_browser_requester_route_redirects_to_login_with_safe_ne
     assert response.status_code == 303
     assert response.headers["location"] == "/login?next=%2Fapp%2Ftickets%2Fnew%3Fdraft%3D1"
 
-
-def test_ops_user_cannot_access_requester_browser_routes():
-    stack = _load_web_stack()
-    app = stack["create_app"]()
-    db = _RouteDb()
-    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti", is_active=True)
-
-    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
-    app.dependency_overrides[stack["auth"].require_browser_user] = lambda: ops_user
-    app.dependency_overrides[stack["routes_requester"].get_required_browser_auth_session] = lambda: SimpleNamespace(csrf_token="csrf")
-
-    with stack["TestClient"](app) as client:
-        response = client.get("/app", follow_redirects=False)
-
-    assert response.status_code == 403
-
-
 def test_login_route_returns_invalid_credentials_for_malformed_hash(monkeypatch, tmp_path):
     stack = _load_web_stack()
     app = stack["create_app"]()
@@ -737,6 +720,9 @@ def test_logout_route_rejects_invalid_csrf_without_committing():
         response = client.post("/logout", data={"csrf_token": "wrong"}, follow_redirects=False)
 
     assert response.status_code == 403
+    assert response.headers.get("location") is None
+    assert response.json() == {"detail": "Invalid CSRF token"}
+    assert "Access denied" not in response.text
     assert db.commit_calls == 0
 
 
@@ -764,6 +750,25 @@ def test_requester_list_route_does_not_mark_ticket_as_read(monkeypatch):
 
     assert response.status_code == 200
     assert observed["view_updates"] == 0
+
+
+def test_ops_user_cannot_access_requester_browser_routes():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti", is_active=True)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].require_browser_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_requester"].get_required_browser_auth_session] = lambda: SimpleNamespace(csrf_token="csrf")
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/app")
+
+    assert response.status_code == 403
+    assert response.headers.get("location") is None
+    assert "Access denied" in response.text
+    assert "Requester access required" in response.text
 
 
 def test_requester_detail_route_marks_ticket_as_read(monkeypatch):
@@ -822,4 +827,7 @@ def test_attachment_download_forbids_non_owner_requester():
         response = client.get(f"/attachments/{attachment_id}")
 
     assert response.status_code == 403
+    assert response.headers.get("location") is None
+    assert response.json() == {"detail": "Attachment access denied"}
+    assert "Access denied" not in response.text
     assert db.commit_calls == 0

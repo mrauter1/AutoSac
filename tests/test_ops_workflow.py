@@ -426,6 +426,9 @@ def test_requester_cannot_access_ops_routes():
         response = client.get("/ops")
 
     assert response.status_code == 403
+    assert response.headers.get("location") is None
+    assert "Access denied" in response.text
+    assert "Ops access required" in response.text
 
 
 def test_requester_cannot_access_ops_board():
@@ -442,6 +445,9 @@ def test_requester_cannot_access_ops_board():
         response = client.get("/ops/board")
 
     assert response.status_code == 403
+    assert response.headers.get("location") is None
+    assert "Access denied" in response.text
+    assert "Ops access required" in response.text
 
 
 def test_requester_cannot_access_ops_ticket_detail():
@@ -458,6 +464,25 @@ def test_requester_cannot_access_ops_ticket_detail():
         response = client.get("/ops/tickets/T-000999")
 
     assert response.status_code == 403
+    assert response.headers.get("location") is None
+    assert "Access denied" in response.text
+    assert "Ops access required" in response.text
+
+
+def test_unauthenticated_hx_ops_route_uses_hx_redirect_to_login_with_safe_next():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops?status=new", headers={"HX-Request": "true"})
+
+    assert response.status_code == 200
+    assert response.headers.get("hx-redirect") == "/login?next=%2Fops%3Fstatus%3Dnew"
+    assert response.headers.get("location") is None
+    assert response.text == ""
 
 
 def test_unauthenticated_browser_ops_route_redirects_to_login_with_safe_next():
@@ -472,6 +497,22 @@ def test_unauthenticated_browser_ops_route_redirects_to_login_with_safe_next():
 
     assert response.status_code == 303
     assert response.headers["location"] == "/login?next=%2Fops%2Fboard%3Fstatus%3Dnew"
+
+
+def test_unauthenticated_hx_ops_board_route_uses_hx_redirect_to_login_with_safe_next():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops/board?status=new", headers={"HX-Request": "true"})
+
+    assert response.status_code == 200
+    assert response.headers.get("hx-redirect") == "/login?next=%2Fops%2Fboard%3Fstatus%3Dnew"
+    assert response.headers.get("location") is None
+    assert response.text == ""
 
 
 def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):

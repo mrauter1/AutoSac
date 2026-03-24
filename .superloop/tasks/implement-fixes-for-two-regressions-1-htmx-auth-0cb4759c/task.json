@@ -1,0 +1,36 @@
+{
+  "task_id": "implement-fixes-for-two-regressions-1-htmx-auth-0cb4759c",
+  "created_at": "2026-03-24T00:26:40.301262+00:00",
+  "request_text": "Implement fixes for two regressions:\n\n1) HTMX auth redirects with HX-Redirect:\n- BrowserRedirectRequired handler currently returns plain 303 for all browser redirects.\n- For requests with HX-Request present, return an HTMX-aware redirect response so client performs full navigation to login (e.g. HX-Redirect header) rather than swapping login HTML fragment into htmx target.\n- Keep existing full-page redirect behavior for non-HTMX requests.\n- Add/adjust tests covering unauthenticated /ops and /ops/board HTMX requests to assert HX redirect behavior.\n\n2) Browser-specific 403 handling for wrong-role browser access:\n- In require_browser_requester_user and require_browser_ops_user path, keep 403 semantics but route through a browser-specific exception/handler (not API JSON) for browser HTML routes.\n- Add app/templates/403.html and use it for browser 403s.\n- Preserve existing JSON/API behavior for non-browser endpoints.\n- Add tests that browser wrong-role requests return 403 HTML template content and are not redirects.\n\nConstraints:\n- Minimal local changes.\n- Keep API/non-browser dependencies behavior unchanged.\n- Ensure existing tests continue to pass; add focused tests for new behavior.",
+  "request_updated_at": "2026-03-24T00:26:40.301302+00:00",
+  "phase_plan_path": "/workspace/AutoSac/.superloop/tasks/implement-fixes-for-two-regressions-1-htmx-auth-0cb4759c/plan/phase_plan.yaml",
+  "phase_plan_version": 1,
+  "active_phase_selection": {
+    "run_id": "run-20260324T002640Z-1dcbc90f",
+    "mode": "single",
+    "phase_ids": [
+      "browser-auth-regressions"
+    ],
+    "explicit": true,
+    "current_phase_index": 1,
+    "current_phase_id": null
+  },
+  "phase_status": {
+    "browser-auth-regressions": "completed"
+  },
+  "phase_history": [
+    {
+      "phase_id": "browser-auth-regressions",
+      "run_id": "run-20260324T002640Z-1dcbc90f",
+      "status": "in_progress",
+      "ts": "2026-03-24T00:28:59.517890+00:00"
+    },
+    {
+      "phase_id": "browser-auth-regressions",
+      "run_id": "run-20260324T002640Z-1dcbc90f",
+      "status": "completed",
+      "ts": "2026-03-24T00:34:05.695463+00:00",
+      "pair": "test"
+    }
+  ]
+}

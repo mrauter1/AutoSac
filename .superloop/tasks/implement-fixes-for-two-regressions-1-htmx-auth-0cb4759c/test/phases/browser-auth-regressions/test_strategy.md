@@ -1,0 +1,21 @@
+# Test Strategy
+
+- Task ID: implement-fixes-for-two-regressions-1-htmx-auth-0cb4759c
+- Pair: test
+- Phase ID: browser-auth-regressions
+- Phase Directory Key: browser-auth-regressions
+- Phase Title: Fix browser HTMX redirects and browser-only 403 rendering
+- Scope: phase-local producer artifact
+- Behavior to coverage map:
+  - HTMX unauthenticated browser redirects: `tests/test_ops_workflow.py` covers `/ops` and `/ops/board` returning `200` with `HX-Redirect` and no `Location` header.
+  - Preserved non-HTMX browser redirects: `tests/test_ops_workflow.py` keeps the existing `303 Location` assertion for unauthenticated browser access, and `tests/test_auth_requester.py` keeps the requester browser redirect assertion.
+  - Browser wrong-role HTML 403s: `tests/test_ops_workflow.py` covers `/ops`, `/ops/board`, and `/ops/tickets/...`; `tests/test_auth_requester.py` covers `/app`. Assertions require `403`, no redirect header, and rendered browser 403 content.
+  - Preserved non-browser 403s: `tests/test_auth_requester.py` asserts invalid logout CSRF and attachment access denial remain plain JSON `403` responses and do not render the browser 403 template.
+- Edge cases / failure paths:
+  - Safe `next` query preservation is exercised on HTMX and non-HTMX unauthenticated browser requests.
+  - Wrong-role access is checked across both browser role guards, including a detail route for ops to catch handler/template regressions beyond list pages.
+- Determinism / stabilization:
+  - Route tests stub dependencies with `SimpleNamespace`, dependency overrides, and local fake DB/session objects; no network, timing, or real persistence dependencies are introduced.
+  - Assertions target explicit headers, status codes, and stable response substrings to avoid brittle template snapshots.
+- Known gaps:
+  - No browser E2E test asserts actual htmx client-side navigation, so transport-level coverage is limited to server response shape (`HX-Redirect` plus non-3xx status).

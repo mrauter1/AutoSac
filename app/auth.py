@@ -27,6 +27,13 @@ class BrowserRedirectRequired(Exception):
         self.location = location
 
 
+class BrowserForbiddenRequired(Exception):
+    def __init__(self, *, detail: str, current_user: User, auth_session: SessionRecord):
+        self.detail = detail
+        self.current_user = current_user
+        self.auth_session = auth_session
+
+
 def sanitize_next_path(value: str | None) -> str | None:
     if value is None:
         return None
@@ -137,9 +144,16 @@ def require_requester_user(current_user: User = Depends(get_current_user)) -> Us
     return current_user
 
 
-def require_browser_requester_user(current_user: User = Depends(require_browser_user)) -> User:
+def require_browser_requester_user(
+    current_user: User = Depends(require_browser_user),
+    auth_session: SessionRecord = Depends(get_required_browser_auth_session),
+) -> User:
     if not is_requester(current_user):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Requester access required")
+        raise BrowserForbiddenRequired(
+            detail="Requester access required",
+            current_user=current_user,
+            auth_session=auth_session,
+        )
     return current_user
 
 
@@ -149,9 +163,16 @@ def require_ops_user(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
-def require_browser_ops_user(current_user: User = Depends(require_browser_user)) -> User:
+def require_browser_ops_user(
+    current_user: User = Depends(require_browser_user),
+    auth_session: SessionRecord = Depends(get_required_browser_auth_session),
+) -> User:
     if not is_ops_user(current_user):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Ops access required")
+        raise BrowserForbiddenRequired(
+            detail="Ops access required",
+            current_user=current_user,
+            auth_session=auth_session,
+        )
     return current_user
 
 

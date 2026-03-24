@@ -4,14 +4,15 @@ from pathlib import Path
 import time
 
 from fastapi import FastAPI
-from fastapi import Request
+from fastapi import Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.auth import BrowserRedirectRequired
+from app.auth import BrowserForbiddenRequired, BrowserRedirectRequired
 from app.routes_auth import router as auth_router
 from app.routes_ops import router as ops_router
 from app.routes_requester import router as requester_router
+from app.ui import build_template_context, templates
 from shared.config import get_settings
 from shared.db import ping_database
 from shared.logging import log_web_event
@@ -30,8 +31,24 @@ def create_app() -> FastAPI:
     app.include_router(ops_router)
 
     @app.exception_handler(BrowserRedirectRequired)
-    async def browser_redirect_handler(_: Request, exc: BrowserRedirectRequired):
+    async def browser_redirect_handler(request: Request, exc: BrowserRedirectRequired):
+        if request.headers.get("HX-Request", "").lower() == "true":
+            return Response(status_code=200, headers={"HX-Redirect": exc.location})
         return RedirectResponse(exc.location, status_code=303)
+
+    @app.exception_handler(BrowserForbiddenRequired)
+    async def browser_forbidden_handler(request: Request, exc: BrowserForbiddenRequired):
+        return templates.TemplateResponse(
+            request,
+            "403.html",
+            build_template_context(
+                request=request,
+                current_user=exc.current_user,
+                auth_session=exc.auth_session,
+                extra={"error": exc.detail},
+            ),
+            status_code=403,
+        )
 
     @app.middleware("http")
     async def structured_request_logging(request: Request, call_next):

@@ -1,0 +1,21 @@
+# Implementation Notes
+
+- Task ID: implement-fixes-for-two-regressions-1-htmx-auth-0cb4759c
+- Pair: implement
+- Phase ID: browser-auth-regressions
+- Phase Directory Key: browser-auth-regressions
+- Phase Title: Fix browser HTMX redirects and browser-only 403 rendering
+- Scope: phase-local producer artifact
+- Files changed: `app/auth.py`, `app/main.py`, `app/templates/403.html`, `tests/test_ops_workflow.py`, `tests/test_auth_requester.py`
+- Symbols touched: `BrowserForbiddenRequired`, `require_browser_requester_user`, `require_browser_ops_user`, `create_app`, `browser_redirect_handler`, `browser_forbidden_handler`
+- Checklist mapping:
+  - Browser HTMX redirect handling: completed in `app/main.py` handler and covered in `tests/test_ops_workflow.py`
+  - Browser-only 403 path: completed in `app/auth.py` + `app/main.py` + `app/templates/403.html`
+  - Focused regression coverage: completed in `tests/test_ops_workflow.py` and `tests/test_auth_requester.py`
+- Assumptions: `require_browser_requester_user` and `require_browser_ops_user` are only used by browser HTML routes, so threading browser session context into the new forbidden exception does not affect API contracts.
+- Preserved invariants: non-HTMX browser unauthenticated requests still return `303` redirects; API/non-browser `HTTPException(403)` behavior and CSRF/attachment 403 flows remain unchanged.
+- Intended behavior changes: HTMX unauthenticated browser requests now return `200` with `HX-Redirect`; wrong-role browser HTML requests now render `403.html` with HTTP 403 instead of default API-style 403 responses.
+- Known non-changes: no route structure changes, no permission model changes, no persistence/config changes, no global 403 handler added.
+- Expected side effects: browser 403 pages keep the standard base template header/logout context because the exception carries `current_user` and `auth_session`.
+- Validation performed: `pytest tests/test_ops_workflow.py`; `pytest tests/test_auth_requester.py`
+- Deduplication / centralization: browser-only 403 rendering is centralized behind a distinct exception/handler pair instead of duplicating template responses across routes.

@@ -1,0 +1,39 @@
+version: 1
+task_id: implement-fixes-for-two-regressions-1-htmx-auth-0cb4759c
+request_snapshot_ref: /workspace/AutoSac/.superloop/tasks/implement-fixes-for-two-regressions-1-htmx-auth-0cb4759c/runs/run-20260324T002640Z-1dcbc90f/request.md
+phases:
+  - phase_id: browser-auth-regressions
+    title: Fix browser HTMX redirects and browser-only 403 rendering
+    objective: Implement the two browser-auth regression fixes with minimal local changes and focused regression coverage.
+    status: planned
+    in_scope:
+      - Update browser unauthenticated redirect handling to emit HTMX-aware redirects when `HX-Request` is present.
+      - Introduce browser-only forbidden handling for wrong-role browser HTML routes.
+      - Add `app/templates/403.html` and route browser forbidden responses through it.
+      - Extend auth/ops browser route tests for HTMX redirect and browser 403 behavior.
+    out_of_scope:
+      - Changing API permission dependencies or their JSON response contracts.
+      - Changing unrelated 403 paths such as CSRF validation or attachment authorization.
+      - Refactoring route structure or template architecture beyond the minimal exception/template changes.
+    dependencies: []
+    acceptance_criteria:
+      - id: AC-1
+        text: Unauthenticated HTMX requests to `/ops` and `/ops/board` receive an HTMX-aware redirect response to the safe login URL, while non-HTMX browser requests still receive the existing 303 redirect.
+      - id: AC-2
+        text: Wrong-role browser access using `require_browser_requester_user` or `require_browser_ops_user` returns HTTP 403 HTML content from `403.html` and does not redirect.
+      - id: AC-3
+        text: API/non-browser permission behavior remains unchanged because only browser-specific dependencies and handlers are modified.
+      - id: AC-4
+        text: Focused auth/requester and ops workflow tests cover the new browser behaviors and existing relevant tests continue to pass.
+    deliverables:
+      - Updated browser auth exception/dependency plan reflected in code touch points under `app/auth.py` and `app/main.py`.
+      - New browser 403 template at `app/templates/403.html`.
+      - Focused regression tests in `tests/test_ops_workflow.py` and `tests/test_auth_requester.py`.
+    risks:
+      - HTMX redirects may still fail if implemented with a 3xx status instead of a header-only browser instruction.
+      - An overly broad 403 handler could unintentionally convert API JSON errors into HTML responses.
+      - Browser 403 rendering could miss shared template context if the exception path does not preserve user/session state.
+    rollback:
+      - Revert the browser redirect handler to plain 303 behavior if HTMX-specific handling proves unstable.
+      - Remove the browser-only forbidden exception/handler/template and restore plain browser dependency 403 exceptions if HTML rendering regresses unexpectedly.
+      - Re-run the targeted auth and ops tests after rollback to confirm original behavior is restored.
