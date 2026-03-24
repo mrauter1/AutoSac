@@ -46,13 +46,19 @@ The worker node uses strict boundary enforcement. It maps local mounts for `app/
 
 ### Getting Started
 
-1. **Bootstrap Workspace:**
+1. **Configure environment variables:**
+   Copy `.env.example` to `.env` and fill in required values for your local setup.
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Bootstrap Workspace:**
    Maps your repo and manuals for the agent.
    ```bash
    python scripts/bootstrap_workspace.py
    ```
 
-2. **Run Services:**
+3. **Run Services:**
    ```bash
    # Start the web interface
    python scripts/run_web.py
@@ -61,5 +67,16 @@ The worker node uses strict boundary enforcement. It maps local mounts for `app/
    python scripts/run_worker.py
    ```
 
-3. **Verify:**
-   Use the `/readyz` endpoint to confirm database connectivity, workspace availability, and agent contract compliance.
+4. **Validate local wiring before starting services (optional but recommended):**
+   ```bash
+   python scripts/run_web.py --check
+   python scripts/run_worker.py --check
+   ```
+
+5. **Verify runtime health:**
+   Run `GET /readyz` to confirm database connectivity, workspace availability, and agent contract compliance.
+
+6. **Run tests:**
+   ```bash
+   pytest
+   ```
