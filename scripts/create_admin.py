@@ -9,7 +9,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from shared.db import session_scope
-from shared.user_admin import create_user
+from shared.contracts import WORKSPACE_BOOTSTRAP_VERSION
+from shared.ticketing import ensure_system_state_defaults
+from shared.user_admin import ensure_admin_user
 
 
 def main() -> None:
@@ -20,14 +22,17 @@ def main() -> None:
     args = parser.parse_args()
 
     with session_scope() as db:
-        create_user(
+        ensure_system_state_defaults(db, WORKSPACE_BOOTSTRAP_VERSION)
+        user, outcome = ensure_admin_user(
             db,
             email=args.email,
             display_name=args.display_name,
             password=args.password,
-            role="admin",
         )
-    print(f"Created admin user {args.email.lower()}")
+    if outcome == "created":
+        print(f"Created admin user {user.email}")
+        return
+    print(f"Admin user {user.email} already matched the requested bootstrap state")
 
 
 if __name__ == "__main__":

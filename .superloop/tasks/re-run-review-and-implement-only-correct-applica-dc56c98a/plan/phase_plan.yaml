@@ -1,0 +1,41 @@
+version: 1
+task_id: re-run-review-and-implement-only-correct-applica-dc56c98a
+request_snapshot_ref: /workspace/AutoSac/.superloop/tasks/re-run-review-and-implement-only-correct-applica-dc56c98a/runs/run-20260324T015824Z-fd975cd7/request.md
+phases:
+  - phase_id: auth-worker-bootstrap-fixes
+    title: Auth challenge, triage allowlist, and bootstrap defaults
+    objective: Implement the requested auth, worker-validation, and bootstrap fixes with focused regression coverage and no unrelated behavior drift.
+    status: planned
+    in_scope:
+      - Normalize invalid or missing login preauth challenge failures to HTTP 403 with a freshly issued challenge.
+      - Rotate the preauth CSRF challenge on failed credential attempts while preserving successful login behavior.
+      - Enforce the worker auto-public-action class allowlist for support and access_config only.
+      - Seed system_state defaults, including bootstrap_version, from scripts/bootstrap_workspace.py using existing shared helpers.
+      - Update targeted tests for auth, worker triage validation, and bootstrap initialization.
+    out_of_scope:
+      - Broad auth/session refactors or changes to logout/requester CSRF handling.
+      - Expansion of the automatic public-reply class allowlist beyond explicitly requested support and access_config.
+      - Schema, migration, or configuration changes unrelated to the requested fixes.
+    dependencies: []
+    acceptance_criteria:
+      - id: AC-1
+        text: POST /login returns 403 for missing or mismatched preauth challenge state and still reissues a fresh login challenge.
+      - id: AC-2
+        text: Failed credential submissions rotate the preauth cookie and hidden login CSRF token without changing successful login behavior.
+      - id: AC-3
+        text: Worker triage validation rejects auto_public_reply and auto_confirm_and_route for ticket classes outside support and access_config.
+      - id: AC-4
+        text: scripts/bootstrap_workspace.py initializes missing system_state defaults, including bootstrap_version, through the shared default-seeding path.
+      - id: AC-5
+        text: Targeted automated tests cover the requested fixes and guard the existing auth, worker, and bootstrap behaviors from regression.
+    deliverables:
+      - Updated plan-aligned implementation in auth routes, worker triage validation, and bootstrap script.
+      - Targeted test coverage updates proving the requested behavior and preserving stable surrounding behavior.
+    risks:
+      - Login failure-path edits could accidentally change redirect or cookie lifecycle behavior.
+      - Allowlist enforcement could overconstrain worker actions if applied to unsupported actions beyond the requested automatic public ones.
+      - Bootstrap script DB initialization could diverge from worker/admin defaults if it does not reuse the shared helper.
+    rollback:
+      - Revert the login failure-path changes if browser login regression appears in targeted tests or manual smoke checks.
+      - Revert the triage allowlist gate if it blocks a class that later receives explicit product approval for automatic public actions.
+      - Revert bootstrap seeding changes if they break the script contract or introduce duplicate default logic.

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_required_auth_session, require_ops_user, validate_csrf_token
 from app.render import render_markdown_to_html
-from app.ui import build_template_context, ops_author_label, ops_status_label, templates
+from app.ui import build_template_context, is_htmx_request, ops_author_label, ops_status_label, templates
 from shared.db import db_session_dependency
 from shared.models import AIDraft, AIRun, Ticket, TicketAttachment, TicketMessage, TicketView, User
 from shared.permissions import is_ops_user
@@ -282,7 +282,7 @@ def _template_or_partial_response(
     partial_name: str,
     context: dict[str, object],
 ):
-    if request.headers.get("HX-Request", "").lower() == "true":
+    if is_htmx_request(request):
         return templates.TemplateResponse(request, partial_name, context)
     return templates.TemplateResponse(request, template_name, context)
 
@@ -296,18 +296,21 @@ def ops_ticket_list(
 ):
     filters = _read_filters(request)
     db.commit()
-    return templates.TemplateResponse(
+    context = build_template_context(
+        request=request,
+        current_user=current_user,
+        auth_session=auth_session,
+        extra={
+            **_ops_filter_context(db, current_user=current_user, filters=filters),
+            "filters_action": "/ops",
+            "filters_target_id": "ops-results",
+        },
+    )
+    return _template_or_partial_response(
         request,
-        "ops_ticket_list.html",
-        build_template_context(
-            request=request,
-            current_user=current_user,
-            auth_session=auth_session,
-            extra={
-                **_ops_filter_context(db, current_user=current_user, filters=filters),
-                "filters_action": "/ops",
-            },
-        ),
+        template_name="ops_ticket_list.html",
+        partial_name="ops_ticket_rows.html",
+        context=context,
     )
 
 
@@ -327,6 +330,7 @@ def ops_board(
         extra={
             **_ops_filter_context(db, current_user=current_user, filters=filters),
             "filters_action": "/ops/board",
+            "filters_target_id": "ops-results",
             "ops_status_label": ops_status_label,
         },
     )

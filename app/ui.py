@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit
+import posixpath
 
 from fastapi.templating import Jinja2Templates
 
 from shared.models import SessionRecord, User
 from shared.permissions import is_ops_user
 
-templates = Jinja2Templates(directory="app/templates")
+APP_DIR = Path(__file__).resolve().parent
+TEMPLATES_DIR = APP_DIR / "templates"
+STATIC_DIR = APP_DIR / "static"
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 REQUESTER_STATUS_LABELS = {
     "new": "Reviewing",
@@ -60,6 +66,50 @@ def post_login_redirect_path(user: User) -> str:
     if is_ops_user(user):
         return "/ops"
     return "/app"
+
+
+def is_htmx_request(request) -> bool:
+    return request.headers.get("HX-Request", "").lower() == "true"
+
+
+def sanitize_next_path(next_path: str | None) -> str | None:
+    if next_path is None:
+        return None
+    candidate = next_path.strip()
+    if not candidate:
+        return None
+    parsed = urlsplit(candidate)
+    if parsed.scheme or parsed.netloc or candidate.startswith("//") or not parsed.path.startswith("/"):
+        return None
+    normalized_path = posixpath.normpath(parsed.path)
+    if not normalized_path.startswith("/"):
+        normalized_path = f"/{normalized_path}"
+    if normalized_path == "/login":
+        return None
+    query = urlencode(parse_qsl(parsed.query, keep_blank_values=True), doseq=True)
+    return f"{normalized_path}?{query}" if query else normalized_path
+
+
+def login_redirect_path(next_path: str | None = None) -> str:
+    safe_next = sanitize_next_path(next_path)
+    if not safe_next:
+        return "/login"
+    return f"/login?{urlencode({'next': safe_next})}"
+
+
+def request_next_path(request) -> str | None:
+    query = request.url.query
+    current = f"{request.url.path}?{query}" if query else request.url.path
+    return sanitize_next_path(current)
+
+
+def is_html_navigation_request(request) -> bool:
+    if request.method not in {"GET", "HEAD"}:
+        return False
+    if is_htmx_request(request):
+        return False
+    path = request.url.path
+    return path == "/app" or path.startswith("/app/") or path == "/ops" or path.startswith("/ops/")
 
 
 def build_template_context(

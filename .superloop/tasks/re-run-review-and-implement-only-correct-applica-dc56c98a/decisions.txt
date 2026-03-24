@@ -1,0 +1,10 @@
+<superloop-decisions-header version="1" block_seq="1" owner="planner" phase_id="task-global" pair="plan" turn_seq="1" run_id="run-20260324T015824Z-fd975cd7" ts="2026-03-24T01:58:24.130366+00:00" />
+Invalid or missing preauth login challenge state must return 403 and reissue a fresh challenge instead of reusing stale state.
+Failed credential submissions must rotate the preauth login cookie and CSRF token while preserving the existing 400 invalid-credentials response.
+Automatic public worker actions remain allowlisted to support and access_config only unless a later explicit clarification broadens that set.
+scripts/bootstrap_workspace.py should seed system_state through ensure_system_state_defaults with the shared bootstrap version to stay aligned with worker and admin initialization behavior.
+<superloop-decisions-header version="1" block_seq="2" owner="implementer" phase_id="auth-worker-bootstrap-fixes" pair="implement" turn_seq="1" run_id="run-20260324T015824Z-fd975cd7" ts="2026-03-24T02:00:24.244545+00:00" />
+Worker triage allowlist enforcement is applied to automatic public actions only so existing validation behavior and unknown-ticket error handling stay stable for non-automatic actions.
+scripts/bootstrap_workspace.py now assumes the migrated system_state table exists, matching the documented order where alembic runs before workspace bootstrap.
+<superloop-decisions-header version="1" block_seq="3" owner="test_author" phase_id="auth-worker-bootstrap-fixes" pair="test" turn_seq="1" run_id="run-20260324T015824Z-fd975cd7" ts="2026-03-24T02:04:43.976253+00:00" />
+The bootstrap script end-to-end test seeds only the `system_state` table in SQLite and asserts the resulting default rows, avoiding PostgreSQL-specific migration/sequence behavior while still validating the script's requested DB side effects.

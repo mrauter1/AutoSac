@@ -1,0 +1,16 @@
+<superloop-decisions-header version="1" block_seq="1" owner="planner" phase_id="task-global" pair="plan" turn_seq="1" run_id="run-20260324T011055Z-65f8f56b" ts="2026-03-24T01:10:55.180706+00:00" />
+Use a dedicated additive server-side preauth login state store for anonymous login CSRF and safe next handling because authenticated sessions require user_id and signed-cookie fallback is out of contract.
+Unauthenticated browser navigation to protected HTML pages should redirect to /login with a sanitized relative next target; authenticated wrong-role access must remain a 403.
+HTMX filtering on /ops and /ops/board must return result fragments only and must not change ticket_views semantics for list, board, or filter-refresh requests.
+Codex prompt transport must keep prompt.txt as a run artifact while removing full prompt text from argv; final.json remains the canonical parsed output.
+<superloop-decisions-header version="1" block_seq="2" owner="planner" phase_id="task-global" pair="plan" turn_seq="2" run_id="run-20260324T011055Z-65f8f56b" ts="2026-03-24T01:15:33.799889+00:00" />
+Preauth login CSRF uses a dedicated additive server-side store backed by a short-lived opaque cookie scoped to /login; the server record must hold token_hash, csrf_token, sanitized next_path, expiry, and optional request metadata.
+Expired or missing preauth login state must fail closed by reissuing a fresh login challenge rather than authenticating or reusing stale state.
+The preauth login persistence and migration work belongs to the web-auth-ui-hardening phase because login CSRF cannot ship safely without its backing store.
+<superloop-decisions-header version="1" block_seq="3" owner="implementer" phase_id="web-auth-ui-hardening" pair="implement" turn_seq="1" run_id="run-20260324T011055Z-65f8f56b" ts="2026-03-24T01:17:46.894940+00:00" />
+Browser 401-to-/login redirects are limited to GET/HEAD HTML navigations under /app and /ops and explicitly exclude HTMX requests so fragment fetches and non-HTML surfaces keep their existing 401 behavior.
+GET /login always rotates the preauth login challenge and commits it immediately so the server-side next_path and CSRF state stay synchronized with the latest browser navigation target.
+<superloop-decisions-header version="1" block_seq="4" owner="implementer" phase_id="worker-bootstrap-hardening" pair="implement" turn_seq="1" run_id="run-20260324T011055Z-65f8f56b" ts="2026-03-24T01:26:40.158545+00:00" />
+`route_dev_ti` is treated as the no-public-message path: validation now requires `auto_public_reply_allowed=false` and an empty `public_reply_markdown`, while public confirmation remains reserved for `auto_confirm_and_route`.
+`scripts/create_admin.py` is deterministic and idempotent only when the existing record matches email, role=`admin`, active status, display name, and password; any mismatch is an explicit bootstrap conflict instead of an in-place mutation.
+`worker.main.update_worker_heartbeat()` must flush after seeding missing `SystemState` defaults because the shared session factory uses `autoflush=False` and `Session.get()` will not see pending inserts otherwise.

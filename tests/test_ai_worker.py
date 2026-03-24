@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import threading
@@ -42,7 +43,13 @@ def _load_worker_symbols():
     pytest.importorskip("pydantic")
 
     from worker.main import heartbeat_loop
-    from worker.codex_runner import CodexRunError, build_codex_command, build_triage_prompt, prepare_codex_run
+    from worker.codex_runner import (
+        CodexRunError,
+        build_codex_command,
+        build_triage_prompt,
+        execute_codex_run,
+        prepare_codex_run,
+    )
     from worker.triage import (
         _apply_success_result,
         _mark_failed,
@@ -62,6 +69,7 @@ def _load_worker_symbols():
         "build_codex_command": build_codex_command,
         "build_requester_visible_fingerprint": build_requester_visible_fingerprint,
         "build_triage_prompt": build_triage_prompt,
+        "execute_codex_run": execute_codex_run,
         "heartbeat_loop": heartbeat_loop,
         "prepare_codex_run": prepare_codex_run,
         "process_ai_run": process_ai_run,
@@ -137,6 +145,47 @@ class _FakeDb:
         if name == "Ticket" and self.ticket is not None and self.ticket.id == key:
             return self.ticket
         return None
+
+
+class _FakeWorkerStateResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _FakeWorkerStateDb:
+    def __init__(self):
+        self.objects = {}
+        self.pending = {}
+        self.added = []
+        self.executed = []
+        self.flush_calls = 0
+
+    def get(self, model, key):
+        return self.objects.get((getattr(model, "__name__", ""), key))
+
+    def add(self, item):
+        self.added.append(item)
+        item_name = type(item).__name__
+        key = getattr(item, "key", None)
+        if key is not None:
+            self.pending[(item_name, key)] = item
+
+    def execute(self, statement):
+        self.executed.append(statement)
+        keys = [
+            (key,)
+            for (model_name, key), _value in {**self.objects, **self.pending}.items()
+            if model_name == "SystemState"
+        ]
+        return _FakeWorkerStateResult(keys)
+
+    def flush(self):
+        self.flush_calls += 1
+        self.objects.update(self.pending)
+        self.pending.clear()
 
 
 def test_requester_visible_fingerprint_excludes_internal_messages():
@@ -228,7 +277,37 @@ def test_build_codex_command_matches_required_contract(tmp_path):
     assert 'web_search="disabled"' in command
     assert "--model" in command
     assert "--image" in command
+    assert command[-1] == "-"
+    assert prepared.prompt not in command
     assert env["CODEX_API_KEY"] == "test-key"
+
+
+def test_execute_codex_run_passes_prompt_via_stdin(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    context = _make_context()
+    prepared = symbols["prepare_codex_run"](
+        settings,
+        ticket_id=context.ticket.id,
+        run_id=uuid.uuid4(),
+        context=context,
+    )
+    prepared.final_output_path.write_text(json.dumps(_valid_payload()), encoding="utf-8")
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["input"] = kwargs["input"]
+        return SimpleNamespace(returncode=0, stdout='{"event":"ok"}\n', stderr="")
+
+    monkeypatch.setattr("worker.codex_runner.subprocess.run", fake_run)
+
+    artifacts = symbols["execute_codex_run"](settings, prepared=prepared)
+
+    assert observed["command"][-1] == "-"
+    assert prepared.prompt not in observed["command"]
+    assert observed["input"] == prepared.prompt
+    assert artifacts.output_payload["recommended_next_action"] == "auto_public_reply"
 
 
 def test_prepare_run_skips_when_last_processed_hash_matches(monkeypatch, tmp_path):
@@ -422,6 +501,119 @@ def test_apply_success_result_publishes_internal_note_before_public_action(monke
     assert run.ended_at is not None
 
 
+def test_validate_triage_result_requires_questions_for_clarification(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    with pytest.raises(symbols["TriageResultError"], match="at least one clarifying question"):
+        symbols["validate_triage_result"](
+            _valid_payload(
+                recommended_next_action="ask_clarification",
+                needs_clarification=True,
+                clarifying_questions=[],
+                auto_public_reply_allowed=False,
+            ),
+            settings,
+        )
+
+
+def test_validate_triage_result_rejects_clarification_with_auto_public_flag(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    with pytest.raises(symbols["TriageResultError"], match="auto_public_reply_allowed=false"):
+        symbols["validate_triage_result"](
+            _valid_payload(
+                recommended_next_action="ask_clarification",
+                needs_clarification=True,
+                clarifying_questions=["Which report is affected?"],
+                auto_public_reply_allowed=True,
+            ),
+            settings,
+        )
+
+
+def test_validate_triage_result_rejects_route_dev_ti_with_public_reply(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    with pytest.raises(symbols["TriageResultError"], match="empty public reply"):
+        symbols["validate_triage_result"](
+            _valid_payload(
+                recommended_next_action="route_dev_ti",
+                auto_public_reply_allowed=False,
+            ),
+            settings,
+        )
+
+
+def test_validate_triage_result_rejects_unknown_auto_confirm(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    with pytest.raises(symbols["TriageResultError"], match="unknown tickets cannot use automatic public actions"):
+        symbols["validate_triage_result"](
+            _valid_payload(
+                ticket_class="unknown",
+                recommended_next_action="auto_confirm_and_route",
+                confidence=0.95,
+            ),
+            settings,
+        )
+
+
+def test_validate_triage_result_rejects_bug_auto_public_action(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    with pytest.raises(
+        symbols["TriageResultError"],
+        match="automatic public actions are only supported for support and access_config tickets",
+    ):
+        symbols["validate_triage_result"](
+            _valid_payload(
+                ticket_class="bug",
+                recommended_next_action="auto_confirm_and_route",
+                confidence=0.95,
+            ),
+            settings,
+        )
+
+
+def test_validate_triage_result_allows_access_config_auto_confirm(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    result = symbols["validate_triage_result"](
+        _valid_payload(
+            ticket_class="access_config",
+            recommended_next_action="auto_confirm_and_route",
+            confidence=0.95,
+        ),
+        settings,
+    )
+
+    assert result.recommended_next_action == "auto_confirm_and_route"
+
+
+def test_validate_triage_result_allows_route_dev_ti_without_public_reply(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    result = symbols["validate_triage_result"](
+        _valid_payload(
+            recommended_next_action="route_dev_ti",
+            auto_public_reply_allowed=False,
+            public_reply_markdown="",
+            confidence=0.40,
+            evidence_found=False,
+        ),
+        settings,
+    )
+
+    assert result.recommended_next_action == "route_dev_ti"
+
+
 def test_apply_success_result_supersedes_stale_run_without_publication(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
@@ -595,3 +787,27 @@ def test_heartbeat_loop_emits_while_stop_event_controls_exit(monkeypatch, tmp_pa
     symbols["heartbeat_loop"](settings, stop_event=stop_event, interval_seconds=0)
 
     assert observed["heartbeats"] == 1
+
+
+def test_emit_worker_heartbeat_initializes_system_state_defaults(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+    pytest.importorskip("argon2")
+    from worker.main import emit_worker_heartbeat
+
+    settings = _make_settings(tmp_path)
+    fake_db = _FakeWorkerStateDb()
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.main.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.main.log_worker_event", lambda *args, **kwargs: None)
+
+    emit_worker_heartbeat(settings)
+
+    bootstrap_state = fake_db.objects[("SystemState", "bootstrap_version")]
+    heartbeat_state = fake_db.objects[("SystemState", "worker_heartbeat")]
+    assert fake_db.flush_calls == 1
+    assert bootstrap_state.value_json == {"version": "stage1-v1"}
+    assert heartbeat_state.value_json["status"] == "alive"

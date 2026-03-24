@@ -119,7 +119,7 @@ def build_codex_command(
         command.extend(["--model", settings.codex_model])
     for image_path in prepared.image_paths:
         command.extend(["--image", str(image_path)])
-    command.append(prepared.prompt)
+    command.append("-")
     env = os.environ.copy()
     env["CODEX_API_KEY"] = settings.codex_api_key
     return command, env
@@ -150,6 +150,7 @@ def execute_codex_run(settings: Settings, *, prepared: PreparedCodexRun) -> Code
             env=env,
             capture_output=True,
             text=True,
+            input=prepared.prompt,
             timeout=settings.codex_timeout_seconds,
             check=False,
         )

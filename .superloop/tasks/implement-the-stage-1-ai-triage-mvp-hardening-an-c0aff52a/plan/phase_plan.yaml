@@ -1,0 +1,105 @@
+version: 1
+task_id: implement-the-stage-1-ai-triage-mvp-hardening-an-c0aff52a
+request_snapshot_ref: /workspace/AutoSac/.superloop/tasks/implement-the-stage-1-ai-triage-mvp-hardening-an-c0aff52a/runs/run-20260324T011055Z-65f8f56b/request.md
+phases:
+  - phase_id: web-auth-ui-hardening
+    title: Web Auth And UI Hardening
+    objective: Align browser auth behavior, login CSRF, module-relative asset/template loading, and HTMX ops filtering with the Stage 1 PRD without changing existing view-tracking semantics.
+    status: planned
+    in_scope:
+      - Module-relative static and template path resolution.
+      - Browser redirect-to-login behavior with safe relative next handling.
+      - Server-side preauth login CSRF for GET/POST /login.
+      - Additive preauth-login persistence and migration needed to back the login CSRF flow.
+      - Local HTMX asset and fragment responses for /ops and /ops/board filtering.
+      - Preservation of current ticket detail/list/board view-tracking semantics.
+    out_of_scope:
+      - SPA conversion or client-side routing.
+      - Drag-and-drop board behavior.
+      - Changes to authenticated session cookie format or role model.
+    dependencies: []
+    acceptance_criteria:
+      - id: AC-1
+        text: Unauthenticated browser navigation to protected HTML pages redirects to /login with a sanitized relative next target, while wrong-role access still returns 403.
+      - id: AC-2
+        text: Login GET/POST uses server-side preauth CSRF validation and rejects invalid or missing login CSRF tokens without authenticating.
+      - id: AC-3
+        text: "The preauth-login store contract is explicit and additive: opaque browser token only, hashed server-side token plus CSRF and sanitized next_path, short expiry, and safe invalidation/cleanup behavior."
+      - id: AC-4
+        text: /ops and /ops/board return full pages for normal requests and stable fragments for HTMX requests, and filter refreshes do not update ticket_views.
+      - id: AC-5
+        text: App startup and template rendering no longer depend on the process working directory.
+    deliverables:
+      - Additive preauth-login persistence/migration and route-level contract notes for the login CSRF flow.
+      - Updated auth/UI modules and templates implementing safe browser redirects and login CSRF.
+      - Vendored local HTMX asset plus ops list/board fragment handling.
+      - Regression tests covering auth redirects, safe next handling, login CSRF, HTMX fragments, and path resolution.
+    risks:
+      - Open redirect or redirect loop bugs if next sanitization is inconsistent.
+      - Fragment-only responses drifting from full-page templates.
+    rollback:
+      - Revert HTMX-specific template and route branching while keeping existing SSR pages intact.
+      - Revert browser redirect handling independently from authenticated session storage if needed.
+  - phase_id: worker-bootstrap-hardening
+    title: Worker Bootstrap And Validation Hardening
+    objective: Harden worker-side prompt transport, password verification, action validation, and bootstrap/system-state initialization while preserving Stage 1 contracts.
+    status: planned
+    in_scope:
+      - Password hash verification hardening.
+      - Codex prompt transport without passing the full prompt in argv.
+      - Expanded AI triage validation matrix.
+      - system_state.bootstrap_version and worker_heartbeat default initialization on bootstrap and worker startup.
+      - Deterministic bootstrap flow and idempotent admin creation behavior.
+    out_of_scope:
+      - Changes to ticket state definitions or AI action names.
+      - Interactive Codex authentication or web-search enablement.
+      - Non-additive schema rewrites.
+    dependencies:
+      - web-auth-ui-hardening
+    acceptance_criteria:
+      - id: AC-1
+        text: Invalid or malformed stored password hashes fail closed during login without raising server errors.
+      - id: AC-2
+        text: Codex execution keeps prompt/schema/output artifacts but no longer transports the full prompt as a raw argv argument.
+      - id: AC-3
+        text: validate_triage_result rejects contradictory action payloads and preserves all PRD-valid action paths.
+      - id: AC-4
+        text: Bootstrap and worker startup idempotently ensure required system_state defaults, including bootstrap_version.
+      - id: AC-5
+        text: "Admin bootstrap/create flow is documented and deterministic: create-if-missing, no-op or explicit success on matching existing admin, and explicit error on conflicting state."
+    deliverables:
+      - Updated worker/security/bootstrap modules implementing hardened validation and initialization.
+      - Regression tests covering prompt transport, validation matrix, password verification hardening, and bootstrap/system-state behavior.
+    risks:
+      - Tightened validation may reject previously accepted but invalid AI outputs.
+      - Codex CLI transport changes may break execution if the CLI contract is applied incorrectly.
+    rollback:
+      - Revert command transport changes while preserving prompt artifact writes.
+      - Disable new validation branches if they are shown to reject PRD-valid payloads.
+  - phase_id: docs-and-release-validation
+    title: Docs And Release Validation
+    objective: Align operator-facing docs and environment examples with the hardened implementation and close the remaining regression gaps.
+    status: planned
+    in_scope:
+      - Complete .env.example.
+      - Rewrite README to reflect the actual Stage 1 product and deterministic bootstrap flow.
+      - Final regression coverage updates across auth, HTMX, worker, bootstrap, and docs contracts.
+    out_of_scope:
+      - Marketing copy or broader product repositioning.
+      - New operational tooling beyond the documented existing scripts.
+    dependencies:
+      - worker-bootstrap-hardening
+    acceptance_criteria:
+      - id: AC-1
+        text: README and .env.example describe the actual Stage 1 runtime, smoke checks, bootstrap order, admin/user CLI flow, and required environment variables.
+      - id: AC-2
+        text: Test coverage explicitly exercises the requested auth, HTMX, paths, triage validation, prompt transport, and bootstrap hardening areas.
+      - id: AC-3
+        text: Documentation and tests do not contradict the implemented rollout and rollback behavior.
+    deliverables:
+      - Updated README.md and .env.example.
+      - Final regression-focused test updates and contract assertions.
+    risks:
+      - Docs drift if implementation details change late in the cycle.
+    rollback:
+      - Revert docs/tests independently without affecting runtime behavior if wording or assertions need correction.

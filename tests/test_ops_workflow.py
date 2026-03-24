@@ -481,10 +481,16 @@ def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):
 
     with stack["TestClient"](app) as client:
         response = client.get("/ops")
+        fragment = client.get("/ops?status=new", headers={"HX-Request": "true"})
 
     assert response.status_code == 200
+    assert "<html" in response.text
+    assert 'id="ops-results"' in response.text
+    assert fragment.status_code == 200
+    assert "<html" not in fragment.text
+    assert 'id="ops-results"' in fragment.text
     assert observed["view_updates"] == 0
-    assert db.commit_calls == 1
+    assert db.commit_calls == 2
 
 
 def test_ops_board_route_does_not_mark_ticket_as_read(monkeypatch):
@@ -528,10 +534,16 @@ def test_ops_board_route_does_not_mark_ticket_as_read(monkeypatch):
 
     with stack["TestClient"](app) as client:
         response = client.get("/ops/board")
+        fragment = client.get("/ops/board?status=new", headers={"HX-Request": "true"})
 
     assert response.status_code == 200
+    assert "<html" in response.text
+    assert 'id="ops-results"' in response.text
+    assert fragment.status_code == 200
+    assert "<html" not in fragment.text
+    assert 'id="ops-results"' in fragment.text
     assert observed["view_updates"] == 0
-    assert db.commit_calls == 1
+    assert db.commit_calls == 2
 
 
 def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
@@ -572,10 +584,12 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
 
 def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate():
     source = Path("app/routes_ops.py").read_text(encoding="utf-8")
+    base_template = Path("app/templates/base.html").read_text(encoding="utf-8")
     filters_template = Path("app/templates/ops_filters.html").read_text(encoding="utf-8")
     detail_template = Path("app/templates/ops_ticket_detail.html").read_text(encoding="utf-8")
     board_template = Path("app/templates/ops_board_columns.html").read_text(encoding="utf-8")
     list_template = Path("app/templates/ops_ticket_list.html").read_text(encoding="utf-8")
+    rows_template = Path("app/templates/ops_ticket_rows.html").read_text(encoding="utf-8")
 
     assert '"/ops/tickets/{reference}/reply-public"' in source
     assert '"/ops/tickets/{reference}/note-internal"' in source
@@ -589,6 +603,9 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert "Status" in filters_template
     assert "Class" in filters_template
     assert "Assigned to" in filters_template
+    assert 'hx-get="{{ filters_action }}"' in filters_template
+    assert 'hx-target="#{{ filters_target_id }}"' in filters_template
+    assert 'hx-swap="outerHTML"' in filters_template
     assert "Urgent only" in filters_template
     assert "Unassigned only" in filters_template
     assert "Created by me" in filters_template
@@ -600,4 +617,7 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert "Relevant repo/docs paths" in detail_template
     assert "Pending AI draft" in detail_template
     assert "Ticket queue" in list_template
+    assert 'id="ops-results"' in rows_template
+    assert 'id="ops-results"' in board_template
+    assert '/static/htmx.min.js' in base_template
     assert "Pending draft approval" in board_template
