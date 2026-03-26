@@ -3,7 +3,9 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Protocol
+import mimetypes
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -28,13 +30,13 @@ SYSTEM_STATE_KEYS = ("worker_heartbeat", "bootstrap_version")
 _STATUS_SENTINEL = object()
 
 
-class ImageUpload(Protocol):
+class AttachmentUpload(Protocol):
     original_filename: str
     mime_type: str
     sha256: str
     size_bytes: int
-    width: int
-    height: int
+    width: int | None
+    height: int | None
 
 
 def generate_ticket_reference(reference_num: int) -> str:
@@ -207,11 +209,17 @@ def _create_message(
 
 
 def _attachment_extension(mime_type: str) -> str:
-    if mime_type == "image/png":
-        return ".png"
-    if mime_type == "image/jpeg":
-        return ".jpg"
-    raise ValueError(f"Unsupported attachment mime type: {mime_type}")
+    guessed = mimetypes.guess_extension(mime_type, strict=False) if mime_type else None
+    if guessed and guessed.startswith("."):
+        return guessed
+    return ".bin"
+
+
+def _safe_attachment_extension(original_filename: str, mime_type: str) -> str:
+    candidate = Path(original_filename).suffix.lower()
+    if re.fullmatch(r"\.[a-z0-9]{1,16}", candidate):
+        return candidate
+    return _attachment_extension(mime_type)
 
 
 def enqueue_or_requeue_ai_run(
@@ -277,31 +285,32 @@ def _add_public_attachments(
     *,
     ticket_id: uuid.UUID,
     message_id: uuid.UUID,
-    images: list[ImageUpload],
+    attachments: list[AttachmentUpload],
     storage_path_builder: Callable[[uuid.UUID, str], str],
     created_at,
 ) -> list[TicketAttachment]:
-    attachments: list[TicketAttachment] = []
-    for image in images:
+    saved_attachments: list[TicketAttachment] = []
+    for upload in attachments:
         attachment_id = uuid.uuid4()
-        stored_path = storage_path_builder(attachment_id, _attachment_extension(image.mime_type))
+        extension = _safe_attachment_extension(upload.original_filename, upload.mime_type)
+        stored_path = storage_path_builder(attachment_id, extension)
         attachment = TicketAttachment(
             id=attachment_id,
             ticket_id=ticket_id,
             message_id=message_id,
             visibility="public",
-            original_filename=image.original_filename,
+            original_filename=upload.original_filename,
             stored_path=stored_path,
-            mime_type=image.mime_type,
-            sha256=image.sha256,
-            size_bytes=image.size_bytes,
-            width=image.width,
-            height=image.height,
+            mime_type=upload.mime_type,
+            sha256=upload.sha256,
+            size_bytes=upload.size_bytes,
+            width=upload.width,
+            height=upload.height,
             created_at=created_at,
         )
         db.add(attachment)
-        attachments.append(attachment)
-    return attachments
+        saved_attachments.append(attachment)
+    return saved_attachments
 
 
 def create_requester_ticket(
@@ -312,7 +321,7 @@ def create_requester_ticket(
     title: str,
     description_markdown: str,
     urgent: bool,
-    images: list[ImageUpload],
+    attachments: list[AttachmentUpload],
 ) -> tuple[Ticket, TicketMessage, list[TicketAttachment], AIRun | None]:
     created_at = utc_now()
     reference_num, reference = reserve_ticket_reference(db)
@@ -338,11 +347,11 @@ def create_requester_ticket(
         created_at=created_at,
     )
     db.add(message)
-    attachments = _add_public_attachments(
+    persisted_attachments = _add_public_attachments(
         db,
         ticket_id=ticket.id,
         message_id=message.id,
-        images=images,
+        attachments=attachments,
         storage_path_builder=lambda attachment_id, extension: str(
             settings.uploads_dir / str(ticket.id) / f"{attachment_id}{extension}"
         ),
@@ -364,7 +373,7 @@ def create_requester_ticket(
         from_status_override=None,
     )
     upsert_ticket_view(db, user_id=requester.id, ticket_id=ticket.id, viewed_at=created_at)
-    return ticket, message, attachments, run
+    return ticket, message, persisted_attachments, run
 
 
 def add_requester_reply(
@@ -374,7 +383,7 @@ def add_requester_reply(
     ticket: Ticket,
     requester: User,
     body_markdown: str,
-    images: list[ImageUpload],
+    attachments: list[AttachmentUpload],
 ) -> tuple[TicketMessage, list[TicketAttachment], AIRun | None]:
     created_at = utc_now()
     message = _create_public_message(
@@ -385,11 +394,11 @@ def add_requester_reply(
         created_at=created_at,
     )
     db.add(message)
-    attachments = _add_public_attachments(
+    persisted_attachments = _add_public_attachments(
         db,
         ticket_id=ticket.id,
         message_id=message.id,
-        images=images,
+        attachments=attachments,
         storage_path_builder=lambda attachment_id, extension: str(
             settings.uploads_dir / str(ticket.id) / f"{attachment_id}{extension}"
         ),
@@ -417,7 +426,7 @@ def add_requester_reply(
         requested_by_user_id=requester.id,
     )
     upsert_ticket_view(db, user_id=requester.id, ticket_id=ticket.id, viewed_at=created_at)
-    return message, attachments, run
+    return message, persisted_attachments, run
 
 
 def publish_ai_internal_note(

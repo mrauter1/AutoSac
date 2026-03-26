@@ -16,10 +16,10 @@ from app.render import render_markdown_to_html
 from app.ui import build_template_context, requester_author_label, templates
 from app.uploads import (
     UploadValidationError,
-    get_form_images,
+    get_form_attachments,
     parse_multipart_form,
-    persist_validated_image,
-    validate_image_upload,
+    persist_validated_attachment,
+    validate_attachment_upload,
 )
 from shared.config import Settings, get_settings
 from shared.db import db_session_dependency
@@ -102,9 +102,9 @@ async def _parse_requester_message_form(
         raise UploadValidationError(str(exc)) from exc
     body = str(form.get("body", "")).strip()
     csrf_token = str(form.get("csrf_token", "")).strip()
-    uploads = get_form_images(form)
-    images = [await validate_image_upload(upload, settings) for upload in uploads]
-    return body, csrf_token, images
+    uploads = get_form_attachments(form)
+    attachments = [await validate_attachment_upload(upload, settings) for upload in uploads]
+    return body, csrf_token, attachments
 
 
 async def _parse_ticket_create_form(
@@ -120,9 +120,9 @@ async def _parse_ticket_create_form(
     description = str(form.get("description", "")).strip()
     urgent = _parse_bool(form.get("urgent"))
     csrf_token = str(form.get("csrf_token", "")).strip()
-    uploads = get_form_images(form)
-    images = [await validate_image_upload(upload, settings) for upload in uploads]
-    return title, description, urgent, csrf_token, images
+    uploads = get_form_attachments(form)
+    attachments = [await validate_attachment_upload(upload, settings) for upload in uploads]
+    return title, description, urgent, csrf_token, attachments
 
 
 def _cleanup_paths(paths: list[Path]) -> None:
@@ -205,12 +205,15 @@ async def requester_ticket_create(
     description = ""
     urgent = False
     try:
-        title, description, urgent, csrf_token, images = await _parse_ticket_create_form(request, settings=settings)
+        title, description, urgent, csrf_token, upload_attachments = await _parse_ticket_create_form(
+            request,
+            settings=settings,
+        )
         validate_csrf_token(auth_session, csrf_token)
         if not description:
             raise UploadValidationError("Description is required.")
-        if len(images) > settings.max_images_per_message:
-            raise UploadValidationError(f"Attach at most {settings.max_images_per_message} images.")
+        if len(upload_attachments) > settings.max_images_per_message:
+            raise UploadValidationError(f"Attach at most {settings.max_images_per_message} files.")
     except UploadValidationError as exc:
         return templates.TemplateResponse(
             request,
@@ -231,18 +234,18 @@ async def requester_ticket_create(
 
     saved_paths: list[Path] = []
     try:
-        ticket, _, attachments, _ = create_requester_ticket(
+        ticket, _, persisted_attachments, _ = create_requester_ticket(
             db,
             settings=settings,
             requester=current_user,
             title=title,
             description_markdown=description,
             urgent=urgent,
-            images=images,
+            attachments=upload_attachments,
         )
-        for attachment, image in zip(attachments, images):
+        for attachment, upload in zip(persisted_attachments, upload_attachments):
             path = Path(attachment.stored_path)
-            persist_validated_image(path, image)
+            persist_validated_attachment(path, upload)
             saved_paths.append(path)
         db.commit()
     except Exception:
@@ -287,12 +290,12 @@ async def requester_ticket_reply(
     ticket = _load_requester_ticket_or_404(db, reference=reference, requester_id=current_user.id)
     body = ""
     try:
-        body, csrf_token, images = await _parse_requester_message_form(request, settings=settings)
+        body, csrf_token, upload_attachments = await _parse_requester_message_form(request, settings=settings)
         validate_csrf_token(auth_session, csrf_token)
         if not body:
             raise UploadValidationError("Reply text is required.")
-        if len(images) > settings.max_images_per_message:
-            raise UploadValidationError(f"Attach at most {settings.max_images_per_message} images.")
+        if len(upload_attachments) > settings.max_images_per_message:
+            raise UploadValidationError(f"Attach at most {settings.max_images_per_message} files.")
     except UploadValidationError as exc:
         return templates.TemplateResponse(
             request,
@@ -313,17 +316,17 @@ async def requester_ticket_reply(
 
     saved_paths: list[Path] = []
     try:
-        _, attachments, _ = add_requester_reply(
+        _, persisted_attachments, _ = add_requester_reply(
             db,
             settings=settings,
             ticket=ticket,
             requester=current_user,
             body_markdown=body,
-            images=images,
+            attachments=upload_attachments,
         )
-        for attachment, image in zip(attachments, images):
+        for attachment, upload in zip(persisted_attachments, upload_attachments):
             path = Path(attachment.stored_path)
-            persist_validated_image(path, image)
+            persist_validated_attachment(path, upload)
             saved_paths.append(path)
         db.commit()
     except Exception:

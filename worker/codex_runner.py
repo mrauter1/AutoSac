@@ -34,6 +34,10 @@ class CodexRunArtifacts:
     output_payload: dict[str, object]
 
 
+def _is_image_attachment(attachment) -> bool:
+    return getattr(attachment, "width", None) is not None and getattr(attachment, "height", None) is not None
+
+
 def _format_messages(messages) -> str:
     if not messages:
         return "(none)"
@@ -81,7 +85,11 @@ def prepare_codex_run(
     prompt_path.write_text(prompt, encoding="utf-8")
     schema_path.write_text(TRIAGE_OUTPUT_SCHEMA, encoding="utf-8")
 
-    image_paths = [Path(attachment.stored_path) for attachment in context.public_attachments]
+    image_paths = [
+        Path(attachment.stored_path)
+        for attachment in context.public_attachments
+        if _is_image_attachment(attachment)
+    ]
     return PreparedCodexRun(
         run_dir=run_dir,
         prompt=prompt,
