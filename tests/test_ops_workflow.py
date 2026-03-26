@@ -387,9 +387,13 @@ def _load_web_stack():
 class _RouteDb:
     def __init__(self):
         self.commit_calls = 0
+        self.rollback_calls = 0
 
     def commit(self):
         self.commit_calls += 1
+
+    def rollback(self):
+        self.rollback_calls += 1
 
 
 def test_requester_cannot_access_ops_routes():
@@ -438,6 +442,198 @@ def test_requester_cannot_access_ops_ticket_detail():
         response = client.get("/ops/tickets/T-000999")
 
     assert response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("role", "expected_options"),
+    [
+        ("dev_ti", ['<option value="requester">requester</option>']),
+        (
+            "admin",
+            [
+                '<option value="requester">requester</option>',
+                '<option value="dev_ti">dev_ti</option>',
+            ],
+        ),
+    ],
+)
+def test_ops_users_page_allows_dev_ti_and_admin_with_role_scoped_options(monkeypatch, role, expected_options):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name=role.upper(), role=role, is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    users = [SimpleNamespace(email="existing@example.com", display_name="Existing User", role="requester", is_active=True)]
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_users_for_admin", lambda db: users)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops/users")
+
+    assert response.status_code == 200
+    assert "Existing User" in response.text
+    for option in expected_options:
+        assert option in response.text
+    assert '<option value="admin">admin</option>' not in response.text
+    if role == "dev_ti":
+        assert '<option value="dev_ti">dev_ti</option>' not in response.text
+    assert db.commit_calls == 1
+
+
+def test_requester_cannot_access_ops_users_page():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester", is_active=True)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: requester
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: SimpleNamespace(csrf_token="csrf")
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops/users")
+
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("actor_role", "target_role", "expected_status"),
+    [
+        ("admin", "requester", 303),
+        ("admin", "dev_ti", 303),
+        ("admin", "admin", 403),
+        ("dev_ti", "requester", 303),
+        ("dev_ti", "dev_ti", 403),
+        ("dev_ti", "admin", 403),
+    ],
+)
+def test_ops_user_creation_role_matrix(monkeypatch, actor_role, target_role, expected_status):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name=actor_role.upper(), role=actor_role, is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    created = []
+
+    def fake_create_user(db, *, email, display_name, password, role):
+        created.append(
+            {
+                "email": email,
+                "display_name": display_name,
+                "password": password,
+                "role": role,
+            }
+        )
+        return SimpleNamespace(email=email, display_name=display_name, role=role)
+
+    monkeypatch.setattr(stack["routes_ops"], "create_user", fake_create_user)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            "/ops/users/create",
+            data={
+                "csrf_token": "csrf-token",
+                "email": "new.user@example.com",
+                "display_name": "New User",
+                "password": "supersecret",
+                "role": target_role,
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == expected_status
+    if expected_status == 303:
+        assert response.headers["location"] == "/ops/users"
+        assert created == [
+            {
+                "email": "new.user@example.com",
+                "display_name": "New User",
+                "password": "supersecret",
+                "role": target_role,
+            }
+        ]
+        assert db.commit_calls == 1
+        assert db.rollback_calls == 0
+    else:
+        assert created == []
+        assert db.commit_calls == 0
+        assert db.rollback_calls == 0
+
+
+def test_requester_cannot_post_ops_user_creation():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester", is_active=True)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: requester
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: SimpleNamespace(csrf_token="csrf-token")
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            "/ops/users/create",
+            data={
+                "csrf_token": "csrf-token",
+                "email": "blocked@example.com",
+                "display_name": "Blocked User",
+                "password": "supersecret",
+                "role": "requester",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 403
+    assert db.commit_calls == 0
+    assert db.rollback_calls == 0
+
+
+def test_ops_user_creation_validation_error_keeps_users_page_context(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name="ADMIN", role="admin", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    users = [SimpleNamespace(email="existing@example.com", display_name="Existing User", role="dev_ti", is_active=True)]
+
+    def fail_create_user(db, *, email, display_name, password, role):
+        raise ValueError("User already exists: existing@example.com")
+
+    monkeypatch.setattr(stack["routes_ops"], "create_user", fail_create_user)
+    monkeypatch.setattr(stack["routes_ops"], "_load_users_for_admin", lambda db: users)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            "/ops/users/create",
+            data={
+                "csrf_token": "csrf-token",
+                "email": "existing@example.com",
+                "display_name": "Existing User",
+                "password": "supersecret",
+                "role": "dev_ti",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
+    assert "User already exists: existing@example.com" in response.text
+    assert "Existing User" in response.text
+    assert "Create user" in response.text
+    assert '<option value="dev_ti">dev_ti</option>' in response.text
+    assert db.commit_calls == 0
+    assert db.rollback_calls == 1
 
 
 def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):

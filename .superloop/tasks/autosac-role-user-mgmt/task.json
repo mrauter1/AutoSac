@@ -1,0 +1,36 @@
+{
+  "task_id": "autosac-role-user-mgmt",
+  "created_at": "2026-03-26T12:52:17.704535+00:00",
+  "request_text": "Task: Role and user-management expansion\n\nRequirements:\n1) Admin and dev_ti can open tickets.\n2) Add a page to manage and create users; admin and dev_ti can access.\n3) Admin can create dev_ti and requester users.\n4) dev_ti can create requester users only.\n5) Execute plan -> implement -> test pairs.",
+  "request_updated_at": "2026-03-26T12:52:17.704582+00:00",
+  "phase_plan_path": "/workspace/AutoSac/.superloop/tasks/autosac-role-user-mgmt/plan/phase_plan.yaml",
+  "phase_plan_version": 1,
+  "active_phase_selection": {
+    "run_id": "run-20260326T125217Z-51668f9e",
+    "mode": "single",
+    "phase_ids": [
+      "role-user-management-hardening"
+    ],
+    "explicit": true,
+    "current_phase_index": 1,
+    "current_phase_id": null
+  },
+  "phase_status": {
+    "role-user-management-hardening": "completed"
+  },
+  "phase_history": [
+    {
+      "phase_id": "role-user-management-hardening",
+      "run_id": "run-20260326T125217Z-51668f9e",
+      "status": "in_progress",
+      "ts": "2026-03-26T12:54:50.887246+00:00"
+    },
+    {
+      "phase_id": "role-user-management-hardening",
+      "run_id": "run-20260326T125217Z-51668f9e",
+      "status": "completed",
+      "ts": "2026-03-26T13:01:25.693484+00:00",
+      "pair": "test"
+    }
+  ]
+}
