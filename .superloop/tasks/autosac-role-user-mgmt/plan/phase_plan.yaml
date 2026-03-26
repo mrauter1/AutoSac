@@ -1,0 +1,38 @@
+version: 1
+task_id: autosac-role-user-mgmt
+request_snapshot_ref: /workspace/AutoSac/.superloop/tasks/autosac-role-user-mgmt/runs/run-20260326T125217Z-51668f9e/request.md
+phases:
+  - phase_id: role-user-management-hardening
+    title: Harden role access and user management
+    objective: Confirm and lock in the requested ticket-opening and user-creation permissions using the existing requester and ops surfaces.
+    status: planned
+    in_scope:
+      - Preserve admin and dev_ti access to the existing new-ticket flow.
+      - Reuse and, if needed, adjust the existing /ops/users page and create action.
+      - Enforce the admin versus dev_ti user-creation matrix.
+      - Add targeted automated tests for allowed and denied role behavior.
+    out_of_scope:
+      - New role types or schema changes.
+      - A second user-management route or separate admin application area.
+      - Broader ticket workflow changes unrelated to access and user creation.
+    dependencies: []
+    acceptance_criteria:
+      - id: AC-1
+        text: Admin and dev_ti can access the current ticket-open page and submit new tickets through the existing requester flow.
+      - id: AC-2
+        text: The /ops/users page is accessible to admin and dev_ti and denied to requester users.
+      - id: AC-3
+        text: Admin can create requester and dev_ti users, while dev_ti can create requester users only.
+      - id: AC-4
+        text: Targeted tests cover the permission matrix and regression-prone denial paths.
+    deliverables:
+      - Updated role/access implementation only where current behavior diverges from the requested matrix.
+      - Targeted route and permission tests for ticket creation and user management.
+      - No-migration rollout using the existing route structure.
+    risks:
+      - Requester-route changes could accidentally remove ops access to ticket creation.
+      - User-management hardening could accidentally expose the page to requester users or hide needed context on errors.
+      - Role-matrix logic could drift if enforced in multiple places.
+    rollback:
+      - Revert the focused access-control and /ops/users changes if validation reveals requester or ops workflow regressions.
+      - Keep rollback scoped to this feature slice and avoid touching unrelated ticketing behavior.

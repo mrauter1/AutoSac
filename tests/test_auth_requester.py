@@ -101,13 +101,14 @@ def _load_web_stack():
     from fastapi.testclient import TestClient
 
     from app.main import create_app
-    from app import routes_auth, routes_requester
+    from app import routes_auth, routes_ops, routes_requester
     from shared.db import db_session_dependency
 
     return {
         "TestClient": TestClient,
         "create_app": create_app,
         "routes_auth": routes_auth,
+        "routes_ops": routes_ops,
         "routes_requester": routes_requester,
         "db_session_dependency": db_session_dependency,
     }
@@ -341,6 +342,32 @@ def test_requester_routes_source_uses_custom_auth_and_explicit_multipart_limits(
     assert "message.author_label" in template_source
 
 
+def test_ticket_access_guard_allows_requester_and_ops_roles():
+    pytest.importorskip("fastapi")
+    from app.auth import require_requester_user
+
+    requester = SimpleNamespace(role="requester")
+    dev_ti = SimpleNamespace(role="dev_ti")
+    admin = SimpleNamespace(role="admin")
+
+    assert require_requester_user(requester) is requester
+    assert require_requester_user(dev_ti) is dev_ti
+    assert require_requester_user(admin) is admin
+
+
+def test_ops_user_management_routes_and_role_limits_are_present():
+    source = Path("app/routes_ops.py").read_text(encoding="utf-8")
+    template_source = Path("app/templates/ops_users.html").read_text(encoding="utf-8")
+    base_template_source = Path("app/templates/base.html").read_text(encoding="utf-8")
+
+    assert '"/ops/users"' in source
+    assert '"/ops/users/create"' in source
+    assert "if actor.role == \"admin\"" in source
+    assert "return (\"requester\",)" in source
+    assert "Create user" in template_source
+    assert "/ops/users" in base_template_source
+
+
 def test_login_route_sets_remember_me_cookie(monkeypatch, tmp_path):
     stack = _load_web_stack()
     app = stack["create_app"]()
@@ -532,6 +559,74 @@ def test_protected_html_get_redirects_to_login_with_safe_next(monkeypatch):
 
     assert response.status_code == 303
     assert response.headers["location"] == "/login?next=%2Fapp%2Ftickets%2Fnew%3Fdraft%3D1"
+
+
+@pytest.mark.parametrize("role", ["dev_ti", "admin"])
+def test_ops_roles_can_open_new_ticket_page(role):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name=role.upper(), role=role, is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_requester"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/app/tickets/new")
+
+    assert response.status_code == 200
+    assert '<form method="post" action="/app/tickets"' in response.text
+    assert db.commit_calls == 1
+
+
+@pytest.mark.parametrize("role", ["dev_ti", "admin"])
+def test_ops_roles_can_submit_new_ticket_through_requester_flow(monkeypatch, tmp_path, role):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings(tmp_path)
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name=role.upper(), role=role, is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    captured = {}
+
+    async def fake_parse_ticket_create_form(request, *, settings):
+        return "Printer issue", "Queue is stuck after login.", True, "csrf-token", []
+
+    def fake_create_requester_ticket(db, *, settings, requester, title, description_markdown, urgent, images):
+        captured.update(
+            {
+                "settings": settings,
+                "requester": requester,
+                "title": title,
+                "description_markdown": description_markdown,
+                "urgent": urgent,
+                "images": images,
+            }
+        )
+        return SimpleNamespace(reference="T-000321"), None, [], None
+
+    monkeypatch.setattr(stack["routes_requester"], "_parse_ticket_create_form", fake_parse_ticket_create_form)
+    monkeypatch.setattr(stack["routes_requester"], "create_requester_ticket", fake_create_requester_ticket)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_requester"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_requester"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        response = client.post("/app/tickets", data={"csrf_token": "csrf-token"}, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/app/tickets/T-000321"
+    assert captured["settings"] is settings
+    assert captured["requester"] is current_user
+    assert captured["title"] == "Printer issue"
+    assert captured["description_markdown"] == "Queue is stuck after login."
+    assert captured["urgent"] is True
+    assert captured["images"] == []
+    assert db.commit_calls == 1
 
 
 def test_protected_htmx_get_keeps_401_instead_of_redirect():

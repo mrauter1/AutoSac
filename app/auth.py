@@ -47,8 +47,8 @@ def get_required_auth_session(
 
 
 def require_requester_user(current_user: User = Depends(get_current_user)) -> User:
-    if not is_requester(current_user):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Requester access required")
+    if not (is_requester(current_user) or is_ops_user(current_user)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Ticket access required")
     return current_user
 
 

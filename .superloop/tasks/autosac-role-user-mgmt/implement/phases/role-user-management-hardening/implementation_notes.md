@@ -1,0 +1,22 @@
+# Implementation Notes
+
+- Task ID: autosac-role-user-mgmt
+- Pair: implement
+- Phase ID: role-user-management-hardening
+- Phase Directory Key: role-user-management-hardening
+- Phase Title: Harden role access and user management
+- Scope: phase-local producer artifact
+- Files changed: `tests/test_auth_requester.py`, `tests/test_ops_workflow.py`, `.superloop/tasks/autosac-role-user-mgmt/decisions.txt`, `.superloop/tasks/autosac-role-user-mgmt/implement/phases/role-user-management-hardening/implementation_notes.md`
+- Symbols touched: `test_ops_roles_can_open_new_ticket_page`, `test_ops_roles_can_submit_new_ticket_through_requester_flow`, `test_ops_users_page_allows_dev_ti_and_admin_with_role_scoped_options`, `test_requester_cannot_access_ops_users_page`, `test_ops_user_creation_role_matrix`, `test_requester_cannot_post_ops_user_creation`, `test_ops_user_creation_validation_error_keeps_users_page_context`, `tests.test_ops_workflow._RouteDb.rollback`
+- Checklist mapping:
+  - Ticket-open access for `admin` and `dev_ti`: covered with route tests for `GET /app/tickets/new` and `POST /app/tickets`.
+  - `/ops/users` reuse and access hardening: covered with allow/deny route tests.
+  - Admin vs `dev_ti` creation matrix: covered with route tests for allowed and denied target roles.
+  - Regression-prone denial/error paths: covered with requester denial tests and validation-error re-render test.
+- Assumptions: the current route implementation is already the intended production behavior, so this turn hardens it with targeted tests instead of widening access logic further.
+- Preserved invariants: existing route structure (`/app/tickets/new`, `POST /app/tickets`, `/ops/users`, `POST /ops/users/create`), role model, and no-migration rollout remain unchanged.
+- Intended behavior changes: none in app code; this turn adds regression coverage only.
+- Known non-changes: no schema changes, no new routes, no template refactor, no change to login redirects or ops navigation.
+- Expected side effects: broader automated coverage around role-gated ticket creation and user-management flows.
+- Validation performed: `pytest -q tests/test_auth_requester.py tests/test_ops_workflow.py` after confirming the targeted regression tests; result `3 passed, 49 skipped` in this environment because the web-route suites are guarded by `importorskip` for optional FastAPI/SQLAlchemy/argon2 dependencies.
+- Deduplication / centralization: reused existing route helpers and dependency overrides in tests rather than introducing new permission helpers.

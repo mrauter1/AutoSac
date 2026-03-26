@@ -17,6 +17,7 @@ from app.ui import build_template_context, is_htmx_request, ops_author_label, op
 from shared.db import db_session_dependency
 from shared.models import AIDraft, AIRun, Ticket, TicketAttachment, TicketMessage, TicketView, User
 from shared.permissions import is_ops_user
+from shared.user_admin import create_user
 from shared.ticketing import (
     add_ops_internal_note,
     add_ops_public_reply,
@@ -33,10 +34,21 @@ router = APIRouter()
 _OPS_REPLY_STATUSES = ("waiting_on_user", "waiting_on_dev_ti", "resolved")
 _OPS_FILTERABLE_STATUSES = ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")
 _OPS_FILTERABLE_CLASSES = ("support", "access_config", "data_ops", "bug", "feature", "unknown")
+_MANAGEABLE_USER_ROLES = ("requester", "dev_ti")
 
 
 def _parse_bool(value: str | None) -> bool:
     return value in {"on", "true", "1", "yes"}
+
+
+def _allowed_new_user_roles(actor: User) -> tuple[str, ...]:
+    if actor.role == "admin":
+        return _MANAGEABLE_USER_ROLES
+    return ("requester",)
+
+
+def _load_users_for_admin(db: Session) -> list[User]:
+    return list(db.execute(select(User).order_by(User.is_active.desc(), User.created_at.desc())).scalars())
 
 
 def _load_ops_ticket_or_404(db: Session, *, reference: str) -> Ticket:
@@ -285,6 +297,74 @@ def _template_or_partial_response(
     if is_htmx_request(request):
         return templates.TemplateResponse(request, partial_name, context)
     return templates.TemplateResponse(request, template_name, context)
+
+
+@router.get("/ops/users", response_class=HTMLResponse)
+def ops_manage_users(
+    request: Request,
+    current_user: User = Depends(require_ops_user),
+    auth_session=Depends(get_required_auth_session),
+    db: Session = Depends(db_session_dependency),
+):
+    db.commit()
+    return templates.TemplateResponse(
+        request,
+        "ops_users.html",
+        build_template_context(
+            request=request,
+            current_user=current_user,
+            auth_session=auth_session,
+            extra={
+                "users": _load_users_for_admin(db),
+                "allowed_new_roles": _allowed_new_user_roles(current_user),
+            },
+        ),
+    )
+
+
+@router.post("/ops/users/create")
+def ops_create_user(
+    request: Request,
+    current_user: User = Depends(require_ops_user),
+    auth_session=Depends(get_required_auth_session),
+    csrf_token: str = Form(...),
+    email: str = Form(...),
+    display_name: str = Form(...),
+    password: str = Form(...),
+    role: str = Form(...),
+    db: Session = Depends(db_session_dependency),
+):
+    validate_csrf_token(auth_session, csrf_token)
+    requested_role = role.strip()
+    if requested_role not in _allowed_new_user_roles(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot create that role")
+    try:
+        create_user(
+            db,
+            email=email.strip(),
+            display_name=display_name.strip(),
+            password=password,
+            role=requested_role,
+        )
+    except ValueError as exc:
+        db.rollback()
+        return templates.TemplateResponse(
+            request,
+            "ops_users.html",
+            build_template_context(
+                request=request,
+                current_user=current_user,
+                auth_session=auth_session,
+                extra={
+                    "error": str(exc),
+                    "users": _load_users_for_admin(db),
+                    "allowed_new_roles": _allowed_new_user_roles(current_user),
+                },
+            ),
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    db.commit()
+    return RedirectResponse("/ops/users", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.get("/ops", response_class=HTMLResponse)

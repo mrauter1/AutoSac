@@ -1,0 +1,27 @@
+# Test Strategy
+
+- Task ID: autosac-role-user-mgmt
+- Pair: test
+- Phase ID: role-user-management-hardening
+- Phase Directory Key: role-user-management-hardening
+- Phase Title: Harden role access and user management
+- Scope: phase-local producer artifact
+- Behaviors covered:
+  - `GET /app/tickets/new` allows `admin` and `dev_ti` through the existing requester flow.
+  - `POST /app/tickets` accepts `admin` and `dev_ti` and passes the authenticated actor into `create_requester_ticket`.
+  - `GET /ops/users` allows `admin` and `dev_ti`, denies `requester`, and renders only the allowed target-role options for the actor.
+  - `POST /ops/users/create` enforces the exact creation matrix: `admin -> requester|dev_ti`, `admin !-> admin`, `dev_ti -> requester`, `dev_ti !-> dev_ti|admin`, `requester` denied entirely.
+- Preserved invariants checked:
+  - Existing route structure stays `/app/tickets/new`, `POST /app/tickets`, `/ops/users`, and `POST /ops/users/create`.
+  - Successful create-user submissions still redirect back to `/ops/users`.
+  - Forbidden create-user submissions do not commit or call the create helper.
+- Edge cases and failure paths:
+  - Requester denial for both `GET /ops/users` and `POST /ops/users/create`.
+  - Validation failure on `/ops/users/create` re-renders the current users page with the error, existing users, and allowed role options intact.
+  - Ops user-management page never exposes an `admin` role option in the form.
+- Reliability / stabilization:
+  - Tests use dependency overrides and monkeypatches instead of real auth sessions or DB state.
+  - Redirect targets, commit counts, and rollback counts are asserted explicitly to catch silent behavior drift.
+  - Web-route suites remain guarded by `importorskip("fastapi"|"sqlalchemy"|"argon2")`, so this environment still skips them when optional dependencies are unavailable.
+- Known gaps:
+  - Full execution of the route tests depends on optional web dependencies being installed in the test environment.
