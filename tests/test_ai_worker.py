@@ -77,7 +77,14 @@ def _load_worker_symbols():
     }
 
 
-def _make_context(*, ticket=None, public_body: str = "Public body", internal_body: str = "Internal body", attachment_sha: str = "sha-1"):
+def _make_context(
+    *,
+    ticket=None,
+    public_body: str = "Public body",
+    internal_body: str = "Internal body",
+    attachment_sha: str = "sha-1",
+    public_attachments=None,
+):
     ticket = ticket or SimpleNamespace(
         id=uuid.uuid4(),
         reference="T-000001",
@@ -101,12 +108,18 @@ def _make_context(*, ticket=None, public_body: str = "Public body", internal_bod
         created_at=SimpleNamespace(isoformat=lambda: "2026-03-23T00:01:00+00:00"),
         body_text=internal_body,
     )
-    attachment = SimpleNamespace(sha256=attachment_sha, stored_path="/tmp/example.png")
+    attachment = SimpleNamespace(
+        sha256=attachment_sha,
+        stored_path="/tmp/example.png",
+        mime_type="image/png",
+        width=40,
+        height=20,
+    )
     return SimpleNamespace(
         ticket=ticket,
         public_messages=[public_message],
         internal_messages=[internal_message],
-        public_attachments=[attachment],
+        public_attachments=public_attachments or [attachment],
     )
 
 
@@ -234,6 +247,63 @@ def test_prepare_codex_run_writes_prompt_and_schema(tmp_path):
     assert prepared.schema_path.read_text(encoding="utf-8").startswith("{")
     assert str(context.ticket.id) in str(prepared.run_dir)
     assert prepared.image_paths == [Path("/tmp/example.png")]
+
+
+def test_prepare_codex_run_filters_non_image_attachments(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    context = _make_context(
+        public_attachments=[
+            SimpleNamespace(
+                sha256="img-sha",
+                stored_path="/tmp/example.png",
+                mime_type="image/png",
+                width=40,
+                height=20,
+            ),
+            SimpleNamespace(
+                sha256="pdf-sha",
+                stored_path="/tmp/report.pdf",
+                mime_type="application/pdf",
+                width=None,
+                height=None,
+            ),
+        ]
+    )
+
+    prepared = symbols["prepare_codex_run"](
+        settings,
+        ticket_id=context.ticket.id,
+        run_id=uuid.uuid4(),
+        context=context,
+    )
+
+    assert prepared.image_paths == [Path("/tmp/example.png")]
+
+
+def test_prepare_codex_run_excludes_spoofed_image_mime_without_verified_dimensions(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    context = _make_context(
+        public_attachments=[
+            SimpleNamespace(
+                sha256="fake-image-sha",
+                stored_path="/tmp/not-really-an-image.bin",
+                mime_type="image/png",
+                width=None,
+                height=None,
+            )
+        ]
+    )
+
+    prepared = symbols["prepare_codex_run"](
+        settings,
+        ticket_id=context.ticket.id,
+        run_id=uuid.uuid4(),
+        context=context,
+    )
+
+    assert prepared.image_paths == []
 
 
 def test_build_triage_prompt_includes_public_and_internal_context():
