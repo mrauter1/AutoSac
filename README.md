@@ -25,7 +25,10 @@ Unauthenticated browser navigation to protected HTML pages redirects to `/login`
 
    ```bash
    python -m venv .venv
+   # On macOS/Linux:
    source .venv/bin/activate
+
+   # On Windows, use .venv\Scripts\activate.bat (cmd) or .venv\Scripts\Activate.ps1 (PowerShell)
    python -m pip install --upgrade pip
    ```
 
