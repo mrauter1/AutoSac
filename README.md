@@ -19,13 +19,25 @@ Unauthenticated browser navigation to protected HTML pages redirects to `/login`
 
 ## Local Setup
 
-1. Install dependencies:
+1. **Create and activate a virtual environment (strongly recommended).**
+
+   Using a venv prevents dependency/version conflicts with system Python and other projects.
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   python -m pip install --upgrade pip
+   ```
+
+   > Strong advice: do all local development and script execution for this project inside the activated venv.
+
+2. Install dependencies:
 
    ```bash
    python -m pip install -r requirements.txt
    ```
 
-2. Export the variables from `.env.example`.
+3. Export the variables from `.env.example`.
 
    Required values:
    - `APP_BASE_URL`
@@ -34,11 +46,11 @@ Unauthenticated browser navigation to protected HTML pages redirects to `/login`
    - `CODEX_BIN`
    - `CODEX_API_KEY`
 
-3. Ensure the workspace mount directories exist before bootstrapping:
+4. Ensure the workspace mount directories exist before bootstrapping:
    - `REPO_MOUNT_DIR`
    - `MANUALS_MOUNT_DIR`
 
-4. Apply the schema:
+5. Apply the schema:
 
    ```bash
    alembic upgrade head
