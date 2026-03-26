@@ -347,6 +347,7 @@ def create_requester_ticket(
         created_at=created_at,
     )
     db.add(message)
+    db.flush()
     persisted_attachments = _add_public_attachments(
         db,
         ticket_id=ticket.id,
@@ -394,6 +395,7 @@ def add_requester_reply(
         created_at=created_at,
     )
     db.add(message)
+    db.flush()
     persisted_attachments = _add_public_attachments(
         db,
         ticket_id=ticket.id,

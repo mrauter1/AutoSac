@@ -46,12 +46,17 @@ class _FakeSession:
         self.commits = 0
         self.existing = {}
         self.next_reference_num = next_reference_num
+        self.operations = []
 
     def add(self, item):
         self.added.append(item)
+        self.operations.append(("add", item))
         key = getattr(item, "user_id", None), getattr(item, "ticket_id", None)
         if key != (None, None):
             self.existing[key] = item
+
+    def flush(self):
+        self.operations.append(("flush", None))
 
     def get(self, model, key):
         return self.existing.get(key)
@@ -78,6 +83,22 @@ class _FakeAttachment:
     size_bytes: int = 256
     width: int | None = None
     height: int | None = None
+
+
+def _assert_flush_before_attachments(fake_db, attachments):
+    flush_index = next(
+        (index for index, (operation, _) in enumerate(fake_db.operations) if operation == "flush"),
+        None,
+    )
+    assert flush_index is not None
+
+    attachment_indexes = [
+        index
+        for index, (operation, item) in enumerate(fake_db.operations)
+        if operation == "add" and item in attachments
+    ]
+    assert attachment_indexes
+    assert flush_index < min(attachment_indexes)
 
 
 def _make_settings(tmp_path: Path) -> Settings:
@@ -294,6 +315,7 @@ def test_create_requester_ticket_persists_non_image_attachment_on_created_messag
 
     assert run is pending_run
     assert len(attachments) == 1
+    _assert_flush_before_attachments(fake_db, attachments)
     assert attachments[0].message_id == message.id
     assert attachments[0].mime_type == "application/pdf"
     assert attachments[0].original_filename == "notes.pdf"
@@ -336,6 +358,7 @@ def test_add_requester_reply_accepts_mixed_attachments(monkeypatch, tmp_path):
 
     assert [attachment.original_filename for attachment in attachments] == ["shot.png", "notes.pdf"]
     assert [attachment.mime_type for attachment in attachments] == ["image/png", "application/pdf"]
+    _assert_flush_before_attachments(fake_db, attachments)
     assert all(attachment.message_id == message.id for attachment in attachments)
 
 
