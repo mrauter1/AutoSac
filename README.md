@@ -129,6 +129,10 @@ Useful endpoints:
 - `/ops` and `/ops/board` filter refreshes do not mark tickets as viewed; ticket detail pages still do.
 - The web and worker processes expect the same database and workspace configuration.
 
+## Deployment
+
+For a phone-friendly cloud deployment walkthrough and one-click Render blueprint setup, see `docs_deployment.md` and `render.yaml`.
+
 ## Tests
 
 Run the regression suite with:

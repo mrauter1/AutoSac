@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -46,7 +47,8 @@ def main() -> None:
     if args.check:
         smoke_check()
         return
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)
 
 
 if __name__ == "__main__":
