@@ -534,6 +534,17 @@ def test_login_route_sets_remember_me_cookie(monkeypatch, tmp_path):
     assert db.commit_calls == 2
 
 
+def test_root_route_redirects_to_app():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+
+    with stack["TestClient"](app, base_url="https://testserver") as client:
+        response = client.get("/", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/app"
+
+
 def test_login_get_issues_preauth_challenge_with_sanitized_next(monkeypatch, tmp_path):
     stack = _load_web_stack()
     app = stack["create_app"]()
