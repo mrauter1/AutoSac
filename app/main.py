@@ -4,7 +4,7 @@ import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import browser_login_redirect, should_redirect_browser_to_login
@@ -66,6 +66,10 @@ def create_app() -> FastAPI:
             log_web_event("readiness_failed", level="error", error=str(exc))
             return JSONResponse({"status": "not_ready", "error": str(exc)}, status_code=503)
         return JSONResponse({"status": "ready"})
+
+    @app.get("/", include_in_schema=False)
+    def root_redirect() -> RedirectResponse:
+        return RedirectResponse("/app", status_code=303)
 
     @app.exception_handler(HTTPException)
     async def handle_http_exception(request: Request, exc: HTTPException):
