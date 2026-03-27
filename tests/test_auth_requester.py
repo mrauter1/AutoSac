@@ -541,7 +541,7 @@ def test_root_route_redirects_to_app():
     with stack["TestClient"](app, base_url="https://testserver") as client:
         response = client.get("/", follow_redirects=False)
 
-    assert response.status_code == 303
+    assert response.status_code == 307
     assert response.headers["location"] == "/app"
 
 

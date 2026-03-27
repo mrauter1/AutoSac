@@ -69,7 +69,7 @@ def create_app() -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def root_redirect() -> RedirectResponse:
-        return RedirectResponse("/app", status_code=303)
+        return RedirectResponse("/app")
 
     @app.exception_handler(HTTPException)
     async def handle_http_exception(request: Request, exc: HTTPException):
