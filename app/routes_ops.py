@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_required_auth_session, require_ops_user, validate_csrf_token
 from app.render import render_markdown_to_html
-from app.timeline import load_ticket_status_history, merge_timeline_items, serialize_status_changes
+from app.timeline import build_author_label, load_ticket_status_history, load_users_by_ids, merge_timeline_items, serialize_status_changes
 from app.ui import build_template_context, is_htmx_request, ops_author_label, ops_status_label, templates
 from shared.db import db_session_dependency
 from shared.models import AIDraft, AIRun, Ticket, TicketAttachment, TicketMessage, TicketView, User
@@ -92,6 +92,7 @@ def _serialize_thread(db: Session, *, ticket_id, visibility: str | None = None) 
     if visibility is not None:
         statement = statement.where(TicketMessage.visibility == visibility)
     messages = list(db.execute(statement.order_by(TicketMessage.created_at.asc(), TicketMessage.id.asc())).scalars())
+    users_by_id = load_users_by_ids(db, (message.author_user_id for message in messages))
     return [
         {
             "kind": "message",
@@ -100,7 +101,11 @@ def _serialize_thread(db: Session, *, ticket_id, visibility: str | None = None) 
             "lane": message.visibility,
             "lane_label": _lane_label(message.visibility),
             "author_type": message.author_type,
-            "author_label": ops_author_label(message.author_type),
+            "author_label": build_author_label(
+                author_type=message.author_type,
+                display_name=users_by_id.get(message.author_user_id).display_name if message.author_user_id in users_by_id else None,
+                fallback_label=ops_author_label,
+            ),
             "source": message.source,
             "body_markdown": message.body_markdown,
             "body_html": render_markdown_to_html(message.body_markdown),
@@ -111,13 +116,16 @@ def _serialize_thread(db: Session, *, ticket_id, visibility: str | None = None) 
 
 
 def _build_ops_activity_timeline(db: Session, *, ticket_id) -> list[dict[str, object]]:
+    history_entries = load_ticket_status_history(db, ticket_id=ticket_id)
+    users_by_id = load_users_by_ids(db, (getattr(entry, "changed_by_user_id", None) for entry in history_entries))
     return merge_timeline_items(
         _serialize_thread(db, ticket_id=ticket_id),
         serialize_status_changes(
-            load_ticket_status_history(db, ticket_id=ticket_id),
+            history_entries,
             status_label=ops_status_label,
             actor_label=ops_author_label,
             summary_style="ops",
+            user_display_names={user_id: user.display_name for user_id, user in users_by_id.items()},
         ),
     )
 

@@ -456,7 +456,7 @@ def test_requester_routes_source_uses_custom_auth_and_explicit_multipart_limits(
     assert "MULTIPART_PART_SIZE_SLACK_BYTES" in upload_source
     assert "max_part_size=settings.max_image_bytes + MULTIPART_PART_SIZE_SLACK_BYTES" in upload_source
     assert '"dev_ti": "Team"' in ui_source
-    assert "requester_author_label(message.author_type)" in source
+    assert "build_author_label(" in source
     assert "_build_requester_timeline" in source
     assert "item.author_label" in template_source
     assert "timeline-status" in template_source
@@ -944,6 +944,7 @@ def test_serialize_public_thread_includes_message_attachments(monkeypatch):
         SimpleNamespace(
             id=first_message_id,
             created_at=SimpleNamespace(),
+            author_user_id=uuid.uuid4(),
             author_type="requester",
             source="ticket_create",
             body_markdown="Attached a report",
@@ -951,6 +952,7 @@ def test_serialize_public_thread_includes_message_attachments(monkeypatch):
         SimpleNamespace(
             id=second_message_id,
             created_at=SimpleNamespace(),
+            author_user_id=None,
             author_type="requester",
             source="requester_reply",
             body_markdown="No attachment here",
@@ -970,12 +972,41 @@ def test_serialize_public_thread_includes_message_attachments(monkeypatch):
         "_load_attachments_by_message",
         lambda db, ticket_id, visibility="public": {first_message_id: [linked_attachment]},
     )
+    monkeypatch.setattr(
+        stack["routes_requester"],
+        "load_users_by_ids",
+        lambda db, user_ids: {messages[0].author_user_id: SimpleNamespace(display_name="Marcelo")},
+    )
     monkeypatch.setattr(stack["routes_requester"], "render_markdown_to_html", lambda body: f"<p>{body}</p>")
 
     thread = stack["routes_requester"]._serialize_public_thread(object(), ticket_id=uuid.uuid4())
 
     assert thread[0]["attachments"] == [linked_attachment]
     assert thread[1]["attachments"] == []
+    assert thread[0]["author_label"] == "Marcelo (requester)"
+    assert thread[1]["author_label"] == "You (requester)"
+
+
+def test_build_author_label_formats_human_roles_with_display_name():
+    pytest.importorskip("fastapi")
+    from app.timeline import build_author_label
+    from app.ui import requester_author_label
+
+    assert build_author_label(
+        author_type="requester",
+        display_name="Marcelo",
+        fallback_label=requester_author_label,
+    ) == "Marcelo (requester)"
+    assert build_author_label(
+        author_type="dev_ti",
+        display_name="Ana",
+        fallback_label=requester_author_label,
+    ) == "Ana (DEV/TI)"
+    assert build_author_label(
+        author_type="ai",
+        display_name=None,
+        fallback_label=requester_author_label,
+    ) == "AI"
 
 
 def test_build_requester_timeline_merges_status_changes_chronologically(monkeypatch):

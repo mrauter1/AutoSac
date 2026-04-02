@@ -13,7 +13,7 @@ from starlette.formparsers import MultiPartException
 
 from app.auth import get_current_user, get_required_auth_session, require_requester_user, validate_csrf_token
 from app.render import render_markdown_to_html
-from app.timeline import load_ticket_status_history, merge_timeline_items, serialize_status_changes
+from app.timeline import build_author_label, load_ticket_status_history, load_users_by_ids, merge_timeline_items, serialize_status_changes
 from app.ui import build_template_context, requester_author_label, requester_status_label, templates
 from app.uploads import (
     UploadValidationError,
@@ -77,8 +77,10 @@ def _load_attachments_by_message(db: Session, *, ticket_id, visibility: str = "p
 
 def _serialize_public_thread(db: Session, *, ticket_id) -> list[dict[str, object]]:
     attachments_by_message = _load_attachments_by_message(db, ticket_id=ticket_id)
+    messages = _load_public_ticket_messages(db, ticket_id=ticket_id)
+    users_by_id = load_users_by_ids(db, (message.author_user_id for message in messages))
     thread: list[dict[str, object]] = []
-    for message in _load_public_ticket_messages(db, ticket_id=ticket_id):
+    for message in messages:
         thread.append(
             {
                 "kind": "message",
@@ -87,7 +89,11 @@ def _serialize_public_thread(db: Session, *, ticket_id) -> list[dict[str, object
                 "lane": "public",
                 "lane_label": "Public",
                 "author_type": message.author_type,
-                "author_label": requester_author_label(message.author_type),
+                "author_label": build_author_label(
+                    author_type=message.author_type,
+                    display_name=users_by_id.get(message.author_user_id).display_name if message.author_user_id in users_by_id else None,
+                    fallback_label=requester_author_label,
+                ),
                 "source": message.source,
                 "body_markdown": message.body_markdown,
                 "body_html": render_markdown_to_html(message.body_markdown),
@@ -98,13 +104,16 @@ def _serialize_public_thread(db: Session, *, ticket_id) -> list[dict[str, object
 
 
 def _build_requester_timeline(db: Session, *, ticket_id) -> list[dict[str, object]]:
+    history_entries = load_ticket_status_history(db, ticket_id=ticket_id)
+    users_by_id = load_users_by_ids(db, (getattr(entry, "changed_by_user_id", None) for entry in history_entries))
     return merge_timeline_items(
         _serialize_public_thread(db, ticket_id=ticket_id),
         serialize_status_changes(
-            load_ticket_status_history(db, ticket_id=ticket_id),
+            history_entries,
             status_label=requester_status_label,
             actor_label=requester_author_label,
             summary_style="requester",
+            user_display_names={user_id: user.display_name for user_id, user in users_by_id.items()},
         ),
     )
 
