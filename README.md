@@ -40,20 +40,32 @@ Unauthenticated browser navigation to protected HTML pages redirects to `/login`
    python -m pip install -r requirements.txt
    ```
 
-3. Export the variables from `.env.example`.
+3. Create `.env` from `.env.example`.
 
    Required values:
    - `APP_BASE_URL`
    - `APP_SECRET_KEY`
    - `DATABASE_URL`
    - `CODEX_BIN`
-   - `CODEX_API_KEY`
+
+   Optional:
+   - `CODEX_API_KEY` if this runtime is not already authenticated via Codex CLI login.
+
+   Runtime scripts load `.env` automatically from the repository root.
 
 4. Ensure the workspace mount directories exist before bootstrapping:
    - `REPO_MOUNT_DIR`
    - `MANUALS_MOUNT_DIR`
 
-5. Apply the schema:
+5. Optional local preflight/setup:
+
+   ```bash
+   python scripts/preflight_setup.py --ensure-workspace-dirs --setup-postgres-local
+   ```
+
+   This can create the local workspace mount directories and, when `DATABASE_URL` points at localhost PostgreSQL, call `scripts/setup_postgres_local.sh` to install/start PostgreSQL and create the configured role/database.
+
+6. Apply the schema:
 
    ```bash
    alembic upgrade head
@@ -141,6 +153,8 @@ Useful endpoints:
 
 - `.env.example` lists every supported runtime knob and the shipped defaults.
 - `APP_BASE_URL=https://...` automatically enables secure cookies.
+- Leave `CODEX_API_KEY` empty to rely on existing Codex CLI login in local environments.
+- `scripts/setup_postgres_local.sh` is intended for local localhost PostgreSQL only; it is not part of the cloud deployment path.
 - `/ops` and `/ops/board` filter refreshes do not mark tickets as viewed; ticket detail pages still do.
 - The web and worker processes expect the same database and workspace configuration.
 

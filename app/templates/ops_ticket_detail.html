@@ -29,18 +29,29 @@
   <div class="stack">
     <section class="panel stack">
       <div class="thread-header">
-        <h2>Public thread</h2>
+        <h2>Activity</h2>
       </div>
-      {% for message in public_thread %}
-      <article class="message-card">
-        <div class="message-card__meta">
-          <strong>{{ message.author_label }}</strong>
-          <span>{{ message.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+      {% for item in activity_timeline %}
+      {% if item.kind == "status_change" %}
+      <article class="timeline-status">
+        <div class="timeline-status__meta">
+          <span class="lane-pill lane-pill--status">{{ item.lane_label }}</span>
+          <strong>{{ item.actor_label }}</strong>
+          <span>{{ item.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
         </div>
-        <div class="message-card__body">{{ message.body_html | safe }}</div>
-        {% if message.attachments %}
+        <p class="timeline-status__text">{{ item.summary }}</p>
+      </article>
+      {% else %}
+      <article class="message-card{% if item.lane == 'internal' %} message-card--internal{% endif %}">
+        <div class="message-card__meta">
+          <span class="lane-pill lane-pill--{{ item.lane }}">{{ item.lane_label }}</span>
+          <strong>{{ item.author_label }}</strong>
+          <span>{{ item.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+        </div>
+        <div class="message-card__body">{{ item.body_html | safe }}</div>
+        {% if item.attachments %}
         <ul class="attachment-list">
-          {% for attachment in message.attachments %}
+          {% for attachment in item.attachments %}
           <li>
             <a href="/attachments/{{ attachment.id }}">{{ attachment.original_filename }}</a>
             <span class="muted">{{ attachment.mime_type }} · {{ attachment.size_bytes }} bytes</span>
@@ -49,68 +60,28 @@
         </ul>
         {% endif %}
       </article>
+      {% endif %}
       {% else %}
-      <p class="muted">No public messages yet.</p>
-      {% endfor %}
-    </section>
-
-    <section class="panel stack">
-      <div class="thread-header">
-        <h2>Internal thread</h2>
-      </div>
-      {% for message in internal_thread %}
-      <article class="message-card message-card--internal">
-        <div class="message-card__meta">
-          <strong>{{ message.author_label }}</strong>
-          <span>{{ message.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
-        </div>
-        <div class="message-card__body">{{ message.body_html | safe }}</div>
-      </article>
-      {% else %}
-      <p class="muted">No internal notes yet.</p>
+      <p class="muted">No activity yet.</p>
       {% endfor %}
     </section>
   </div>
 
   <div class="stack">
-    <section class="panel stack">
+    <section class="panel stack stack--tight analysis-panel">
       <h2>AI analysis</h2>
-      <dl class="meta-list">
+      <dl class="meta-list meta-list--compact">
         <div>
           <dt>Class</dt>
           <dd>{{ ticket.ticket_class or "Unclassified" }}</dd>
         </div>
         <div>
-          <dt>Confidence</dt>
-          <dd>{{ ticket.ai_confidence if ticket.ai_confidence is not none else "Unknown" }}</dd>
-        </div>
-        <div>
-          <dt>Impact</dt>
-          <dd>{{ ticket.impact_level or "unknown" }}</dd>
-        </div>
-        <div>
-          <dt>Development needed</dt>
-          <dd>{{ "Yes" if ticket.development_needed else "No" if ticket.development_needed is not none else "Unknown" }}</dd>
-        </div>
-        <div>
-          <dt>Requester language</dt>
-          <dd>{{ ticket.requester_language or "Unknown" }}</dd>
-        </div>
-        <div>
-          <dt>Last action</dt>
-          <dd>{{ ticket.last_ai_action or "None yet" }}</dd>
-        </div>
-        <div>
           <dt>Latest run</dt>
-          <dd>{{ latest_run.status if latest_run else "No runs yet" }}</dd>
-        </div>
-        <div>
-          <dt>Requeue requested</dt>
-          <dd>{{ "Yes" if ticket.requeue_requested else "No" }}</dd>
+          <dd>{{ latest_run.status.replace("_", " ").title() if latest_run else "No runs yet" }}</dd>
         </div>
       </dl>
       {% if ai_summary_short or ai_summary_internal %}
-      <div class="stack">
+      <div class="stack stack--tight">
         {% if ai_summary_short %}
         <div>
           <strong>Summary</strong>
@@ -125,33 +96,95 @@
         {% endif %}
       </div>
       {% endif %}
-      {% if ai_relevant_paths %}
-      <div class="stack">
-        <strong>Relevant repo/docs paths</strong>
-        <ul class="attachment-list">
-          {% for item in ai_relevant_paths %}
-          <li><code>{{ item.path }}</code> <span class="muted">{{ item.reason }}</span></li>
-          {% endfor %}
-        </ul>
-      </div>
-      {% endif %}
-      {% if latest_ai_note %}
-      <div class="stack">
-        <strong>Latest AI note</strong>
-        <div class="message-card__body">{{ latest_ai_note_html | safe }}</div>
-      </div>
-      {% endif %}
-      {% if latest_run %}
-      <div class="stack">
-        <strong>Run artifacts</strong>
-        <ul class="attachment-list">
-          {% if latest_run.prompt_path %}<li><code>{{ latest_run.prompt_path }}</code></li>{% endif %}
-          {% if latest_run.schema_path %}<li><code>{{ latest_run.schema_path }}</code></li>{% endif %}
-          {% if latest_run.final_output_path %}<li><code>{{ latest_run.final_output_path }}</code></li>{% endif %}
-          {% if latest_run.stdout_jsonl_path %}<li><code>{{ latest_run.stdout_jsonl_path }}</code></li>{% endif %}
-          {% if latest_run.stderr_path %}<li><code>{{ latest_run.stderr_path }}</code></li>{% endif %}
-        </ul>
-      </div>
+      {% if latest_run and latest_run.error_text or ai_relevant_paths or latest_ai_note or latest_analysis_run or latest_run and not latest_analysis_run or latest_run and latest_analysis_run and latest_run.id != latest_analysis_run.id or ticket.ai_confidence is not none or ticket.impact_level or ticket.development_needed is not none or ticket.requester_language or ticket.last_ai_action or ticket.requeue_requested %}
+      <details class="analysis-disclosure">
+        <summary>More analysis</summary>
+        <div class="analysis-disclosure__content stack stack--tight">
+          <dl class="meta-list meta-list--compact">
+            <div>
+              <dt>Confidence</dt>
+              <dd>{{ ticket.ai_confidence if ticket.ai_confidence is not none else "Unknown" }}</dd>
+            </div>
+            <div>
+              <dt>Impact</dt>
+              <dd>{{ ticket.impact_level or "unknown" }}</dd>
+            </div>
+            <div>
+              <dt>Development needed</dt>
+              <dd>{{ "Yes" if ticket.development_needed else "No" if ticket.development_needed is not none else "Unknown" }}</dd>
+            </div>
+            <div>
+              <dt>Requester language</dt>
+              <dd>{{ ticket.requester_language or "Unknown" }}</dd>
+            </div>
+            <div>
+              <dt>Last action</dt>
+              <dd>{{ ticket.last_ai_action or "None yet" }}</dd>
+            </div>
+            <div>
+              <dt>Requeue requested</dt>
+              <dd>{{ "Yes" if ticket.requeue_requested else "No" }}</dd>
+            </div>
+          </dl>
+          {% if latest_run and latest_run.error_text %}
+          <div>
+            <strong>{% if latest_run.status == "failed" %}Run error{% else %}Run warning{% endif %}</strong>
+            <p class="muted">{{ latest_run.error_text }}</p>
+          </div>
+          {% endif %}
+          {% if ai_relevant_paths %}
+          <div>
+            <strong>Relevant repo/docs paths</strong>
+            <ul class="attachment-list">
+              {% for item in ai_relevant_paths %}
+              <li><code>{{ item.path }}</code> <span class="muted">{{ item.reason }}</span></li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if latest_ai_note %}
+          <div>
+            <strong>Latest AI note</strong>
+            <div class="message-card__body">{{ latest_ai_note_html | safe }}</div>
+          </div>
+          {% endif %}
+          {% if latest_analysis_run %}
+          <div>
+            <strong>Analysis artifacts</strong>
+            <ul class="attachment-list">
+              {% if latest_analysis_run.prompt_path %}<li><code>{{ latest_analysis_run.prompt_path }}</code></li>{% endif %}
+              {% if latest_analysis_run.schema_path %}<li><code>{{ latest_analysis_run.schema_path }}</code></li>{% endif %}
+              {% if latest_analysis_run.final_output_path %}<li><code>{{ latest_analysis_run.final_output_path }}</code></li>{% endif %}
+              {% if latest_analysis_run.stdout_jsonl_path %}<li><code>{{ latest_analysis_run.stdout_jsonl_path }}</code></li>{% endif %}
+              {% if latest_analysis_run.stderr_path %}<li><code>{{ latest_analysis_run.stderr_path }}</code></li>{% endif %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if latest_run and latest_analysis_run and latest_run.id != latest_analysis_run.id %}
+          <div>
+            <strong>Latest run artifacts</strong>
+            <ul class="attachment-list">
+              {% if latest_run.prompt_path %}<li><code>{{ latest_run.prompt_path }}</code></li>{% endif %}
+              {% if latest_run.schema_path %}<li><code>{{ latest_run.schema_path }}</code></li>{% endif %}
+              {% if latest_run.final_output_path %}<li><code>{{ latest_run.final_output_path }}</code></li>{% endif %}
+              {% if latest_run.stdout_jsonl_path %}<li><code>{{ latest_run.stdout_jsonl_path }}</code></li>{% endif %}
+              {% if latest_run.stderr_path %}<li><code>{{ latest_run.stderr_path }}</code></li>{% endif %}
+            </ul>
+          </div>
+          {% elif latest_run and not latest_analysis_run %}
+          <div>
+            <strong>Latest run artifacts</strong>
+            <ul class="attachment-list">
+              {% if latest_run.prompt_path %}<li><code>{{ latest_run.prompt_path }}</code></li>{% endif %}
+              {% if latest_run.schema_path %}<li><code>{{ latest_run.schema_path }}</code></li>{% endif %}
+              {% if latest_run.final_output_path %}<li><code>{{ latest_run.final_output_path }}</code></li>{% endif %}
+              {% if latest_run.stdout_jsonl_path %}<li><code>{{ latest_run.stdout_jsonl_path }}</code></li>{% endif %}
+              {% if latest_run.stderr_path %}<li><code>{{ latest_run.stderr_path }}</code></li>{% endif %}
+            </ul>
+          </div>
+          {% endif %}
+        </div>
+      </details>
       {% endif %}
       <form method="post" action="/ops/tickets/{{ ticket.reference }}/rerun-ai">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -168,7 +201,7 @@
         <label class="field">
           <span>Next status</span>
           <select name="next_status">
-            {% for value in reply_status_options %}
+            {% for value in draft_reply_status_options %}
             <option value="{{ value }}" {% if value == "waiting_on_user" %}selected{% endif %}>{{ ops_status_label(value) }}</option>
             {% endfor %}
           </select>
@@ -226,8 +259,8 @@
         <label class="field">
           <span>Next status</span>
           <select name="next_status">
-            {% for value in reply_status_options %}
-            <option value="{{ value }}" {% if value == "waiting_on_user" %}selected{% endif %}>{{ ops_status_label(value) }}</option>
+            {% for value in public_reply_status_options %}
+            <option value="{{ value }}" {% if value == default_public_reply_status %}selected{% endif %}>{{ ops_status_label(value) }}</option>
             {% endfor %}
           </select>
         </label>

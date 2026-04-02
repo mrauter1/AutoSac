@@ -6,12 +6,18 @@ from pathlib import Path
 from urllib.parse import urlparse
 import os
 
+from dotenv import load_dotenv
+
 from shared.contracts import (
     DEFAULT_MANUALS_MOUNT_DIR,
     DEFAULT_REPO_MOUNT_DIR,
     DEFAULT_TRIAGE_WORKSPACE_DIR,
     DEFAULT_UPLOADS_DIR,
 )
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 
 class SettingsError(RuntimeError):
@@ -60,7 +66,7 @@ class Settings:
     repo_mount_dir: Path
     manuals_mount_dir: Path
     codex_bin: str
-    codex_api_key: str
+    codex_api_key: str | None
     codex_model: str
     codex_timeout_seconds: int
     worker_poll_seconds: int
@@ -104,6 +110,7 @@ class Settings:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    codex_api_key = os.environ.get("CODEX_API_KEY", "").strip() or None
     settings = Settings(
         app_base_url=_required_env("APP_BASE_URL"),
         app_secret_key=_required_env("APP_SECRET_KEY"),
@@ -113,9 +120,9 @@ def get_settings() -> Settings:
         repo_mount_dir=_env_path("REPO_MOUNT_DIR", DEFAULT_REPO_MOUNT_DIR),
         manuals_mount_dir=_env_path("MANUALS_MOUNT_DIR", DEFAULT_MANUALS_MOUNT_DIR),
         codex_bin=_required_env("CODEX_BIN"),
-        codex_api_key=_required_env("CODEX_API_KEY"),
+        codex_api_key=codex_api_key,
         codex_model=os.environ.get("CODEX_MODEL", "").strip(),
-        codex_timeout_seconds=_env_int("CODEX_TIMEOUT_SECONDS", 75),
+        codex_timeout_seconds=_env_int("CODEX_TIMEOUT_SECONDS", 3600),
         worker_poll_seconds=_env_int("WORKER_POLL_SECONDS", 10),
         auto_support_reply_min_confidence=_env_float("AUTO_SUPPORT_REPLY_MIN_CONFIDENCE", 0.85),
         auto_confirm_intent_min_confidence=_env_float("AUTO_CONFIRM_INTENT_MIN_CONFIDENCE", 0.90),

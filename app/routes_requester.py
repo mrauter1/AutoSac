@@ -13,7 +13,8 @@ from starlette.formparsers import MultiPartException
 
 from app.auth import get_current_user, get_required_auth_session, require_requester_user, validate_csrf_token
 from app.render import render_markdown_to_html
-from app.ui import build_template_context, requester_author_label, templates
+from app.timeline import load_ticket_status_history, merge_timeline_items, serialize_status_changes
+from app.ui import build_template_context, requester_author_label, requester_status_label, templates
 from app.uploads import (
     UploadValidationError,
     get_form_attachments,
@@ -35,6 +36,12 @@ from shared.ticketing import (
 router = APIRouter()
 
 
+def _ticket_detail_path(*, current_user: User, reference: str) -> str:
+    if can_access_all_tickets(current_user):
+        return f"/ops/tickets/{reference}"
+    return f"/app/tickets/{reference}"
+
+
 def _load_requester_ticket_or_404(db: Session, *, reference: str, requester_id) -> Ticket:
     ticket = db.execute(
         select(Ticket).where(Ticket.reference == reference, Ticket.created_by_user_id == requester_id)
@@ -49,7 +56,7 @@ def _load_public_ticket_messages(db: Session, *, ticket_id) -> list[TicketMessag
         db.execute(
             select(TicketMessage)
             .where(TicketMessage.ticket_id == ticket_id, TicketMessage.visibility == "public")
-            .order_by(TicketMessage.created_at.asc())
+            .order_by(TicketMessage.created_at.asc(), TicketMessage.id.asc())
         ).scalars()
     )
 
@@ -74,8 +81,11 @@ def _serialize_public_thread(db: Session, *, ticket_id) -> list[dict[str, object
     for message in _load_public_ticket_messages(db, ticket_id=ticket_id):
         thread.append(
             {
+                "kind": "message",
                 "id": str(message.id),
                 "created_at": message.created_at,
+                "lane": "public",
+                "lane_label": "Public",
                 "author_type": message.author_type,
                 "author_label": requester_author_label(message.author_type),
                 "source": message.source,
@@ -85,6 +95,18 @@ def _serialize_public_thread(db: Session, *, ticket_id) -> list[dict[str, object
             }
         )
     return thread
+
+
+def _build_requester_timeline(db: Session, *, ticket_id) -> list[dict[str, object]]:
+    return merge_timeline_items(
+        _serialize_public_thread(db, ticket_id=ticket_id),
+        serialize_status_changes(
+            load_ticket_status_history(db, ticket_id=ticket_id),
+            status_label=requester_status_label,
+            actor_label=requester_author_label,
+            summary_style="requester",
+        ),
+    )
 
 
 def _parse_bool(value: str | None) -> bool:
@@ -252,7 +274,10 @@ async def requester_ticket_create(
         db.rollback()
         _cleanup_paths(saved_paths)
         raise
-    return RedirectResponse(f"/app/tickets/{ticket.reference}", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        _ticket_detail_path(current_user=current_user, reference=ticket.reference),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @router.get("/app/tickets/{reference}", response_class=HTMLResponse)
@@ -264,6 +289,11 @@ def requester_ticket_detail(
     db: Session = Depends(db_session_dependency),
 ):
     ticket = _load_requester_ticket_or_404(db, reference=reference, requester_id=current_user.id)
+    if can_access_all_tickets(current_user):
+        return RedirectResponse(
+            _ticket_detail_path(current_user=current_user, reference=ticket.reference),
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
     upsert_ticket_view(db, user_id=current_user.id, ticket_id=ticket.id)
     db.commit()
     return templates.TemplateResponse(
@@ -273,7 +303,7 @@ def requester_ticket_detail(
             request=request,
             current_user=current_user,
             auth_session=auth_session,
-            extra={"ticket": ticket, "thread": _serialize_public_thread(db, ticket_id=ticket.id)},
+            extra={"ticket": ticket, "timeline": _build_requester_timeline(db, ticket_id=ticket.id)},
         ),
     )
 
@@ -306,7 +336,7 @@ async def requester_ticket_reply(
                 auth_session=auth_session,
                 extra={
                     "ticket": ticket,
-                    "thread": _serialize_public_thread(db, ticket_id=ticket.id),
+                    "timeline": _build_requester_timeline(db, ticket_id=ticket.id),
                     "error": str(exc),
                     "reply_body": body,
                 },
@@ -333,7 +363,10 @@ async def requester_ticket_reply(
         db.rollback()
         _cleanup_paths(saved_paths)
         raise
-    return RedirectResponse(f"/app/tickets/{ticket.reference}", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        _ticket_detail_path(current_user=current_user, reference=ticket.reference),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @router.post("/app/tickets/{reference}/resolve")
@@ -348,7 +381,10 @@ def requester_ticket_resolve(
     ticket = _load_requester_ticket_or_404(db, reference=reference, requester_id=current_user.id)
     resolve_ticket_for_requester(db, ticket=ticket, requester=current_user)
     db.commit()
-    return RedirectResponse(f"/app/tickets/{ticket.reference}", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        _ticket_detail_path(current_user=current_user, reference=ticket.reference),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @router.get("/attachments/{attachment_id}")

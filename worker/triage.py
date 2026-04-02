@@ -31,7 +31,17 @@ class TriageResultError(RuntimeError):
     """Raised when the canonical Codex output violates the Stage 1 contract."""
 
 
-AUTO_PUBLIC_ACTION_ALLOWED_CLASSES = frozenset({"support", "access_config"})
+_UNCERTAINTY_CAVEAT_PHRASES = (
+    "could not verify",
+    "couldn't verify",
+    "did not find",
+    "didn't find",
+    "not completely sure",
+    "not fully certain",
+    "best guess",
+    "best-effort",
+    "unverified",
+)
 
 
 class RelevantPathResult(BaseModel):
@@ -56,6 +66,10 @@ class TriageResult(BaseModel):
     incorrect_or_conflicting_details: list[str]
     evidence_found: bool
     relevant_paths: list[RelevantPathResult]
+    answer_scope: Literal["document_scoped", "general_reasoning"]
+    evidence_status: Literal["verified", "not_found_low_risk_guess", "not_applicable"]
+    misuse_or_safety_risk: bool
+    human_review_reason: str
     recommended_next_action: Literal[
         "ask_clarification",
         "auto_public_reply",
@@ -65,7 +79,7 @@ class TriageResult(BaseModel):
     ]
     auto_public_reply_allowed: bool
     public_reply_markdown: str
-    internal_note_markdown: str = Field(min_length=1)
+    internal_note_markdown: str
 
 
 @dataclass(frozen=True)
@@ -76,11 +90,25 @@ class PreparedRunContext:
     prepared_codex_run: PreparedCodexRun
 
 
+@dataclass(frozen=True)
+class ResolvedTriageOutcome:
+    run_status: Literal["succeeded", "human_review"]
+    effective_action: Literal[
+        "ask_clarification",
+        "auto_public_reply",
+        "auto_confirm_and_route",
+        "draft_public_reply",
+        "route_dev_ti",
+    ]
+    warning_text: str | None = None
+
+
 def build_requester_visible_fingerprint(context: LoadedTicketContext) -> str:
     payload = {
         "title": context.ticket.title,
         "urgent": context.ticket.urgent,
         "status": context.ticket.status,
+        "requester_can_view_internal_messages": context.requester_can_view_internal_messages,
         "public_messages": [
             {
                 "body_text": message.body_text,
@@ -103,73 +131,188 @@ def validate_triage_result(payload: dict[str, object], settings: Settings) -> Tr
         raise TriageResultError(f"Codex output failed schema validation: {exc}") from exc
 
     public_reply = result.public_reply_markdown.strip()
-    internal_note = result.internal_note_markdown.strip()
     clarifying_questions = [question.strip() for question in result.clarifying_questions if question.strip()]
-    if not internal_note:
-        raise TriageResultError("internal_note_markdown must not be blank")
     if result.needs_clarification and not clarifying_questions:
         raise TriageResultError("needs_clarification=true requires at least one clarifying question")
     if not result.needs_clarification and clarifying_questions:
         raise TriageResultError("clarifying_questions require needs_clarification=true")
 
-    action = result.recommended_next_action
-    if action == "ask_clarification":
-        if not result.needs_clarification:
-            raise TriageResultError("ask_clarification requires needs_clarification=true")
-        if result.auto_public_reply_allowed:
-            raise TriageResultError("ask_clarification requires auto_public_reply_allowed=false")
-        if not public_reply:
-            raise TriageResultError("ask_clarification requires a non-empty public reply")
-    elif action == "auto_public_reply":
-        if result.needs_clarification:
-            raise TriageResultError("auto_public_reply requires needs_clarification=false")
-        if clarifying_questions:
-            raise TriageResultError("auto_public_reply requires no clarifying questions")
-        if not result.auto_public_reply_allowed:
-            raise TriageResultError("auto_public_reply requires auto_public_reply_allowed=true")
-        if not result.evidence_found:
-            raise TriageResultError("auto_public_reply requires evidence_found=true")
-        if not public_reply:
-            raise TriageResultError("auto_public_reply requires a non-empty public reply")
-        if result.confidence < settings.auto_support_reply_min_confidence:
-            raise TriageResultError("auto_public_reply confidence is below the configured threshold")
-    elif action == "auto_confirm_and_route":
-        if result.needs_clarification:
-            raise TriageResultError("auto_confirm_and_route requires needs_clarification=false")
-        if clarifying_questions:
-            raise TriageResultError("auto_confirm_and_route requires no clarifying questions")
-        if not result.auto_public_reply_allowed:
-            raise TriageResultError("auto_confirm_and_route requires auto_public_reply_allowed=true")
-        if not public_reply:
-            raise TriageResultError("auto_confirm_and_route requires a non-empty public reply")
-        if result.confidence < settings.auto_confirm_intent_min_confidence:
-            raise TriageResultError("auto_confirm_and_route confidence is below the configured threshold")
-    elif action == "draft_public_reply":
-        if result.needs_clarification:
-            raise TriageResultError("draft_public_reply requires needs_clarification=false")
-        if clarifying_questions:
-            raise TriageResultError("draft_public_reply requires no clarifying questions")
-        if result.auto_public_reply_allowed:
-            raise TriageResultError("draft_public_reply requires auto_public_reply_allowed=false")
-        if not public_reply:
-            raise TriageResultError("draft_public_reply requires a non-empty public reply")
-    elif action == "route_dev_ti":
-        if result.needs_clarification:
-            raise TriageResultError("route_dev_ti requires needs_clarification=false")
-        if clarifying_questions:
-            raise TriageResultError("route_dev_ti requires no clarifying questions")
-        if result.auto_public_reply_allowed:
-            raise TriageResultError("route_dev_ti requires auto_public_reply_allowed=false")
-        if public_reply:
-            raise TriageResultError("route_dev_ti requires an empty public reply")
-    else:
-        raise TriageResultError(f"Unsupported recommended_next_action: {action}")
-
-    if result.ticket_class == "unknown" and action in {"auto_public_reply", "auto_confirm_and_route"}:
-        raise TriageResultError("unknown tickets cannot use automatic public actions")
-    if action in {"auto_public_reply", "auto_confirm_and_route"} and result.ticket_class not in AUTO_PUBLIC_ACTION_ALLOWED_CLASSES:
-        raise TriageResultError("automatic public actions are only supported for support and access_config tickets")
+    _validate_scope_and_evidence(result)
+    _validate_human_review_metadata(result)
+    if result.recommended_next_action not in {"ask_clarification", "route_dev_ti"} and not public_reply:
+        raise TriageResultError(f"{result.recommended_next_action} requires a non-empty public reply")
     return result
+
+
+def _validate_scope_and_evidence(result: TriageResult) -> None:
+    if result.answer_scope == "document_scoped":
+        if result.evidence_status == "not_applicable":
+            raise TriageResultError("document_scoped answers require verified evidence or an explicit low-risk guess")
+        if not result.relevant_paths:
+            raise TriageResultError("document_scoped answers must include relevant_paths for the sources checked")
+    elif result.evidence_status != "not_applicable":
+        raise TriageResultError("general_reasoning answers must set evidence_status=not_applicable")
+
+    if result.evidence_status == "verified":
+        if not result.evidence_found:
+            raise TriageResultError("evidence_status=verified requires evidence_found=true")
+        if not result.relevant_paths:
+            raise TriageResultError("evidence_status=verified requires relevant_paths")
+        return
+
+    if result.evidence_status == "not_found_low_risk_guess":
+        if result.answer_scope != "document_scoped":
+            raise TriageResultError("not_found_low_risk_guess is only valid for document_scoped answers")
+        if result.evidence_found:
+            raise TriageResultError("not_found_low_risk_guess requires evidence_found=false")
+        public_reply = result.public_reply_markdown.strip()
+        if public_reply and not _has_uncertainty_caveat(public_reply):
+            raise TriageResultError(
+                "document-scoped low-risk guesses must clearly say the answer was not verified in manuals/ or app/"
+            )
+        return
+
+    if result.evidence_found:
+        raise TriageResultError("evidence_status=not_applicable requires evidence_found=false")
+
+
+def _validate_human_review_metadata(result: TriageResult) -> None:
+    if result.misuse_or_safety_risk and not result.human_review_reason.strip():
+        raise TriageResultError("misuse_or_safety_risk=true requires a human_review_reason")
+    if result.recommended_next_action in {"draft_public_reply", "route_dev_ti"} and not result.human_review_reason.strip():
+        raise TriageResultError(f"{result.recommended_next_action} requires a human_review_reason")
+
+
+def _has_uncertainty_caveat(text: str) -> bool:
+    normalized = text.lower()
+    return any(phrase in normalized for phrase in _UNCERTAINTY_CAVEAT_PHRASES)
+
+
+def _clarification_public_reply(result: TriageResult) -> str:
+    public_reply = result.public_reply_markdown.strip()
+    if public_reply:
+        return public_reply
+    questions = [question.strip() for question in result.clarifying_questions if question.strip()]
+    if not questions:
+        raise TriageResultError("ask_clarification requires a non-empty public reply or clarifying questions")
+    bullet_list = "\n".join(f"- {question}" for question in questions)
+    return "\n".join(
+        [
+            "I need a bit more detail before I can answer confidently. Please clarify:",
+            "",
+            bullet_list,
+        ]
+    )
+
+
+def _auto_action_warnings(
+    result: TriageResult,
+) -> list[str]:
+    warnings: list[str] = []
+    if result.needs_clarification:
+        warnings.append("the result still requires clarification from the requester")
+    if result.clarifying_questions:
+        warnings.append("clarifying questions were included in the output")
+    if not result.auto_public_reply_allowed:
+        warnings.append("the reply was not marked safe for automatic publication")
+    return warnings
+
+
+def _format_human_review_warning(summary: str, details: list[str] | None = None) -> str:
+    if not details:
+        return summary
+    return f"{summary} Warning: {'; '.join(details)}."
+
+
+def _resolve_human_review_outcome(
+    result: TriageResult,
+    *,
+    summary: str,
+    details: list[str] | None = None,
+) -> ResolvedTriageOutcome:
+    combined_details: list[str] = []
+    if result.human_review_reason.strip():
+        combined_details.append(result.human_review_reason.strip())
+    if details:
+        combined_details.extend(details)
+    return ResolvedTriageOutcome(
+        run_status="human_review",
+        effective_action="draft_public_reply",
+        warning_text=_format_human_review_warning(summary, combined_details),
+    )
+
+
+def _resolve_internal_requester_outcome(
+    result: TriageResult,
+    *,
+    effective_action: str,
+) -> ResolvedTriageOutcome:
+    if effective_action == "draft_public_reply":
+        return ResolvedTriageOutcome(run_status="succeeded", effective_action="auto_public_reply")
+    if effective_action == "route_dev_ti" and result.public_reply_markdown.strip():
+        return ResolvedTriageOutcome(run_status="succeeded", effective_action="auto_confirm_and_route")
+    if effective_action in {"ask_clarification", "auto_public_reply", "auto_confirm_and_route", "route_dev_ti"}:
+        return ResolvedTriageOutcome(run_status="succeeded", effective_action=effective_action)
+    raise TriageResultError(f"Unsupported recommended_next_action: {effective_action}")
+
+
+def resolve_triage_outcome(
+    ticket: Ticket,
+    result: TriageResult,
+    settings: Settings,
+    *,
+    requester_can_view_internal_messages: bool = False,
+) -> ResolvedTriageOutcome:
+    action = _effective_next_action(ticket, result)
+
+    if result.misuse_or_safety_risk:
+        return _resolve_human_review_outcome(
+            result,
+            summary="Human review required: misuse or safety risk was identified.",
+        )
+
+    if requester_can_view_internal_messages:
+        return _resolve_internal_requester_outcome(result, effective_action=action)
+
+    if result.recommended_next_action == "ask_clarification" and action == "route_dev_ti":
+        return _resolve_human_review_outcome(
+            result,
+            summary="Human review required: clarification limit reached, so the ticket was routed to Dev/TI.",
+        )
+    if action == "ask_clarification":
+        return ResolvedTriageOutcome(
+            run_status="succeeded",
+            effective_action="ask_clarification",
+        )
+    if action == "draft_public_reply":
+        return _resolve_human_review_outcome(
+            result,
+            summary="Human review required: AI prepared a draft public reply for manual approval.",
+        )
+    if action == "route_dev_ti":
+        return _resolve_human_review_outcome(
+            result,
+            summary="Human review required: the ticket was routed to Dev/TI.",
+        )
+    if action == "auto_public_reply":
+        warnings = _auto_action_warnings(result)
+        if warnings:
+            return _resolve_human_review_outcome(
+                result,
+                summary="Human review required: automatic public reply was downgraded.",
+                details=warnings,
+            )
+        return ResolvedTriageOutcome(run_status="succeeded", effective_action="auto_public_reply")
+    if action == "auto_confirm_and_route":
+        warnings = _auto_action_warnings(result)
+        if warnings:
+            return _resolve_human_review_outcome(
+                result,
+                summary="Human review required: automatic confirm-and-route was downgraded.",
+                details=warnings,
+            )
+        return ResolvedTriageOutcome(run_status="succeeded", effective_action="auto_confirm_and_route")
+    raise TriageResultError(f"Unsupported recommended_next_action: {action}")
 
 
 def _prepare_run(settings: Settings, *, run_id) -> PreparedRunContext | None:
@@ -240,6 +383,33 @@ def _mark_superseded_due_to_stale_input(db, *, run: AIRun, ticket: Ticket) -> No
     process_deferred_requeue(db, ticket=ticket)
 
 
+def _human_review_internal_note(result: TriageResult) -> str:
+    internal_note = result.internal_note_markdown.strip()
+    if internal_note:
+        return internal_note
+
+    note_parts = [result.summary_internal.strip()]
+    if result.human_review_reason.strip():
+        note_parts.append(f"Human review reason: {result.human_review_reason.strip()}")
+    if result.answer_scope == "document_scoped" and result.evidence_status == "not_found_low_risk_guess":
+        note_parts.append(
+            "No confirming evidence was found in manuals/ or app/. Treat any suggested answer as a low-risk best guess."
+        )
+    if result.relevant_paths:
+        checked_paths = ", ".join(path.path for path in result.relevant_paths)
+        note_parts.append(f"Relevant paths checked: {checked_paths}")
+    if result.clarifying_questions:
+        note_parts.append("Open questions: " + "; ".join(question.strip() for question in result.clarifying_questions if question.strip()))
+    return "\n\n".join(part for part in note_parts if part)
+
+
+def _human_review_public_reply(result: TriageResult) -> str:
+    public_reply = result.public_reply_markdown.strip()
+    if public_reply:
+        return public_reply
+    return "Thanks for the details. The internal team is reviewing this request and will follow up."
+
+
 def _apply_success_result(settings: Settings, *, run_id, result: TriageResult) -> None:
     with session_scope(settings) as db:
         run = db.get(AIRun, run_id)
@@ -253,6 +423,12 @@ def _apply_success_result(settings: Settings, *, run_id, result: TriageResult) -
             return
 
         completed_at = utc_now()
+        outcome = resolve_triage_outcome(
+            context.ticket,
+            result,
+            settings,
+            requester_can_view_internal_messages=context.requester_can_view_internal_messages,
+        )
         apply_ai_classification(
             context.ticket,
             ticket_class=result.ticket_class,
@@ -261,21 +437,27 @@ def _apply_success_result(settings: Settings, *, run_id, result: TriageResult) -
             development_needed=result.development_needed,
             requester_language=result.requester_language,
         )
-        publish_ai_internal_note(
-            db,
-            ticket=context.ticket,
-            ai_run_id=run.id,
-            body_markdown=result.internal_note_markdown,
-            created_at=completed_at,
-        )
+        internal_note_markdown = result.internal_note_markdown.strip()
+        if outcome.run_status == "human_review":
+            internal_note_markdown = _human_review_internal_note(result)
 
-        action = _effective_next_action(context.ticket, result)
+        if internal_note_markdown:
+            publish_ai_internal_note(
+                db,
+                ticket=context.ticket,
+                ai_run_id=run.id,
+                body_markdown=internal_note_markdown,
+                created_at=completed_at,
+            )
+
+        action = outcome.effective_action
         if action == "ask_clarification":
+            clarification_reply = _clarification_public_reply(result)
             publish_ai_public_reply(
                 db,
                 ticket=context.ticket,
                 ai_run_id=run.id,
-                body_markdown=result.public_reply_markdown,
+                body_markdown=clarification_reply,
                 next_status="waiting_on_user",
                 last_ai_action="ask_clarification",
                 increment_clarification_rounds=True,
@@ -306,7 +488,7 @@ def _apply_success_result(settings: Settings, *, run_id, result: TriageResult) -
                 db,
                 ticket=context.ticket,
                 ai_run_id=run.id,
-                body_markdown=result.public_reply_markdown,
+                body_markdown=_human_review_public_reply(result),
                 created_at=completed_at,
             )
         elif action == "route_dev_ti":
@@ -319,9 +501,9 @@ def _apply_success_result(settings: Settings, *, run_id, result: TriageResult) -
             )
 
         context.ticket.last_processed_hash = publication_hash
-        run.status = "succeeded"
+        run.status = outcome.run_status
         run.ended_at = completed_at
-        run.error_text = None
+        run.error_text = outcome.warning_text
         process_deferred_requeue(db, ticket=context.ticket)
 
 

@@ -15,16 +15,25 @@
 </section>
 
 <section class="thread stack">
-  {% for message in thread %}
+  {% for item in timeline %}
+  {% if item.kind == "status_change" %}
+  <article class="timeline-status">
+    <div class="timeline-status__meta">
+      <span class="lane-pill lane-pill--status">{{ item.lane_label }}</span>
+      <span>{{ item.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+    </div>
+    <p class="timeline-status__text">{{ item.summary }}</p>
+  </article>
+  {% else %}
   <article class="message-card">
     <div class="message-card__meta">
-      <strong>{{ message.author_label }}</strong>
-      <span>{{ message.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+      <strong>{{ item.author_label }}</strong>
+      <span>{{ item.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
     </div>
-    <div class="message-card__body">{{ message.body_html | safe }}</div>
-    {% if message.attachments %}
+    <div class="message-card__body">{{ item.body_html | safe }}</div>
+    {% if item.attachments %}
     <ul class="attachment-list">
-      {% for attachment in message.attachments %}
+      {% for attachment in item.attachments %}
       <li>
         <a href="/attachments/{{ attachment.id }}">{{ attachment.original_filename }}</a>
         <span class="muted">{{ attachment.mime_type }} · {{ attachment.size_bytes }} bytes</span>
@@ -33,6 +42,7 @@
     </ul>
     {% endif %}
   </article>
+  {% endif %}
   {% endfor %}
 </section>
 

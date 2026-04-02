@@ -38,7 +38,7 @@ MESSAGE_SOURCES = (
     "ai_draft_published",
     "system",
 )
-AI_RUN_STATUSES = ("pending", "running", "succeeded", "failed", "skipped", "superseded")
+AI_RUN_STATUSES = ("pending", "running", "succeeded", "human_review", "failed", "skipped", "superseded")
 AI_RUN_TRIGGERS = ("new_ticket", "requester_reply", "manual_rerun", "reopen")
 REQUEUE_TRIGGERS = ("requester_reply", "manual_rerun", "reopen")
 AI_DRAFT_KINDS = ("public_reply",)

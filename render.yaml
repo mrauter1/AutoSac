@@ -34,7 +34,7 @@ services:
       - key: WORKER_POLL_SECONDS
         value: 10
       - key: CODEX_TIMEOUT_SECONDS
-        value: 75
+        value: 3600
 
 databases:
   - name: autosac-db

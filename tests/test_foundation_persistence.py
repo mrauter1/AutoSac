@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import json
 from pathlib import Path
 import subprocess
+import sys
 import uuid
 
 import pytest
@@ -81,7 +82,7 @@ def _make_settings(tmp_path: Path) -> Settings:
         codex_bin="codex",
         codex_api_key="test-key",
         codex_model="",
-        codex_timeout_seconds=75,
+        codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,
         auto_confirm_intent_min_confidence=0.90,
@@ -497,6 +498,91 @@ def test_bootstrap_workspace_script_seeds_system_state_defaults(monkeypatch, cap
         "bootstrap_version": "stage1-v1",
         "workspace_dir": str(settings.triage_workspace_dir),
     }
+
+
+def test_preflight_setup_script_can_prepare_dirs_and_report_ready(monkeypatch, capsys, tmp_path):
+    from scripts import preflight_setup
+
+    settings = _make_settings(tmp_path)
+    settings = Settings(
+        app_base_url=settings.app_base_url,
+        app_secret_key=settings.app_secret_key,
+        database_url=settings.database_url,
+        uploads_dir=tmp_path / "uploads",
+        triage_workspace_dir=tmp_path / "workspace",
+        repo_mount_dir=tmp_path / "workspace" / "app",
+        manuals_mount_dir=tmp_path / "workspace" / "manuals",
+        codex_bin="codex",
+        codex_api_key=settings.codex_api_key,
+        codex_model=settings.codex_model,
+        codex_timeout_seconds=settings.codex_timeout_seconds,
+        worker_poll_seconds=settings.worker_poll_seconds,
+        auto_support_reply_min_confidence=settings.auto_support_reply_min_confidence,
+        auto_confirm_intent_min_confidence=settings.auto_confirm_intent_min_confidence,
+        max_images_per_message=settings.max_images_per_message,
+        max_image_bytes=settings.max_image_bytes,
+        session_default_hours=settings.session_default_hours,
+        session_remember_days=settings.session_remember_days,
+    )
+
+    monkeypatch.setattr(preflight_setup, "get_settings", lambda: settings)
+    monkeypatch.setattr(preflight_setup, "_resolve_executable", lambda command: "/usr/bin/codex")
+    monkeypatch.setattr(preflight_setup, "ping_database", lambda resolved_settings: None)
+    monkeypatch.setattr(sys, "argv", ["preflight_setup.py", "--ensure-workspace-dirs"])
+
+    preflight_setup.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ok"
+    assert payload["database"]["ok"] is True
+    assert settings.uploads_dir.is_dir()
+    assert settings.repo_mount_dir.is_dir()
+    assert settings.manuals_mount_dir.is_dir()
+
+
+def test_preflight_setup_script_can_run_local_postgres_setup(monkeypatch, capsys, tmp_path):
+    from scripts import preflight_setup
+
+    settings = Settings(
+        app_base_url="http://localhost:8000",
+        app_secret_key="test-secret",
+        database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
+        uploads_dir=tmp_path / "uploads",
+        triage_workspace_dir=tmp_path / "workspace",
+        repo_mount_dir=tmp_path / "workspace" / "app",
+        manuals_mount_dir=tmp_path / "workspace" / "manuals",
+        codex_bin="codex",
+        codex_api_key="test-key",
+        codex_model="",
+        codex_timeout_seconds=3600,
+        worker_poll_seconds=10,
+        auto_support_reply_min_confidence=0.85,
+        auto_confirm_intent_min_confidence=0.90,
+        max_images_per_message=3,
+        max_image_bytes=5 * 1024 * 1024,
+        session_default_hours=12,
+        session_remember_days=30,
+    )
+    observed: list[object] = []
+    ping_attempts = {"count": 0}
+
+    def fake_ping_database(_resolved_settings):
+        ping_attempts["count"] += 1
+        if ping_attempts["count"] == 1:
+            raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(preflight_setup, "get_settings", lambda: settings)
+    monkeypatch.setattr(preflight_setup, "_resolve_executable", lambda command: "/usr/bin/codex")
+    monkeypatch.setattr(preflight_setup, "ping_database", fake_ping_database)
+    monkeypatch.setattr(preflight_setup, "_run_local_postgres_setup", lambda resolved_settings: observed.append(resolved_settings))
+    monkeypatch.setattr(sys, "argv", ["preflight_setup.py", "--ensure-workspace-dirs", "--setup-postgres-local"])
+
+    preflight_setup.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert observed == [settings]
+    assert payload["status"] == "ok"
+    assert payload["database_setup_attempted"] is True
 
 
 def test_additive_preauth_migration_declares_store_and_expiry_index():

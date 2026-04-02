@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import re
@@ -114,7 +115,7 @@ def _make_settings(tmp_path: Path) -> Settings:
         codex_bin="codex",
         codex_api_key="key",
         codex_model="",
-        codex_timeout_seconds=75,
+        codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,
         auto_confirm_intent_min_confidence=0.90,
@@ -147,9 +148,17 @@ def _load_web_stack():
 
 class _RouteDb:
     def __init__(self):
+        self.added = []
         self.commit_calls = 0
         self.rollback_calls = 0
         self.objects = {}
+
+    def add(self, item):
+        self.added.append(item)
+        user_id = getattr(item, "user_id", None)
+        ticket_id = getattr(item, "ticket_id", None)
+        if user_id is not None and ticket_id is not None:
+            self.objects[(type(item), (user_id, ticket_id))] = item
 
     def commit(self):
         self.commit_calls += 1
@@ -448,7 +457,9 @@ def test_requester_routes_source_uses_custom_auth_and_explicit_multipart_limits(
     assert "max_part_size=settings.max_image_bytes + MULTIPART_PART_SIZE_SLACK_BYTES" in upload_source
     assert '"dev_ti": "Team"' in ui_source
     assert "requester_author_label(message.author_type)" in source
-    assert "message.author_label" in template_source
+    assert "_build_requester_timeline" in source
+    assert "item.author_label" in template_source
+    assert "timeline-status" in template_source
 
 
 def test_ticket_access_guard_allows_requester_and_ops_roles():
@@ -739,7 +750,7 @@ def test_ops_roles_can_submit_new_ticket_through_requester_flow(monkeypatch, tmp
         response = client.post("/app/tickets", data={"csrf_token": "csrf-token"}, follow_redirects=False)
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/app/tickets/T-000321"
+    assert response.headers["location"] == "/ops/tickets/T-000321"
     assert captured["settings"] is settings
     assert captured["requester"] is current_user
     assert captured["title"] == "Printer issue"
@@ -877,7 +888,7 @@ def test_requester_detail_route_marks_ticket_as_read(monkeypatch):
     observed = {"view_updates": 0}
 
     monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
-    monkeypatch.setattr(stack["routes_requester"], "_serialize_public_thread", lambda *args, **kwargs: [])
+    monkeypatch.setattr(stack["routes_requester"], "_build_requester_timeline", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         stack["routes_requester"],
         "upsert_ticket_view",
@@ -894,6 +905,35 @@ def test_requester_detail_route_marks_ticket_as_read(monkeypatch):
     assert response.status_code == 200
     assert observed["view_updates"] == 1
     assert db.commit_calls == 1
+
+
+def test_ops_owner_requester_detail_redirects_to_ops_view(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000002", id=uuid.uuid4(), title="Ticket", status="new", urgent=False)
+    observed = {"view_updates": 0}
+
+    monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_requester"],
+        "upsert_ticket_view",
+        lambda *args, **kwargs: observed.__setitem__("view_updates", observed["view_updates"] + 1),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get(f"/app/tickets/{ticket.reference}", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/ops/tickets/{ticket.reference}"
+    assert observed["view_updates"] == 0
+    assert db.commit_calls == 0
 
 
 def test_serialize_public_thread_includes_message_attachments(monkeypatch):
@@ -938,6 +978,62 @@ def test_serialize_public_thread_includes_message_attachments(monkeypatch):
     assert thread[1]["attachments"] == []
 
 
+def test_build_requester_timeline_merges_status_changes_chronologically(monkeypatch):
+    stack = _load_web_stack()
+    ticket_id = uuid.uuid4()
+    start = datetime(2026, 4, 2, 12, 0, tzinfo=timezone.utc)
+    public_thread = [
+        {
+            "kind": "message",
+            "id": str(uuid.uuid4()),
+            "created_at": start,
+            "author_label": "You",
+            "body_html": "<p>Original request</p>",
+            "attachments": [],
+        },
+        {
+            "kind": "message",
+            "id": str(uuid.uuid4()),
+            "created_at": start + timedelta(minutes=5),
+            "author_label": "AI",
+            "body_html": "<p>Need one more detail.</p>",
+            "attachments": [],
+        },
+    ]
+    history = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            created_at=start - timedelta(minutes=1),
+            from_status=None,
+            to_status="new",
+            changed_by_type="requester",
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            created_at=start,
+            from_status="new",
+            to_status="ai_triage",
+            changed_by_type="requester",
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            created_at=start + timedelta(minutes=5),
+            from_status="ai_triage",
+            to_status="waiting_on_user",
+            changed_by_type="ai",
+        ),
+    ]
+
+    monkeypatch.setattr(stack["routes_requester"], "_serialize_public_thread", lambda *args, **kwargs: public_thread)
+    monkeypatch.setattr(stack["routes_requester"], "load_ticket_status_history", lambda *args, **kwargs: history)
+
+    timeline = stack["routes_requester"]._build_requester_timeline(object(), ticket_id=ticket_id)
+
+    assert [item["kind"] for item in timeline] == ["message", "status_change", "message", "status_change"]
+    assert timeline[1]["summary"] == "Status changed to Reviewing"
+    assert timeline[3]["summary"] == "Status changed to Waiting for your reply"
+
+
 def test_requester_detail_renders_attachment_links(monkeypatch):
     stack = _load_web_stack()
     app = stack["create_app"]()
@@ -964,7 +1060,7 @@ def test_requester_detail_renders_attachment_links(monkeypatch):
     ]
 
     monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
-    monkeypatch.setattr(stack["routes_requester"], "_serialize_public_thread", lambda *args, **kwargs: thread)
+    monkeypatch.setattr(stack["routes_requester"], "_build_requester_timeline", lambda *args, **kwargs: thread)
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: requester

@@ -1074,7 +1074,7 @@ The JSONL stream from `--json` is diagnostics only.
 
 ### 16.9 Timeout
 Default timeout:
-- 75 seconds per run
+- 3600 seconds per run
 
 ### 16.10 Skills location
 Repo skills MUST live under:
@@ -1507,7 +1507,7 @@ Recommended defaults:
 - `TRIAGE_WORKSPACE_DIR=/opt/triage/triage_workspace`
 - `REPO_MOUNT_DIR=/opt/triage/triage_workspace/app`
 - `MANUALS_MOUNT_DIR=/opt/triage/triage_workspace/manuals`
-- `CODEX_TIMEOUT_SECONDS=75`
+- `CODEX_TIMEOUT_SECONDS=3600`
 - `WORKER_POLL_SECONDS=10`
 - `AUTO_SUPPORT_REPLY_MIN_CONFIDENCE=0.85`
 - `AUTO_CONFIRM_INTENT_MIN_CONFIDENCE=0.90`

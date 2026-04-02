@@ -604,7 +604,7 @@ def add_ops_public_reply(
     body_markdown: str,
     next_status: str,
 ) -> TicketMessage:
-    if next_status not in {"waiting_on_user", "waiting_on_dev_ti", "resolved"}:
+    if next_status not in {"ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved"}:
         raise ValueError(f"Invalid ops reply next status: {next_status}")
     created_at = utc_now()
     message = _create_message(
@@ -617,6 +617,9 @@ def add_ops_public_reply(
         created_at=created_at,
     )
     db.add(message)
+    if next_status == "ai_triage":
+        request_manual_rerun(db, ticket=ticket, actor=actor)
+        return message
     if ticket.status != next_status:
         record_status_change(
             db,
@@ -680,6 +683,9 @@ def set_ticket_status_for_ops(
 ) -> None:
     if next_status not in TICKET_STATUSES:
         raise ValueError(f"Invalid ticket status: {next_status}")
+    if next_status == "ai_triage":
+        request_manual_rerun(db, ticket=ticket, actor=actor)
+        return
     changed_at = utc_now()
     if ticket.status != next_status:
         record_status_change(
@@ -754,6 +760,7 @@ def publish_ai_draft_for_ops(
         ai_run_id=draft.ai_run_id,
     )
     db.add(message)
+    db.flush()
     draft.status = "published"
     draft.reviewed_by_user_id = actor.id
     draft.reviewed_at = published_at

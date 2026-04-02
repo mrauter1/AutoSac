@@ -58,6 +58,8 @@ def build_triage_prompt(context: LoadedTicketContext) -> str:
     return TRIAGE_PROMPT_TEMPLATE.format(
         REFERENCE=context.ticket.reference,
         TITLE=context.ticket.title,
+        REQUESTER_ROLE=context.requester_role,
+        REQUESTER_CAN_VIEW_INTERNAL_MESSAGES="yes" if context.requester_can_view_internal_messages else "no",
         STATUS=context.ticket.status,
         URGENT="yes" if context.ticket.urgent else "no",
         PUBLIC_MESSAGES=_format_messages(context.public_messages),
@@ -109,12 +111,12 @@ def build_codex_command(
 ) -> tuple[list[str], dict[str, str]]:
     command = [
         settings.codex_bin,
+        "--ask-for-approval",
+        "never",
         "exec",
         "--ephemeral",
         "--sandbox",
         "read-only",
-        "--ask-for-approval",
-        "never",
         "--json",
         "--output-schema",
         str(prepared.schema_path),
@@ -129,12 +131,23 @@ def build_codex_command(
         command.extend(["--image", str(image_path)])
     command.append("-")
     env = os.environ.copy()
-    env["CODEX_API_KEY"] = settings.codex_api_key
+    if settings.codex_api_key:
+        env["CODEX_API_KEY"] = settings.codex_api_key
+    else:
+        env.pop("CODEX_API_KEY", None)
     return command, env
 
 
-def _write_stream(path: Path, contents: str | None) -> None:
-    path.write_text(contents or "", encoding="utf-8")
+def _normalize_stream_contents(contents: str | bytes | None) -> str:
+    if contents is None:
+        return ""
+    if isinstance(contents, bytes):
+        return contents.decode("utf-8", errors="replace")
+    return contents
+
+
+def _write_stream(path: Path, contents: str | bytes | None) -> None:
+    path.write_text(_normalize_stream_contents(contents), encoding="utf-8")
 
 
 def _load_final_output(final_output_path: Path) -> dict[str, object]:

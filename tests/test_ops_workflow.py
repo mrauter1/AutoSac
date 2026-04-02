@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import uuid
 
 import pytest
@@ -44,6 +45,7 @@ class _FakeSession:
         self.added = []
         self.objects = {}
         self.commit_calls = 0
+        self.flush_calls = 0
 
     def add(self, item):
         self.added.append(item)
@@ -53,6 +55,9 @@ class _FakeSession:
 
     def get(self, model, key):
         return self.objects.get((model, key)) or self.objects.get(key)
+
+    def flush(self):
+        self.flush_calls += 1
 
     def commit(self):
         self.commit_calls += 1
@@ -126,6 +131,43 @@ def test_add_ops_public_reply_rejects_invalid_next_status():
             body_markdown="This should fail.",
             next_status="new",
         )
+
+
+def test_add_ops_public_reply_ai_triage_delegates_to_manual_rerun(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    actor = _make_ops_user(symbols, role="admin")
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=51,
+        reference="T-000051",
+        title="Reply back to AI",
+        created_by_user_id=actor.id,
+        status="waiting_on_dev_ti",
+        urgent=False,
+    )
+    observed = {"manual_rerun": 0}
+
+    monkeypatch.setattr(
+        "shared.ticketing.request_manual_rerun",
+        lambda db, ticket, actor: observed.__setitem__("manual_rerun", observed["manual_rerun"] + 1),
+    )
+
+    message = symbols["add_ops_public_reply"](
+        fake_db,
+        ticket=ticket,
+        actor=actor,
+        body_markdown="Please continue and answer directly.",
+        next_status="ai_triage",
+    )
+
+    history = [item for item in fake_db.added if isinstance(item, symbols["TicketStatusHistory"])]
+
+    assert message.author_type == "dev_ti"
+    assert message.visibility == "public"
+    assert message.source == "human_public_reply"
+    assert observed["manual_rerun"] == 1
+    assert history == []
 
 
 def test_add_ops_internal_note_keeps_status_and_adds_internal_message():
@@ -204,6 +246,34 @@ def test_set_ticket_status_for_ops_records_resolve_history_and_rejects_invalid_s
 
     with pytest.raises(ValueError):
         symbols["set_ticket_status_for_ops"](fake_db, ticket=ticket, actor=actor, next_status="not-a-status")
+
+
+def test_set_ticket_status_for_ops_ai_triage_delegates_to_manual_rerun(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=62,
+        reference="T-000062",
+        title="Requeue from status change",
+        created_by_user_id=uuid.uuid4(),
+        status="waiting_on_dev_ti",
+        urgent=False,
+    )
+    observed = {"manual_rerun": 0}
+
+    monkeypatch.setattr(
+        "shared.ticketing.request_manual_rerun",
+        lambda db, ticket, actor: observed.__setitem__("manual_rerun", observed["manual_rerun"] + 1),
+    )
+
+    symbols["set_ticket_status_for_ops"](fake_db, ticket=ticket, actor=actor, next_status="ai_triage")
+
+    history = [item for item in fake_db.added if isinstance(item, symbols["TicketStatusHistory"])]
+
+    assert observed["manual_rerun"] == 1
+    assert history == []
 
 
 def test_request_manual_rerun_requeues_when_run_is_active(monkeypatch):
@@ -295,8 +365,10 @@ def test_publish_ai_draft_for_ops_creates_ai_message_and_status_change():
     assert message.source == "ai_draft_published"
     assert draft.status == "published"
     assert draft.reviewed_by_user_id == actor.id
+    assert draft.published_message_id == message.id
     assert ticket.status == "waiting_on_user"
     assert history[0].to_status == "waiting_on_user"
+    assert fake_db.flush_calls == 1
 
 
 def test_reject_ai_draft_for_ops_marks_review_metadata_without_status_change():
@@ -759,7 +831,30 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
     observed = {"view_updates": 0}
 
     monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
-    monkeypatch.setattr(stack["routes_ops"], "_ticket_detail_context", lambda *args, **kwargs: {"ticket": ticket, "public_thread": [], "internal_thread": [], "ops_users": [], "status_options": [], "reply_status_options": [], "pending_draft": None, "pending_draft_html": "", "latest_run": None, "latest_ai_note": None, "latest_ai_note_html": "", "ai_relevant_paths": [], "ai_summary_short": "", "ai_summary_internal": "", "creator": None, "assignee": None})
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_ticket_detail_context",
+        lambda *args, **kwargs: {
+            "ticket": ticket,
+            "activity_timeline": [],
+            "ops_users": [],
+            "status_options": [],
+            "draft_reply_status_options": [],
+            "public_reply_status_options": [],
+            "default_public_reply_status": "waiting_on_user",
+            "pending_draft": None,
+            "pending_draft_html": "",
+            "latest_run": None,
+            "latest_analysis_run": None,
+            "latest_ai_note": None,
+            "latest_ai_note_html": "",
+            "ai_relevant_paths": [],
+            "ai_summary_short": "",
+            "ai_summary_internal": "",
+            "creator": None,
+            "assignee": None,
+        },
+    )
     monkeypatch.setattr(
         stack["routes_ops"],
         "upsert_ticket_view",
@@ -778,8 +873,295 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
     assert db.commit_calls == 1
 
 
+def test_ops_set_ticket_status_ai_triage_triggers_manual_rerun(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000012", id=uuid.uuid4())
+    observed = {"next_status": None}
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "set_ticket_status_for_ops",
+        lambda db, ticket, actor, next_status, note=None: observed.__setitem__("next_status", next_status),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            f"/ops/tickets/{ticket.reference}/set-status",
+            data={"csrf_token": "csrf-token", "next_status": "ai_triage"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/ops/tickets/{ticket.reference}"
+    assert observed["next_status"] == "ai_triage"
+    assert db.commit_calls == 1
+
+
+def test_ops_detail_route_separates_analysis_artifacts_from_latest_run(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(
+        reference="T-000011",
+        id=uuid.uuid4(),
+        title="Ops ticket",
+        status="waiting_on_user",
+        urgent=False,
+        updated_at=datetime.now(timezone.utc),
+        ticket_class="support",
+        ai_confidence=0.9,
+        impact_level="low",
+        development_needed=False,
+        requester_language="en",
+        last_ai_action="ask_clarification",
+        requeue_requested=False,
+    )
+    latest_run = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="failed",
+        error_text="boom",
+        prompt_path="/tmp/latest-prompt.txt",
+        schema_path="/tmp/latest-schema.json",
+        final_output_path="/tmp/latest-final.json",
+        stdout_jsonl_path="/tmp/latest-stdout.jsonl",
+        stderr_path="/tmp/latest-stderr.txt",
+    )
+    latest_analysis_run = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="human_review",
+        prompt_path="/tmp/analysis-prompt.txt",
+        schema_path="/tmp/analysis-schema.json",
+        final_output_path="/tmp/analysis-final.json",
+        stdout_jsonl_path="/tmp/analysis-stdout.jsonl",
+        stderr_path="/tmp/analysis-stderr.txt",
+    )
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_ticket_detail_context",
+        lambda *args, **kwargs: {
+            "ticket": ticket,
+            "creator": None,
+            "assignee": None,
+            "activity_timeline": [],
+            "ops_users": [],
+            "status_options": [],
+            "draft_reply_status_options": [],
+            "public_reply_status_options": [],
+            "default_public_reply_status": "waiting_on_user",
+            "pending_draft": None,
+            "pending_draft_html": "",
+            "latest_run": latest_run,
+            "latest_analysis_run": latest_analysis_run,
+            "latest_ai_note": None,
+            "latest_ai_note_html": "",
+            "ai_relevant_paths": [],
+            "ai_summary_short": "Accepted analysis",
+            "ai_summary_internal": "Accepted internal summary",
+        },
+    )
+    monkeypatch.setattr(stack["routes_ops"], "upsert_ticket_view", lambda *args, **kwargs: None)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get(f"/ops/tickets/{ticket.reference}")
+
+    assert response.status_code == 200
+    assert "Analysis artifacts" in response.text
+    assert "/tmp/analysis-final.json" in response.text
+    assert "Latest run artifacts" in response.text
+    assert "/tmp/latest-final.json" in response.text
+
+
+def test_ticket_detail_context_uses_latest_accepted_analysis_run(tmp_path, monkeypatch):
+    stack = _load_web_stack()
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        created_by_user_id=uuid.uuid4(),
+        assigned_to_user_id=None,
+    )
+    latest_run = SimpleNamespace(status="failed", error_text="boom")
+    analysis_path = tmp_path / "final.json"
+    analysis_path.write_text(
+        json.dumps(
+            {
+                "summary_short": "Accepted analysis",
+                "summary_internal": "Accepted internal summary",
+                "relevant_paths": [{"path": "manuals/", "reason": "Checked first."}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    analysis_run = SimpleNamespace(status="human_review", final_output_path=str(analysis_path))
+
+    class _ContextDb:
+        def get(self, model, key):
+            return None
+
+    monkeypatch.setattr(stack["routes_ops"], "_build_ops_activity_timeline", lambda *args, **kwargs: [])
+    monkeypatch.setattr(stack["routes_ops"], "_load_pending_draft", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_run", lambda *args, **kwargs: latest_run)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_analysis_run", lambda *args, **kwargs: analysis_run)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_internal_ai_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_users", lambda *args, **kwargs: [])
+    current_user = SimpleNamespace(id=ticket.created_by_user_id, role="admin")
+
+    context = stack["routes_ops"]._ticket_detail_context(_ContextDb(), ticket=ticket, current_user=current_user)
+
+    assert context["latest_run"] is latest_run
+    assert context["latest_analysis_run"] is analysis_run
+    assert context["ai_summary_short"] == "Accepted analysis"
+    assert context["ai_summary_internal"] == "Accepted internal summary"
+    assert context["ai_relevant_paths"] == [{"path": "manuals/", "reason": "Checked first."}]
+    assert context["public_reply_status_options"][0] == "ai_triage"
+    assert context["default_public_reply_status"] == "ai_triage"
+
+
+def test_build_ops_activity_timeline_merges_status_changes_after_messages(monkeypatch):
+    stack = _load_web_stack()
+    ticket_id = uuid.uuid4()
+    start = datetime(2026, 4, 2, 12, 0, tzinfo=timezone.utc)
+    activity_messages = [
+        {
+            "kind": "message",
+            "id": str(uuid.uuid4()),
+            "created_at": start,
+            "lane": "public",
+            "lane_label": "Public",
+            "author_label": "Requester",
+            "body_html": "<p>Need help</p>",
+            "attachments": [],
+        },
+        {
+            "kind": "message",
+            "id": str(uuid.uuid4()),
+            "created_at": start + timedelta(minutes=2),
+            "lane": "internal",
+            "lane_label": "Internal",
+            "author_label": "Dev/TI",
+            "body_html": "<p>Checking the environment.</p>",
+            "attachments": [],
+        },
+    ]
+    history = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            created_at=start + timedelta(minutes=2),
+            from_status="ai_triage",
+            to_status="waiting_on_dev_ti",
+            changed_by_type="ai",
+        )
+    ]
+
+    monkeypatch.setattr(stack["routes_ops"], "_serialize_thread", lambda *args, **kwargs: activity_messages)
+    monkeypatch.setattr(stack["routes_ops"], "load_ticket_status_history", lambda *args, **kwargs: history)
+
+    timeline = stack["routes_ops"]._build_ops_activity_timeline(object(), ticket_id=ticket_id)
+
+    assert [item["kind"] for item in timeline] == ["message", "message", "status_change"]
+    assert timeline[2]["summary"] == "AI Triage -> Waiting on Dev/TI"
+    assert timeline[2]["actor_label"] == "AI"
+
+
+def test_ticket_detail_context_defaults_public_reply_to_waiting_on_user_for_other_ops_tickets(monkeypatch):
+    stack = _load_web_stack()
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        created_by_user_id=uuid.uuid4(),
+        assigned_to_user_id=None,
+    )
+
+    class _ContextDb:
+        def get(self, model, key):
+            return None
+
+    monkeypatch.setattr(stack["routes_ops"], "_build_ops_activity_timeline", lambda *args, **kwargs: [])
+    monkeypatch.setattr(stack["routes_ops"], "_load_pending_draft", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_analysis_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_internal_ai_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_users", lambda *args, **kwargs: [])
+
+    context = stack["routes_ops"]._ticket_detail_context(
+        _ContextDb(),
+        ticket=ticket,
+        current_user=SimpleNamespace(id=uuid.uuid4(), role="admin"),
+    )
+
+    assert context["default_public_reply_status"] == "waiting_on_user"
+
+
+def test_ops_detail_route_renders_ai_triage_as_public_reply_option_for_self_owned_ops_tickets(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Admin", role="admin")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(
+        reference="T-000013",
+        id=uuid.uuid4(),
+        title="Admin-owned ticket",
+        status="waiting_on_dev_ti",
+        urgent=False,
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_ticket_detail_context",
+        lambda *args, **kwargs: {
+            "ticket": ticket,
+            "creator": ops_user,
+            "assignee": None,
+            "activity_timeline": [],
+            "ops_users": [],
+            "status_options": [],
+            "draft_reply_status_options": ["waiting_on_user", "waiting_on_dev_ti", "resolved"],
+            "public_reply_status_options": ["ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved"],
+            "default_public_reply_status": "ai_triage",
+            "pending_draft": None,
+            "pending_draft_html": "",
+            "latest_run": None,
+            "latest_analysis_run": None,
+            "latest_ai_note": None,
+            "latest_ai_note_html": "",
+            "ai_relevant_paths": [],
+            "ai_summary_short": "",
+            "ai_summary_internal": "",
+        },
+    )
+    monkeypatch.setattr(stack["routes_ops"], "upsert_ticket_view", lambda *args, **kwargs: None)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get(f"/ops/tickets/{ticket.reference}")
+
+    assert response.status_code == 200
+    assert '<option value="ai_triage" selected>' in response.text
+
+
 def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate():
     source = Path("app/routes_ops.py").read_text(encoding="utf-8")
+    app_css = Path("app/static/app.css").read_text(encoding="utf-8")
     base_template = Path("app/templates/base.html").read_text(encoding="utf-8")
     filters_template = Path("app/templates/ops_filters.html").read_text(encoding="utf-8")
     detail_template = Path("app/templates/ops_ticket_detail.html").read_text(encoding="utf-8")
@@ -807,9 +1189,14 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert "Created by me" in filters_template
     assert "Needs approval" in filters_template
     assert "Updated since my last view" in filters_template
-    assert "Public thread" in detail_template
-    assert "Internal thread" in detail_template
+    assert "Activity" in detail_template
     assert "AI analysis" in detail_template
+    assert "lane-pill" in detail_template
+    assert "timeline-status" in detail_template
+    assert "Summary" in detail_template
+    assert "Internal summary" in detail_template
+    assert '<details class="analysis-disclosure">' in detail_template
+    assert "More analysis" in detail_template
     assert "Relevant repo/docs paths" in detail_template
     assert "Pending AI draft" in detail_template
     assert "Ticket queue" in list_template
@@ -817,3 +1204,4 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert 'id="ops-results"' in board_template
     assert '/static/htmx.min.js' in base_template
     assert "Pending draft approval" in board_template
+    assert ".analysis-disclosure" in app_css

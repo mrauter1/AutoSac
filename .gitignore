@@ -1,4 +1,4 @@
-
+.env
 # Local/generated artifacts
 AutoSac/tmp-smoke.db
 **/__pycache__/

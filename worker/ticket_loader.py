@@ -7,12 +7,15 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shared.models import Ticket, TicketAttachment, TicketMessage
+from shared.models import Ticket, TicketAttachment, TicketMessage, User
+from shared.permissions import can_access_all_tickets
 
 
 @dataclass(frozen=True)
 class LoadedTicketContext:
     ticket: Ticket
+    requester_role: str
+    requester_can_view_internal_messages: bool
     public_messages: Sequence[TicketMessage]
     internal_messages: Sequence[TicketMessage]
     public_attachments: Sequence[TicketAttachment]
@@ -20,6 +23,8 @@ class LoadedTicketContext:
 
 def load_ticket_context(db: Session, ticket_id: uuid.UUID) -> LoadedTicketContext:
     ticket = db.execute(select(Ticket).where(Ticket.id == ticket_id)).scalar_one()
+    requester = db.get(User, ticket.created_by_user_id)
+    requester_role = requester.role if requester is not None else "requester"
     public_messages = db.execute(
         select(TicketMessage)
         .where(TicketMessage.ticket_id == ticket_id, TicketMessage.visibility == "public")
@@ -37,6 +42,8 @@ def load_ticket_context(db: Session, ticket_id: uuid.UUID) -> LoadedTicketContex
     ).scalars().all()
     return LoadedTicketContext(
         ticket=ticket,
+        requester_role=requester_role,
+        requester_can_view_internal_messages=requester is not None and can_access_all_tickets(requester),
         public_messages=public_messages,
         internal_messages=internal_messages,
         public_attachments=public_attachments,

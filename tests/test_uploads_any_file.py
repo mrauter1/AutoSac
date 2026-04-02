@@ -25,7 +25,7 @@ def _make_settings(tmp_path: Path) -> Settings:
         codex_bin="codex",
         codex_api_key="key",
         codex_model="",
-        codex_timeout_seconds=75,
+        codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,
         auto_confirm_intent_min_confidence=0.90,

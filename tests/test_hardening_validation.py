@@ -25,7 +25,7 @@ def _make_settings(tmp_path: Path) -> Settings:
         codex_bin="codex",
         codex_api_key="test-key",
         codex_model="",
-        codex_timeout_seconds=75,
+        codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,
         auto_confirm_intent_min_confidence=0.90,
@@ -181,17 +181,21 @@ def test_env_example_and_readme_capture_acceptance_contract():
 
     assert ".env.example" in readme_source
     assert "python -m pip install -r requirements.txt" in readme_source
+    assert "Runtime scripts load `.env` automatically" in readme_source
     assert "alembic upgrade head" in readme_source
     assert "GET /readyz" in readme_source
     assert "python scripts/bootstrap_workspace.py" in readme_source
+    assert "python scripts/preflight_setup.py --ensure-workspace-dirs --setup-postgres-local" in readme_source
     assert "python scripts/create_admin.py" in readme_source
     assert "python scripts/create_user.py" in readme_source
     assert "python scripts/set_password.py" in readme_source
     assert "python scripts/deactivate_user.py" in readme_source
     assert "python scripts/run_web.py --check" in readme_source
     assert "python scripts/run_worker.py --check" in readme_source
+    assert "scripts/setup_postgres_local.sh" in readme_source
     assert "bootstrap_version" in readme_source
     assert "pytest" in readme_source
+    assert "Leave `CODEX_API_KEY` empty" in readme_source
 
 
 def _script_env(tmp_path: Path) -> dict[str, str]:
@@ -214,9 +218,8 @@ def _script_env(tmp_path: Path) -> dict[str, str]:
             "REPO_MOUNT_DIR": str(repo_mount_dir),
             "MANUALS_MOUNT_DIR": str(manuals_mount_dir),
             "CODEX_BIN": "codex",
-            "CODEX_API_KEY": "test-key",
             "CODEX_MODEL": "",
-            "CODEX_TIMEOUT_SECONDS": "75",
+            "CODEX_TIMEOUT_SECONDS": "3600",
             "WORKER_POLL_SECONDS": "10",
             "AUTO_SUPPORT_REPLY_MIN_CONFIDENCE": "0.85",
             "AUTO_CONFIRM_INTENT_MIN_CONFIDENCE": "0.90",
@@ -228,6 +231,37 @@ def _script_env(tmp_path: Path) -> dict[str, str]:
         }
     )
     return env
+
+
+def test_get_settings_allows_missing_codex_api_key(monkeypatch, tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    uploads_dir = tmp_path / "uploads"
+    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
+    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}")
+    monkeypatch.setenv("UPLOADS_DIR", str(uploads_dir))
+    monkeypatch.setenv("TRIAGE_WORKSPACE_DIR", str(workspace_dir))
+    monkeypatch.setenv("REPO_MOUNT_DIR", str(workspace_dir / "app"))
+    monkeypatch.setenv("MANUALS_MOUNT_DIR", str(workspace_dir / "manuals"))
+    monkeypatch.setenv("CODEX_BIN", "codex")
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    monkeypatch.setenv("CODEX_MODEL", "")
+    monkeypatch.setenv("CODEX_TIMEOUT_SECONDS", "3600")
+    monkeypatch.setenv("WORKER_POLL_SECONDS", "10")
+    monkeypatch.setenv("AUTO_SUPPORT_REPLY_MIN_CONFIDENCE", "0.85")
+    monkeypatch.setenv("AUTO_CONFIRM_INTENT_MIN_CONFIDENCE", "0.90")
+    monkeypatch.setenv("MAX_IMAGES_PER_MESSAGE", "3")
+    monkeypatch.setenv("MAX_IMAGE_BYTES", str(5 * 1024 * 1024))
+    monkeypatch.setenv("SESSION_DEFAULT_HOURS", "12")
+    monkeypatch.setenv("SESSION_REMEMBER_DAYS", "30")
+
+    from shared.config import get_settings
+
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    assert settings.codex_api_key is None
+    get_settings.cache_clear()
 
 
 def _run_script(args: list[str], *, env: dict[str, str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -302,3 +336,31 @@ def test_script_checks_fail_before_workspace_bootstrap(tmp_path):
     assert worker.returncode != 0
     assert "Required " in worker.stderr
     assert "does not exist" in worker.stderr
+
+
+def test_setup_postgres_local_check_only_accepts_localhost_url():
+    result = subprocess.run(
+        ["bash", "scripts/setup_postgres_local.sh", "--check-only", "--database-url", "postgresql+psycopg://triage:triage@localhost:5432/triage"],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    payload = _last_json_line(result.stdout)
+    assert payload["script"] == "setup_postgres_local.sh"
+    assert payload["mode"] == "check_only"
+    assert payload["database_host"] == "localhost"
+
+
+def test_setup_postgres_local_check_only_rejects_remote_url():
+    result = subprocess.run(
+        ["bash", "scripts/setup_postgres_local.sh", "--check-only", "--database-url", "postgresql+psycopg://triage:triage@db.example.com:5432/triage"],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "only supports localhost PostgreSQL URLs" in result.stderr

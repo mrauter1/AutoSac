@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_required_auth_session, require_ops_user, validate_csrf_token
 from app.render import render_markdown_to_html
+from app.timeline import load_ticket_status_history, merge_timeline_items, serialize_status_changes
 from app.ui import build_template_context, is_htmx_request, ops_author_label, ops_status_label, templates
 from shared.db import db_session_dependency
 from shared.models import AIDraft, AIRun, Ticket, TicketAttachment, TicketMessage, TicketView, User
@@ -31,7 +32,8 @@ from shared.ticketing import (
 
 router = APIRouter()
 
-_OPS_REPLY_STATUSES = ("waiting_on_user", "waiting_on_dev_ti", "resolved")
+_OPS_DRAFT_REPLY_STATUSES = ("waiting_on_user", "waiting_on_dev_ti", "resolved")
+_OPS_PUBLIC_REPLY_STATUSES = ("ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")
 _OPS_FILTERABLE_STATUSES = ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")
 _OPS_FILTERABLE_CLASSES = ("support", "access_config", "data_ops", "bug", "feature", "unknown")
 _MANAGEABLE_USER_ROLES = ("requester", "dev_ti")
@@ -69,33 +71,34 @@ def _load_ops_draft_or_404(db: Session, *, draft_id: str) -> AIDraft:
     return draft
 
 
-def _load_attachments_by_message(db: Session, *, ticket_id, visibility: str) -> dict[Any, list[TicketAttachment]]:
-    attachments = list(
-        db.execute(
-            select(TicketAttachment)
-            .where(TicketAttachment.ticket_id == ticket_id, TicketAttachment.visibility == visibility)
-            .order_by(TicketAttachment.created_at.asc())
-        ).scalars()
-    )
+def _lane_label(visibility: str) -> str:
+    return "Internal" if visibility == "internal" else "Public"
+
+
+def _load_attachments_by_message(db: Session, *, ticket_id, visibility: str | None = None) -> dict[Any, list[TicketAttachment]]:
+    statement = select(TicketAttachment).where(TicketAttachment.ticket_id == ticket_id)
+    if visibility is not None:
+        statement = statement.where(TicketAttachment.visibility == visibility)
+    attachments = list(db.execute(statement.order_by(TicketAttachment.created_at.asc(), TicketAttachment.id.asc())).scalars())
     grouped: dict[Any, list[TicketAttachment]] = defaultdict(list)
     for attachment in attachments:
         grouped[attachment.message_id].append(attachment)
     return grouped
 
 
-def _serialize_thread(db: Session, *, ticket_id, visibility: str) -> list[dict[str, object]]:
+def _serialize_thread(db: Session, *, ticket_id, visibility: str | None = None) -> list[dict[str, object]]:
     attachments_by_message = _load_attachments_by_message(db, ticket_id=ticket_id, visibility=visibility)
-    messages = list(
-        db.execute(
-            select(TicketMessage)
-            .where(TicketMessage.ticket_id == ticket_id, TicketMessage.visibility == visibility)
-            .order_by(TicketMessage.created_at.asc())
-        ).scalars()
-    )
+    statement = select(TicketMessage).where(TicketMessage.ticket_id == ticket_id)
+    if visibility is not None:
+        statement = statement.where(TicketMessage.visibility == visibility)
+    messages = list(db.execute(statement.order_by(TicketMessage.created_at.asc(), TicketMessage.id.asc())).scalars())
     return [
         {
+            "kind": "message",
             "id": str(message.id),
             "created_at": message.created_at,
+            "lane": message.visibility,
+            "lane_label": _lane_label(message.visibility),
             "author_type": message.author_type,
             "author_label": ops_author_label(message.author_type),
             "source": message.source,
@@ -105,6 +108,18 @@ def _serialize_thread(db: Session, *, ticket_id, visibility: str) -> list[dict[s
         }
         for message in messages
     ]
+
+
+def _build_ops_activity_timeline(db: Session, *, ticket_id) -> list[dict[str, object]]:
+    return merge_timeline_items(
+        _serialize_thread(db, ticket_id=ticket_id),
+        serialize_status_changes(
+            load_ticket_status_history(db, ticket_id=ticket_id),
+            status_label=ops_status_label,
+            actor_label=ops_author_label,
+            summary_style="ops",
+        ),
+    )
 
 
 def _load_ops_users(db: Session) -> list[User]:
@@ -120,6 +135,14 @@ def _load_ops_users(db: Session) -> list[User]:
 def _load_latest_run(db: Session, *, ticket_id) -> AIRun | None:
     return db.execute(
         select(AIRun).where(AIRun.ticket_id == ticket_id).order_by(AIRun.created_at.desc())
+    ).scalars().first()
+
+
+def _load_latest_analysis_run(db: Session, *, ticket_id) -> AIRun | None:
+    return db.execute(
+        select(AIRun)
+        .where(AIRun.ticket_id == ticket_id, AIRun.status.in_(("succeeded", "human_review")))
+        .order_by(AIRun.created_at.desc())
     ).scalars().first()
 
 
@@ -258,27 +281,34 @@ def _ops_filter_context(db: Session, *, current_user: User, filters: dict[str, o
     }
 
 
-def _ticket_detail_context(db: Session, *, ticket: Ticket) -> dict[str, object]:
-    public_thread = _serialize_thread(db, ticket_id=ticket.id, visibility="public")
-    internal_thread = _serialize_thread(db, ticket_id=ticket.id, visibility="internal")
+def _default_public_reply_status(*, ticket: Ticket, current_user: User) -> str:
+    if ticket.created_by_user_id == current_user.id and is_ops_user(current_user):
+        return "ai_triage"
+    return "waiting_on_user"
+
+
+def _ticket_detail_context(db: Session, *, ticket: Ticket, current_user: User) -> dict[str, object]:
     pending_draft = _load_pending_draft(db, ticket_id=ticket.id)
     latest_run = _load_latest_run(db, ticket_id=ticket.id)
+    latest_analysis_run = _load_latest_analysis_run(db, ticket_id=ticket.id)
     latest_ai_note = _load_latest_internal_ai_note(db, ticket_id=ticket.id)
-    run_output = _load_run_output(latest_run)
+    run_output = _load_run_output(latest_analysis_run)
     creator = db.get(User, ticket.created_by_user_id)
     assignee = db.get(User, ticket.assigned_to_user_id) if ticket.assigned_to_user_id else None
     return {
         "ticket": ticket,
         "creator": creator,
         "assignee": assignee,
-        "public_thread": public_thread,
-        "internal_thread": internal_thread,
+        "activity_timeline": _build_ops_activity_timeline(db, ticket_id=ticket.id),
         "ops_users": _load_ops_users(db),
         "status_options": _OPS_FILTERABLE_STATUSES,
-        "reply_status_options": _OPS_REPLY_STATUSES,
+        "draft_reply_status_options": _OPS_DRAFT_REPLY_STATUSES,
+        "public_reply_status_options": _OPS_PUBLIC_REPLY_STATUSES,
+        "default_public_reply_status": _default_public_reply_status(ticket=ticket, current_user=current_user),
         "pending_draft": pending_draft,
         "pending_draft_html": render_markdown_to_html(pending_draft.body_markdown) if pending_draft else "",
         "latest_run": latest_run,
+        "latest_analysis_run": latest_analysis_run,
         "latest_ai_note": latest_ai_note,
         "latest_ai_note_html": render_markdown_to_html(latest_ai_note.body_markdown) if latest_ai_note else "",
         "ai_relevant_paths": run_output.get("relevant_paths", []) if isinstance(run_output, dict) else [],
@@ -440,7 +470,7 @@ def ops_ticket_detail(
             request=request,
             current_user=current_user,
             auth_session=auth_session,
-            extra=_ticket_detail_context(db, ticket=ticket),
+            extra=_ticket_detail_context(db, ticket=ticket, current_user=current_user),
         ),
     )
 

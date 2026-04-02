@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import json
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 import threading
 import uuid
@@ -12,7 +13,7 @@ import pytest
 from shared.config import Settings
 
 
-def _make_settings(tmp_path: Path) -> Settings:
+def _make_settings(tmp_path: Path, *, codex_api_key: str | None = "test-key") -> Settings:
     workspace_dir = tmp_path / "workspace"
     workspace_dir.mkdir(parents=True, exist_ok=True)
     return Settings(
@@ -24,9 +25,9 @@ def _make_settings(tmp_path: Path) -> Settings:
         repo_mount_dir=workspace_dir / "app",
         manuals_mount_dir=workspace_dir / "manuals",
         codex_bin="codex",
-        codex_api_key="test-key",
+        codex_api_key=codex_api_key,
         codex_model="gpt-test",
-        codex_timeout_seconds=75,
+        codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,
         auto_confirm_intent_min_confidence=0.90,
@@ -54,6 +55,7 @@ def _load_worker_symbols():
         _apply_success_result,
         _mark_failed,
         _prepare_run,
+        resolve_triage_outcome,
         TriageResultError,
         build_requester_visible_fingerprint,
         process_ai_run,
@@ -65,6 +67,7 @@ def _load_worker_symbols():
         "_mark_failed": _mark_failed,
         "_prepare_run": _prepare_run,
         "CodexRunError": CodexRunError,
+        "resolve_triage_outcome": resolve_triage_outcome,
         "TriageResultError": TriageResultError,
         "build_codex_command": build_codex_command,
         "build_requester_visible_fingerprint": build_requester_visible_fingerprint,
@@ -84,6 +87,8 @@ def _make_context(
     internal_body: str = "Internal body",
     attachment_sha: str = "sha-1",
     public_attachments=None,
+    requester_role: str = "requester",
+    requester_can_view_internal_messages: bool = False,
 ):
     ticket = ticket or SimpleNamespace(
         id=uuid.uuid4(),
@@ -117,6 +122,8 @@ def _make_context(
     )
     return SimpleNamespace(
         ticket=ticket,
+        requester_role=requester_role,
+        requester_can_view_internal_messages=requester_can_view_internal_messages,
         public_messages=[public_message],
         internal_messages=[internal_message],
         public_attachments=public_attachments or [attachment],
@@ -137,6 +144,10 @@ def _valid_payload(**overrides):
         "incorrect_or_conflicting_details": [],
         "evidence_found": True,
         "relevant_paths": [{"path": "manuals/access.md", "reason": "Contains role setup steps."}],
+        "answer_scope": "document_scoped",
+        "evidence_status": "verified",
+        "misuse_or_safety_risk": False,
+        "human_review_reason": "",
         "recommended_next_action": "auto_public_reply",
         "auto_public_reply_allowed": True,
         "public_reply_markdown": "Please open Settings > Access and confirm the report role is enabled.",
@@ -220,15 +231,23 @@ def test_requester_visible_fingerprint_excludes_internal_messages():
     assert symbols["build_requester_visible_fingerprint"](first) == symbols["build_requester_visible_fingerprint"](second)
 
 
-def test_validate_triage_result_enforces_auto_reply_threshold(tmp_path):
+def test_resolve_triage_outcome_allows_low_confidence_best_effort_reply(tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(clarification_rounds=0)
 
-    with pytest.raises(RuntimeError):
+    outcome = symbols["resolve_triage_outcome"](
+        ticket,
         symbols["validate_triage_result"](
             _valid_payload(confidence=0.80, recommended_next_action="auto_public_reply"),
             settings,
-        )
+        ),
+        settings,
+    )
+
+    assert outcome.run_status == "succeeded"
+    assert outcome.effective_action == "auto_public_reply"
+    assert outcome.warning_text is None
 
 
 def test_prepare_codex_run_writes_prompt_and_schema(tmp_path):
@@ -308,14 +327,23 @@ def test_prepare_codex_run_excludes_spoofed_image_mime_without_verified_dimensio
 
 def test_build_triage_prompt_includes_public_and_internal_context():
     symbols = _load_worker_symbols()
-    context = _make_context(public_body="Requester sees an error", internal_body="Dev/TI suspects role drift")
+    context = _make_context(
+        public_body="Requester sees an error",
+        internal_body="Dev/TI suspects role drift",
+        requester_role="dev_ti",
+        requester_can_view_internal_messages=True,
+    )
 
     prompt = symbols["build_triage_prompt"](context)
 
     assert "Public messages:" in prompt
     assert "Internal messages:" in prompt
+    assert "Ticket requester role:" in prompt
+    assert "Requester can view internal messages:" in prompt
     assert "Requester sees an error" in prompt
     assert "Dev/TI suspects role drift" in prompt
+    assert "dev_ti" in prompt
+    assert "yes" in prompt
 
 
 def test_build_codex_command_matches_required_contract(tmp_path):
@@ -333,12 +361,12 @@ def test_build_codex_command_matches_required_contract(tmp_path):
 
     assert command[:8] == [
         "codex",
+        "--ask-for-approval",
+        "never",
         "exec",
         "--ephemeral",
         "--sandbox",
         "read-only",
-        "--ask-for-approval",
-        "never",
         "--json",
     ]
     assert "--output-schema" in command
@@ -350,6 +378,23 @@ def test_build_codex_command_matches_required_contract(tmp_path):
     assert command[-1] == "-"
     assert prepared.prompt not in command
     assert env["CODEX_API_KEY"] == "test-key"
+
+
+def test_build_codex_command_omits_api_key_when_not_configured(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path, codex_api_key=None)
+    context = _make_context()
+    prepared = symbols["prepare_codex_run"](
+        settings,
+        ticket_id=context.ticket.id,
+        run_id=uuid.uuid4(),
+        context=context,
+    )
+
+    monkeypatch.setenv("CODEX_API_KEY", "stale-parent-key")
+    _command, env = symbols["build_codex_command"](settings, prepared=prepared)
+
+    assert "CODEX_API_KEY" not in env
 
 
 def test_execute_codex_run_passes_prompt_via_stdin(monkeypatch, tmp_path):
@@ -378,6 +423,36 @@ def test_execute_codex_run_passes_prompt_via_stdin(monkeypatch, tmp_path):
     assert prepared.prompt not in observed["command"]
     assert observed["input"] == prepared.prompt
     assert artifacts.output_payload["recommended_next_action"] == "auto_public_reply"
+
+
+def test_execute_codex_run_handles_timeout_streams_as_bytes(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    context = _make_context()
+    prepared = symbols["prepare_codex_run"](
+        settings,
+        ticket_id=context.ticket.id,
+        run_id=uuid.uuid4(),
+        context=context,
+    )
+
+    monkeypatch.setattr(
+        "worker.codex_runner.subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(
+                cmd=["codex"],
+                timeout=1,
+                output=b'{"event":"partial"}\n',
+                stderr=b"stderr-bytes",
+            )
+        ),
+    )
+
+    with pytest.raises(symbols["CodexRunError"], match="timed out"):
+        symbols["execute_codex_run"](settings, prepared=prepared)
+
+    assert prepared.stdout_jsonl_path.read_text(encoding="utf-8") == '{"event":"partial"}\n'
+    assert prepared.stderr_path.read_text(encoding="utf-8") == "stderr-bytes"
 
 
 def test_prepare_run_skips_when_last_processed_hash_matches(monkeypatch, tmp_path):
@@ -587,83 +662,187 @@ def test_validate_triage_result_requires_questions_for_clarification(tmp_path):
         )
 
 
-def test_validate_triage_result_rejects_clarification_with_auto_public_flag(tmp_path):
+def test_validate_triage_result_requires_document_sources_for_document_scoped_answer(tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
 
-    with pytest.raises(symbols["TriageResultError"], match="auto_public_reply_allowed=false"):
+    with pytest.raises(symbols["TriageResultError"], match="document_scoped answers must include relevant_paths"):
+        symbols["validate_triage_result"](
+            _valid_payload(relevant_paths=[]),
+            settings,
+        )
+
+
+def test_validate_triage_result_requires_human_review_reason_for_misuse_risk(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    with pytest.raises(symbols["TriageResultError"], match="human_review_reason"):
+        symbols["validate_triage_result"](
+            _valid_payload(
+                misuse_or_safety_risk=True,
+                human_review_reason="",
+            ),
+            settings,
+        )
+
+
+def test_validate_triage_result_allows_general_reasoning_without_document_evidence(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    result = symbols["validate_triage_result"](
+        _valid_payload(
+            ticket_class="bug",
+            answer_scope="general_reasoning",
+            evidence_status="not_applicable",
+            evidence_found=False,
+            relevant_paths=[],
+            public_reply_markdown="Here is the most likely explanation based on the ticket details.",
+            internal_note_markdown="",
+        ),
+        settings,
+    )
+
+    assert result.answer_scope == "general_reasoning"
+    assert result.evidence_status == "not_applicable"
+
+
+def test_validate_triage_result_requires_uncertainty_caveat_for_low_risk_guess(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    with pytest.raises(symbols["TriageResultError"], match="not verified in manuals/ or app/"):
+        symbols["validate_triage_result"](
+            _valid_payload(
+                evidence_found=False,
+                evidence_status="not_found_low_risk_guess",
+                public_reply_markdown="The most likely setup is that the report permission is disabled.",
+            ),
+            settings,
+        )
+
+
+def test_validate_triage_result_allows_low_risk_guess_with_explicit_caveat(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+
+    result = symbols["validate_triage_result"](
+        _valid_payload(
+            evidence_found=False,
+            evidence_status="not_found_low_risk_guess",
+            public_reply_markdown=(
+                "Best-effort answer: I could not verify this in manuals/ or app/, but the most likely issue is "
+                "that the report permission is disabled."
+            ),
+        ),
+        settings,
+    )
+
+    assert result.evidence_status == "not_found_low_risk_guess"
+
+
+def test_resolve_triage_outcome_allows_general_reasoning_bug_auto_confirm(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(clarification_rounds=0)
+
+    outcome = symbols["resolve_triage_outcome"](
+        ticket,
+        symbols["validate_triage_result"](
+            _valid_payload(
+                ticket_class="bug",
+                answer_scope="general_reasoning",
+                evidence_status="not_applicable",
+                evidence_found=False,
+                relevant_paths=[],
+                recommended_next_action="auto_confirm_and_route",
+                public_reply_markdown="The internal team will review the likely bug path and follow up.",
+            ),
+            settings,
+        ),
+        settings,
+    )
+
+    assert outcome.run_status == "succeeded"
+    assert outcome.effective_action == "auto_confirm_and_route"
+    assert outcome.warning_text is None
+
+
+def test_resolve_triage_outcome_marks_clarification_as_succeeded(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(clarification_rounds=0)
+
+    outcome = symbols["resolve_triage_outcome"](
+        ticket,
         symbols["validate_triage_result"](
             _valid_payload(
                 recommended_next_action="ask_clarification",
                 needs_clarification=True,
                 clarifying_questions=["Which report is affected?"],
                 auto_public_reply_allowed=True,
+                public_reply_markdown="",
+                internal_note_markdown="",
             ),
             settings,
-        )
-
-
-def test_validate_triage_result_rejects_route_dev_ti_with_public_reply(tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-
-    with pytest.raises(symbols["TriageResultError"], match="empty public reply"):
-        symbols["validate_triage_result"](
-            _valid_payload(
-                recommended_next_action="route_dev_ti",
-                auto_public_reply_allowed=False,
-            ),
-            settings,
-        )
-
-
-def test_validate_triage_result_rejects_unknown_auto_confirm(tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-
-    with pytest.raises(symbols["TriageResultError"], match="unknown tickets cannot use automatic public actions"):
-        symbols["validate_triage_result"](
-            _valid_payload(
-                ticket_class="unknown",
-                recommended_next_action="auto_confirm_and_route",
-                confidence=0.95,
-            ),
-            settings,
-        )
-
-
-def test_validate_triage_result_rejects_bug_auto_public_action(tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-
-    with pytest.raises(
-        symbols["TriageResultError"],
-        match="automatic public actions are only supported for support and access_config tickets",
-    ):
-        symbols["validate_triage_result"](
-            _valid_payload(
-                ticket_class="bug",
-                recommended_next_action="auto_confirm_and_route",
-                confidence=0.95,
-            ),
-            settings,
-        )
-
-
-def test_validate_triage_result_allows_access_config_auto_confirm(tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-
-    result = symbols["validate_triage_result"](
-        _valid_payload(
-            ticket_class="access_config",
-            recommended_next_action="auto_confirm_and_route",
-            confidence=0.95,
         ),
         settings,
     )
 
-    assert result.recommended_next_action == "auto_confirm_and_route"
+    assert outcome.run_status == "succeeded"
+    assert outcome.effective_action == "ask_clarification"
+    assert outcome.warning_text is None
+
+
+def test_resolve_triage_outcome_routes_misuse_risk_to_human_review(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(clarification_rounds=0)
+
+    outcome = symbols["resolve_triage_outcome"](
+        ticket,
+        symbols["validate_triage_result"](
+            _valid_payload(
+                misuse_or_safety_risk=True,
+                human_review_reason="The request could enable misuse if answered automatically.",
+                recommended_next_action="auto_public_reply",
+            ),
+            settings,
+        ),
+        settings,
+    )
+
+    assert outcome.run_status == "human_review"
+    assert outcome.effective_action == "draft_public_reply"
+    assert "misuse or safety risk" in outcome.warning_text
+    assert "could enable misuse" in outcome.warning_text
+
+
+def test_resolve_triage_outcome_routes_clarification_limit_to_human_review(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(clarification_rounds=2)
+
+    outcome = symbols["resolve_triage_outcome"](
+        ticket,
+        symbols["validate_triage_result"](
+            _valid_payload(
+                recommended_next_action="ask_clarification",
+                needs_clarification=True,
+                clarifying_questions=["Which report is affected?"],
+                auto_public_reply_allowed=True,
+                public_reply_markdown="",
+                internal_note_markdown="",
+            ),
+            settings,
+        ),
+        settings,
+    )
+
+    assert outcome.run_status == "human_review"
+    assert outcome.effective_action == "draft_public_reply"
+    assert "clarification limit reached" in outcome.warning_text
 
 
 def test_validate_triage_result_allows_route_dev_ti_without_public_reply(tmp_path):
@@ -677,11 +856,89 @@ def test_validate_triage_result_allows_route_dev_ti_without_public_reply(tmp_pat
             public_reply_markdown="",
             confidence=0.40,
             evidence_found=False,
+            evidence_status="not_found_low_risk_guess",
+            human_review_reason="A developer should review the likely but unverified process answer.",
         ),
         settings,
     )
 
     assert result.recommended_next_action == "route_dev_ti"
+
+
+def test_resolve_triage_outcome_downgrades_invalid_auto_reply_to_human_review(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(clarification_rounds=0)
+
+    outcome = symbols["resolve_triage_outcome"](
+        ticket,
+        symbols["validate_triage_result"](
+            _valid_payload(
+                recommended_next_action="auto_public_reply",
+                auto_public_reply_allowed=False,
+            ),
+            settings,
+        ),
+        settings,
+    )
+
+    assert outcome.run_status == "human_review"
+    assert outcome.effective_action == "draft_public_reply"
+    assert "downgraded" in outcome.warning_text
+
+
+def test_resolve_triage_outcome_bypasses_human_review_for_internal_requester(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(clarification_rounds=0)
+
+    outcome = symbols["resolve_triage_outcome"](
+        ticket,
+        symbols["validate_triage_result"](
+            _valid_payload(
+                ticket_class="bug",
+                answer_scope="general_reasoning",
+                evidence_status="not_applicable",
+                recommended_next_action="auto_public_reply",
+                auto_public_reply_allowed=False,
+                confidence=0.10,
+                evidence_found=False,
+                relevant_paths=[],
+                internal_note_markdown="",
+            ),
+            settings,
+        ),
+        settings,
+        requester_can_view_internal_messages=True,
+    )
+
+    assert outcome.run_status == "succeeded"
+    assert outcome.effective_action == "auto_public_reply"
+    assert outcome.warning_text is None
+
+
+def test_resolve_triage_outcome_still_human_reviews_safety_risk_for_internal_requester(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(clarification_rounds=0)
+
+    outcome = symbols["resolve_triage_outcome"](
+        ticket,
+        symbols["validate_triage_result"](
+            _valid_payload(
+                misuse_or_safety_risk=True,
+                human_review_reason="The request includes potentially unsafe instructions.",
+                internal_note_markdown="",
+            ),
+            settings,
+        ),
+        settings,
+        requester_can_view_internal_messages=True,
+    )
+
+    assert outcome.run_status == "human_review"
+    assert outcome.effective_action == "draft_public_reply"
+    assert "unsafe instructions" in outcome.warning_text
 
 
 def test_apply_success_result_supersedes_stale_run_without_publication(monkeypatch, tmp_path):
@@ -738,6 +995,209 @@ def test_apply_success_result_supersedes_stale_run_without_publication(monkeypat
     assert run.status == "superseded"
     assert run.ended_at is not None
     assert observed == {"internal": 0, "public": 0, "requeue": 1}
+
+
+def test_apply_success_result_creates_human_review_draft_with_fallback_note(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000006",
+        title="Potentially unsafe request",
+        status="ai_triage",
+        urgent=False,
+        last_processed_hash=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    publication_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash=publication_hash,
+        ended_at=None,
+        error_text=None,
+    )
+    fake_db = _FakeDb(run=run)
+    events: list[str] = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage.apply_ai_classification", lambda *args, **kwargs: events.append("classification"))
+    observed = {}
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_internal_note",
+        lambda *args, **kwargs: (
+            events.append("internal"),
+            observed.setdefault("internal_note", kwargs["body_markdown"]),
+        ),
+    )
+    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: events.append("public"))
+    monkeypatch.setattr(
+        "worker.triage.create_ai_draft",
+        lambda *args, **kwargs: (
+            events.append("draft"),
+            observed.setdefault("draft_body", kwargs["body_markdown"]),
+        ),
+    )
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: events.append("route"))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: events.append("requeue"))
+
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        result=symbols["validate_triage_result"](
+            _valid_payload(
+                misuse_or_safety_risk=True,
+                human_review_reason="The request could enable misuse if answered automatically.",
+                recommended_next_action="route_dev_ti",
+                auto_public_reply_allowed=False,
+                internal_note_markdown="",
+                public_reply_markdown="",
+            ),
+            settings,
+        ),
+    )
+
+    assert events == ["classification", "internal", "draft", "requeue"]
+    assert run.status == "human_review"
+    assert "misuse" in run.error_text
+    assert "The internal team is reviewing this request" in observed["draft_body"]
+    assert "Human review reason" in observed["internal_note"]
+
+
+def test_apply_success_result_publishes_clarification_directly(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000007",
+        title="Need clarification",
+        status="ai_triage",
+        urgent=False,
+        last_processed_hash=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    publication_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash=publication_hash,
+        ended_at=None,
+        error_text=None,
+    )
+    fake_db = _FakeDb(run=run)
+    events: list[str] = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage.apply_ai_classification", lambda *args, **kwargs: events.append("classification"))
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: events.append("internal"))
+    observed = {}
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: (
+            events.append(f"public:{kwargs['last_ai_action']}"),
+            observed.setdefault("body_markdown", kwargs["body_markdown"]),
+        ),
+    )
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: events.append("draft"))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: events.append("route"))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: events.append("requeue"))
+
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        result=symbols["validate_triage_result"](
+            _valid_payload(
+                recommended_next_action="ask_clarification",
+                needs_clarification=True,
+                clarifying_questions=["Which report is affected?"],
+                auto_public_reply_allowed=True,
+                public_reply_markdown="",
+                internal_note_markdown="",
+            ),
+            settings,
+        ),
+    )
+
+    assert events == ["classification", "public:ask_clarification", "requeue"]
+    assert run.status == "succeeded"
+    assert run.error_text is None
+    assert "Which report is affected?" in observed["body_markdown"]
+
+
+def test_apply_success_result_skips_blank_internal_note(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000008",
+        title="Self-contained answer",
+        status="ai_triage",
+        urgent=False,
+        last_processed_hash=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    publication_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash=publication_hash,
+        ended_at=None,
+        error_text=None,
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {"internal": 0, "public": 0}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage.apply_ai_classification", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_internal_note",
+        lambda *args, **kwargs: observed.__setitem__("internal", observed["internal"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: observed.__setitem__("public", observed["public"] + 1),
+    )
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: None)
+
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        result=symbols["validate_triage_result"](
+            _valid_payload(internal_note_markdown=""),
+            settings,
+        ),
+    )
+
+    assert observed == {"internal": 0, "public": 1}
 
 
 def test_process_ai_run_marks_failed_when_publication_step_raises(monkeypatch, tmp_path):
