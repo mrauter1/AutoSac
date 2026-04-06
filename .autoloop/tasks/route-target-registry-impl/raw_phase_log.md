@@ -1209,3 +1209,52 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=verifier | cycle=2 | attempt=1 | thread_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_verifier.md
+session_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+---
+Re-reviewing the two previously blocked areas now. I’m validating the updated worker logic and new regression coverage first, then I’ll mark the phase artifacts to match the result.
+
+The code paths now line up with the reviewer’s requested fixes. I’m rerunning the targeted regression suite one more time from verifier mode, then I’ll close out the phase artifacts if it stays green.
+
+The suite stayed green and I don’t see a remaining blocker in the reviewed scope. I’m flipping the verifier criteria to complete and appending a re-review note so the feedback log reflects that `IMP-001` and `IMP-002` are now resolved.
+
+Scope considered
+
+- Active phase `runtime-routing-ops-cutover`, focused on the two prior blockers in [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/runtime-routing-ops-cutover/feedback.md): publication downgrade side effects and rerun/failure manifest metadata.
+
+What I analyzed
+
+- Updated publication handling in [worker/triage.py](/home/marcelo/code/AutoSac/worker/triage.py#L178).
+- Updated manifest route-target sourcing in [worker/step_runner.py](/home/marcelo/code/AutoSac/worker/step_runner.py#L381).
+- New regression coverage in [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py#L914) and [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py#L1310).
+- Targeted suite rerun: `.venv/bin/pytest -q tests/test_ai_worker.py tests/test_routing_registry.py tests/test_ops_workflow.py tests/test_foundation_persistence.py` with `108 passed in 2.16s`.
+
+What I reviewed
+
+- `manual_only` now suppresses draft/public side effects while preserving structured final output.
+- Run manifests now prefer the active run’s router output over stale `ticket.route_target_id`.
+- Verifier artifacts updated: [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/runtime-routing-ops-cutover/criteria.md) is fully checked, and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/runtime-routing-ops-cutover/feedback.md) now includes a re-review note that `IMP-001` and `IMP-002` are resolved.
+
+Key findings / decisions
+
+- No remaining blocking findings in the reviewed scope.
+- The implementation now matches the phase contract and the previously recorded decisions for deterministic publication behavior and bounded manifest/ops continuity.
+
+Open issues / next step
+
+- No open reviewer issues for this phase slice.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
