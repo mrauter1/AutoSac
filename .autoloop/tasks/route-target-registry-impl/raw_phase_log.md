@@ -1434,3 +1434,57 @@ Open issues / next step
 
 - No code issues remain in this phase’s scope.
 - If another environment still has a pre-refresh workspace, rerun bootstrap before expecting readiness to pass.
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=verifier | cycle=1 | attempt=1 | thread_id=019d641e-60af-7c23-8f20-e00eeba4bde4
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_verifier.md
+session_id=019d641e-60af-7c23-8f20-e00eeba4bde4
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d641e-60af-7c23-8f20-e00eeba4bde4
+---
+I’m reviewing the cleanup-verification implementation against the phase contract and acceptance criteria. First I’m reading the active artifacts, the shared decisions, and the code diff around the legacy `ticket_class` removal to check for correctness, regressions, and any drift from the approved shape.
+
+The artifact review is consistent with the phase plan, so I’m doing one more pass over the live code paths rather than the notes. I want to confirm the migration, legacy presenter, and contract changes line up with the remaining runtime reads and don’t leave a hidden dependency on the dropped column.
+
+The live code looks aligned with the phase contract so far. I’m doing a final regression-focused scan for direct `ticket_class` usage and re-running the key tests/checks myself before I mark the criteria, because the bar for `COMPLETE` here is “no blocking findings,” not just “the producer said it passed.”
+
+The direct scan only found `ticket_class` where it should still exist now: the cleanup migration downgrade SQL. The smoke checks are green; I’m waiting on the test run to close and then I’ll write the verifier artifacts unless a late failure appears.
+
+I have enough evidence to close the review: targeted tests and both smoke checks passed, and I didn’t find a contract drift or regression path in the live code. I’m updating the verifier-owned artifacts now with a clean review result and then I’ll return the canonical loop-control promise.
+
+Scope considered
+
+- Cleanup-verification phase only, focused on the request-relevant `ticket_class` removal path, cleanup migration, legacy presentation boundary, updated tests, and verifier-owned artifacts.
+
+What I analyzed
+
+- The active phase artifacts, shared decisions ledger, and the touched code paths in `shared/`, `worker/`, `app/`, and `tests/`.
+- Remaining `ticket_class` references to confirm they are limited to historical migration/backfill/presentation support rather than live runtime execution.
+
+What I reviewed
+
+- Verified the head `Ticket` model and runtime write path no longer depend on `ticket_class`.
+- Verified the cleanup migration drops the legacy constraint/column and keeps downgrade behavior bounded to legacy-overlap IDs.
+- Re-ran `.venv/bin/pytest -q tests/test_foundation_persistence.py tests/test_ai_worker.py tests/test_ops_workflow.py tests/test_routing_registry.py` and got `110 passed`.
+- Re-ran `python scripts/run_web.py --check` and `python scripts/run_worker.py --check`; both returned `ok`.
+- Updated `criteria.md` to all checked and appended `IMP-000` to `feedback.md`.
+
+Key findings / decisions
+
+- No blocking findings.
+- No non-blocking defects were found in phase scope.
+- The remaining `ticket_class` mentions are confined to historical migrations/backfill/presentation support and the cleanup-migration downgrade path, which matches the approved plan and decisions.
+
+Open issues / next step
+
+- No open reviewer issues. This phase is ready to close.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
