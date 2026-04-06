@@ -453,6 +453,64 @@ def _load_web_stack():
     }
 
 
+def test_present_ticket_route_target_falls_back_to_legacy_ticket_class():
+    pytest.importorskip("fastapi")
+    from app.ai_run_presenters import present_ticket_route_target
+
+    presentation = present_ticket_route_target(
+        SimpleNamespace(
+            route_target_id=None,
+            ticket_class="support",
+        )
+    )
+
+    assert presentation == {
+        "id": "support",
+        "label": "Support",
+        "kind": "direct_ai",
+        "known": True,
+    }
+
+
+def test_present_ai_run_output_exposes_legacy_triage_fields():
+    pytest.importorskip("fastapi")
+    from app.ai_run_presenters import present_ai_run_output
+
+    presentation = present_ai_run_output(
+        SimpleNamespace(
+            final_output_contract="triage_result",
+            final_output_json={
+                "ticket_class": "support",
+                "confidence": 0.95,
+                "impact_level": "medium",
+                "requester_language": "en",
+                "summary_short": "Accepted analysis",
+                "summary_internal": "Internal accepted analysis",
+                "development_needed": False,
+                "needs_clarification": False,
+                "clarifying_questions": [],
+                "incorrect_or_conflicting_details": [],
+                "evidence_found": True,
+                "relevant_paths": [{"path": "manuals/access.md", "reason": "Relevant doc"}],
+                "answer_scope": "document_scoped",
+                "evidence_status": "verified",
+                "misuse_or_safety_risk": False,
+                "human_review_reason": "",
+                "recommended_next_action": "auto_public_reply",
+                "auto_public_reply_allowed": True,
+                "public_reply_markdown": "Reply",
+                "internal_note_markdown": "Note",
+            },
+        )
+    )
+
+    assert presentation["contract_id"] == "triage_result"
+    assert presentation["summary_short"] == "Accepted analysis"
+    assert presentation["legacy_confidence"] == 0.95
+    assert presentation["legacy_impact_level"] == "medium"
+    assert presentation["legacy_development_needed"] is False
+
+
 class _RouteDb:
     def __init__(self):
         self.commit_calls = 0
@@ -1057,6 +1115,9 @@ def test_ticket_detail_context_uses_latest_accepted_analysis_run(tmp_path, monke
         final_output_json={
             "summary_short": "Accepted analysis",
             "summary_internal": "Accepted internal summary",
+            "confidence": 0.92,
+            "impact_level": "low",
+            "development_needed": False,
             "relevant_paths": [{"path": "manuals/", "reason": "Checked first."}],
         },
     )
@@ -1084,6 +1145,9 @@ def test_ticket_detail_context_uses_latest_accepted_analysis_run(tmp_path, monke
     assert context["ai_relevant_paths"] == [{"path": "manuals/", "reason": "Checked first."}]
     assert context["route_target_display"]["label"] == "Unclassified"
     assert context["analysis_view"]["contract_id"] == "triage_result"
+    assert context["analysis_view"]["legacy_confidence"] == 0.92
+    assert context["analysis_view"]["legacy_impact_level"] == "low"
+    assert context["analysis_view"]["legacy_development_needed"] is False
     assert context["public_reply_status_options"][0] == "ai_triage"
     assert context["default_public_reply_status"] == "ai_triage"
 

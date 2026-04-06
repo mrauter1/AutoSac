@@ -251,6 +251,36 @@ def test_validate_contract_output_rejects_handoff_assistant_mismatch() -> None:
         )
 
 
+def test_validate_contract_output_accepts_legacy_triage_result_without_hardcoded_ticket_taxonomy() -> None:
+    result = validate_contract_output(
+        "triage_result",
+        {
+            "ticket_class": "manual_review",
+            "confidence": 0.9,
+            "impact_level": "medium",
+            "requester_language": "en",
+            "summary_short": "Accepted analysis",
+            "summary_internal": "Internal accepted analysis",
+            "development_needed": False,
+            "needs_clarification": False,
+            "clarifying_questions": [],
+            "incorrect_or_conflicting_details": [],
+            "evidence_found": True,
+            "relevant_paths": [{"path": "manuals/access.md", "reason": "Relevant doc"}],
+            "answer_scope": "document_scoped",
+            "evidence_status": "verified",
+            "misuse_or_safety_risk": False,
+            "human_review_reason": "",
+            "recommended_next_action": "auto_public_reply",
+            "auto_public_reply_allowed": True,
+            "public_reply_markdown": "Reply",
+            "internal_note_markdown": "Note",
+        },
+    )
+
+    assert result.ticket_class == "manual_review"
+
+
 def test_render_router_prompt_includes_generated_route_target_catalog() -> None:
     prompt = render_agent_prompt(load_agent_spec("router"), context=_make_context())
 
