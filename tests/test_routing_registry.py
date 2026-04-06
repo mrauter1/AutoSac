@@ -263,6 +263,7 @@ def test_render_specialist_prompt_includes_route_target_context() -> None:
     assert "Route target label: Support" in prompt
     assert "Route target kind: direct_ai" in prompt
     assert "Route target description:" in prompt
+    assert "If the provided schema includes `ticket_class`, set it exactly to the selected route target ID." in prompt
 
 
 def test_render_agent_prompt_raises_for_unknown_placeholder() -> None:

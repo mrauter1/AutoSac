@@ -345,3 +345,55 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=producer | cycle=2 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_producer.md
+session_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+I’m fixing the reviewer’s blocking issue by restoring an explicit compatibility-phase instruction for the still-live `triage_result` specialist path. I’ll keep it centralized so the specialist prompts stay aligned without broadening the phase into the later contract/runtime cutover.
+
+The compatibility instruction is back and centralized in the prompt renderer. I’m rerunning the same validation slice now to confirm the fix didn’t disturb the registry/bootstrap coverage.
+
+The rerun is clean so far. I’m waiting for the final test exit, then I’ll refresh the phase notes to record the compatibility-phase prompt rule and the repeated validation results.
+
+I’ve finished the fix and the rerun. I’m making a small note update now so the next turn has the compatibility-phase rationale and the post-fix validation captured in the phase artifact.
+
+Scope considered
+
+- The active phase-local scope only: registry foundation, selector spec support, registry validation, prompt scaffolding, and taxonomy-agnostic bootstrap/readiness checks.
+- The reviewer’s blocking finding in [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/feedback.md), plus adjacent compatibility surfaces in the still-live `triage_result` specialist path.
+
+What I analyzed
+
+- The live specialist manifest/prompt alignment under [agent_specs/support/manifest.json](/home/marcelo/code/AutoSac/agent_specs/support/manifest.json) and [agent_specs/support/prompt.md](/home/marcelo/code/AutoSac/agent_specs/support/prompt.md), plus the shared prompt-rendering path in [worker/prompt_renderer.py](/home/marcelo/code/AutoSac/worker/prompt_renderer.py).
+- The phase notes in [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/implementation_notes.md) to keep the compatibility-phase assumption explicit.
+
+What I changed
+
+- Added one centralized compatibility-phase specialist instruction in [worker/prompt_renderer.py](/home/marcelo/code/AutoSac/worker/prompt_renderer.py): when the still-live schema includes `ticket_class`, it must match the selected route target.
+- Wired that shared instruction into all live specialist prompts under [agent_specs/support/prompt.md](/home/marcelo/code/AutoSac/agent_specs/support/prompt.md), [agent_specs/bug/prompt.md](/home/marcelo/code/AutoSac/agent_specs/bug/prompt.md), [agent_specs/feature/prompt.md](/home/marcelo/code/AutoSac/agent_specs/feature/prompt.md), [agent_specs/access-config/prompt.md](/home/marcelo/code/AutoSac/agent_specs/access-config/prompt.md), [agent_specs/data-ops/prompt.md](/home/marcelo/code/AutoSac/agent_specs/data-ops/prompt.md), and [agent_specs/unknown/prompt.md](/home/marcelo/code/AutoSac/agent_specs/unknown/prompt.md).
+- Updated the prompt expectations in [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py) and [tests/test_routing_registry.py](/home/marcelo/code/AutoSac/tests/test_routing_registry.py), and refreshed [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/implementation_notes.md).
+
+Key findings / decisions
+
+- The reviewer’s blocking finding was addressed without broadening scope into the later specialist-runtime contract cutover.
+- The compatibility rule is centralized in one renderer value instead of duplicating slightly different wording across specialist prompts.
+- Validation rerun passed: `.venv/bin/pytest -q tests/test_routing_registry.py tests/test_ai_worker.py tests/test_hardening_validation.py tests/test_foundation_persistence.py` with `81 passed`.
+
+Open issues / next step
+
+- No new phase-local blockers remain from the reviewer feedback.
+- The next phase can proceed with the additive migration/runtime cutover work on top of this registry-contract foundation.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>

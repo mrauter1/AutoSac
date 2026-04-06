@@ -55,6 +55,7 @@
 - Router prompt rendering and router output validation are registry-driven.
 - Selector manifests, selector prompt rendering, and registry-backed selector contract validation are available for later runtime phases.
 - Specialist prompts now receive route-target context placeholders instead of legacy class placeholders.
+- The compatibility-phase specialist prompts now include one centralized instruction from `worker.prompt_renderer` that aligns any still-required legacy `ticket_class` field to the selected route target while the live specialist path remains on `triage_result`.
 
 ## Known non-changes
 
@@ -77,3 +78,4 @@
 
 - Route-target taxonomy, specialist registrations, and publish-policy metadata now live in `agent_specs/registry.json`.
 - Generated router and selector catalogs come from `shared.routing_registry` through `worker.prompt_renderer` instead of duplicating taxonomy text in prompts or Python literals.
+- The compatibility-phase legacy `ticket_class` alignment sentence is centralized in `worker.prompt_renderer` and reused across all live specialist prompts.

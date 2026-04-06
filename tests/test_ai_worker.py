@@ -363,6 +363,7 @@ def test_render_agent_prompt_includes_public_internal_and_router_context():
     assert "Public messages:" in prompt
     assert "Internal messages:" in prompt
     assert "Route target ID: support" in prompt
+    assert "If the provided schema includes `ticket_class`, set it exactly to the selected route target ID." in prompt
     assert "Requester sees an error" in prompt
     assert "Dev/TI suspects role drift" in prompt
     assert "dev_ti" in prompt
