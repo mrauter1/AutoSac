@@ -1,4 +1,132 @@
 version: 1
 task_id: route-target-registry-impl
 request_snapshot_ref: /home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/runs/run-20260406T173439Z-51f2b380/request.md
-phases: []
+phases:
+  - phase_id: registry-contract-foundation
+    title: Registry and Contract Foundation
+    objective: Introduce the registry, selector spec support, registry validation, prompt-rendering scaffolding, and taxonomy-agnostic workspace/bootstrap checks without changing runtime persistence behavior yet.
+    status: planned
+    in_scope:
+      - Add agent_specs/registry.json with the baseline route-target and specialist registrations.
+      - Add agent_specs/specialist-selector and allow selector spec manifests to load.
+      - Implement shared/routing_registry.py typed loading and validation.
+      - Replace runtime output-contract definitions and prompt placeholders for router, selector, and specialist execution.
+      - Update workspace bootstrap and readiness checks to validate registry integrity.
+    out_of_scope:
+      - Runtime selector execution and publication policy application.
+      - Database route_target_id migration and ops read-path cutover.
+      - Legacy ticket_class cleanup migration.
+    dependencies: []
+    acceptance_criteria:
+      - id: AC-1
+        text: Registry loading fails fast on malformed topology, invalid selection modes, bad publish policy, missing specs, and disabled-target misuse.
+      - id: AC-2
+        text: Router, selector, and specialist prompts render from registry-driven catalogs/placeholders with no hardcoded business taxonomy or legacy class placeholders.
+      - id: AC-3
+        text: Workspace bootstrap and smoke/readiness checks validate selector/registry integrity and remain taxonomy-agnostic.
+    deliverables:
+      - shared/routing_registry.py and registry validation tests
+      - agent_specs/registry.json and agent_specs/specialist-selector/*
+      - Updated worker/output_contracts.py, prompt templates, prompt renderer, workspace contract/bootstrap, and startup checks
+    risks:
+      - Current underscore ticket taxonomy and hyphenated spec IDs can drift if the registry introduces an unnecessary alias layer.
+      - Bootstrap/check changes can make /readyz fail until registry validation is wired correctly.
+    rollback:
+      - Revert registry/selector/bootstrap changes before runtime cutover if startup validation blocks the existing worker path.
+      - Keep the old prompt templates and contract wiring intact until the new registry scaffolding validates cleanly.
+  - phase_id: additive-migration-foundation
+    title: Additive Migration and Compatibility Foundation
+    objective: Add route_target_id and selector persistence safely, backfill from ticket_class, and establish the temporary dual-write path before any runtime read/write cutover.
+    status: planned
+    in_scope:
+      - Add the additive Alembic migration for tickets.route_target_id and ai_run_steps selector step kind.
+      - Backfill route_target_id from ticket_class and introduce temporary dual-write.
+      - Update shared/models.py and shared/ticketing.py so runtime code can write route_target_id safely during the compatibility phase.
+      - Add migration/persistence coverage for route_target_id backfill and selector step persistence.
+    out_of_scope:
+      - Runtime selector execution and publication policy refactor.
+      - Ops/UI read-path cutover.
+      - Final ticket_class cleanup migration.
+    dependencies:
+      - registry-contract-foundation
+    acceptance_criteria:
+      - id: AC-1
+        text: route_target_id exists, is backfilled from ticket_class, and is written alongside the legacy column during the compatibility phase.
+      - id: AC-2
+        text: selector is accepted as a persisted ai_run_steps step_kind and route-target storage has no DB taxonomy constraint.
+      - id: AC-3
+        text: Migration and persistence tests cover backfill, dual-write, and selector step persistence before runtime cutover work begins.
+    deliverables:
+      - Additive/backfill migration(s) and model updates for route_target_id plus selector step kind
+      - Compatibility-safe ticketing write helper updates
+      - Migration and persistence regression tests for dual-write and selector persistence
+    risks:
+      - Backfill and dual-write can drift if route_target_id values are introduced without preserving the existing ticket_class semantics.
+      - Migration order can block runtime cutover if selector persistence and route_target_id writes are not proven first.
+    rollback:
+      - Roll back to the previous code path while leaving additive schema changes in place if migration validation fails.
+      - Keep ticket_class as the active read path until route_target_id backfill and dual-write are stable.
+  - phase_id: runtime-routing-ops-cutover
+    title: Runtime Routing, Policy, and Ops Cutover
+    objective: Refactor the worker into registry-driven router/selector/specialist execution, synthesize human handoffs, enforce deterministic publication behavior, and switch ops/UI reads to route_target presentation with bounded historical adapters.
+    status: planned
+    in_scope:
+      - Refactor worker/pipeline.py into router, optional selector, and optional specialist execution driven by the registry.
+      - Add worker/publication_policy.py and remove mismatch and internal-requester shortcut behavior.
+      - Refactor worker/triage.py, worker/step_runner.py, worker/artifacts.py, and shared/ticketing.py for route-target outcomes and manifest metadata.
+      - Ensure human_assist plus specialist_selection.mode=none synthesizes human_handoff_result with terminal structured output.
+      - Switch ops filters, labels, templates, and ticket detail presentation to route_target_id and registry metadata.
+      - Add an ops-only adapter for legacy triage_result versus new contracts and unknown-ID fallback display.
+    out_of_scope:
+      - Final ticket_class column/constraint removal.
+      - Generic runtime fallback for legacy worker payloads.
+    dependencies:
+      - additive-migration-foundation
+    acceptance_criteria:
+      - id: AC-1
+        text: Direct-AI targets support fixed and auto specialist selection, while human-assist targets support none, fixed, and auto without any auto-publish path.
+      - id: AC-2
+        text: Accepted succeeded and human_review runs always persist final_output_contract and final_output_json, including synthesized human_handoff_result.
+      - id: AC-3
+        text: Ops filter options come from ops_visible registry targets, route_target_id is the active read path, and historical tickets/runs remain viewable through a bounded presentation adapter without new worker fallback paths.
+    deliverables:
+      - Refactored worker pipeline/triage flow with selector execution, publication policy, and manifest updates
+      - Ops route/template changes and ai_run presentation adapter
+      - Runtime and ops regression tests covering fixed/auto/none paths, publication downgrades, and historical continuity
+    risks:
+      - Publication-policy regressions could widen auto-publish behavior if downgrade rules are incomplete.
+      - Human handoff synthesis can violate the accepted-run invariant if terminal payload persistence is missed on non-specialist routes.
+      - Ops detail can regress if templates continue reading raw legacy fields directly.
+    rollback:
+      - Revert runtime/UI cutover changes while leaving additive schema changes in place if route-target execution or presentation fails.
+      - Keep ticket_class populated during the compatibility window until route_target_id reads and ops rendering are proven stable.
+  - phase_id: cleanup-verification
+    title: Cleanup and Verification
+    objective: Remove legacy taxonomy writes and obsolete code paths, drop the old ticket_class schema only after cutover is proven, and leave the repository green with registry-driven readiness and regression coverage.
+    status: planned
+    in_scope:
+      - Stop writing ticket_class and remove hardcoded specialist routing helpers, mismatch logic, and legacy class placeholders.
+      - Ship the cleanup migration that drops the ticket_class constraint and column.
+      - Update the full regression suite and smoke/readiness checks to the new route-target invariants.
+    out_of_scope:
+      - Any new runtime compatibility path for old worker behavior.
+      - Any generic plugin or UI-authored routing system not called for by the spec.
+    dependencies:
+      - runtime-routing-ops-cutover
+    acceptance_criteria:
+      - id: AC-1
+        text: ticket_class is absent from the new runtime execution path, and no business taxonomy remains hardcoded in DB constraints, prompt text, output-contract literals, or ops filter tuples.
+      - id: AC-2
+        text: Cleanup migration drops the legacy ticket_class constraint/column only after route_target_id reads and tests are green.
+      - id: AC-3
+        text: scripts/run_web.py --check and scripts/run_worker.py --check validate registry integrity, and the updated regression suite passes on the route-target implementation.
+    deliverables:
+      - Legacy code-path removal and cleanup migration
+      - Updated regression/readiness/smoke coverage
+      - Final repository state aligned with the PRD/ARD acceptance criteria
+    risks:
+      - Dropping ticket_class too early would strand fallback reads or unresolved tests.
+      - Smoke checks can still pass while ops detail regresses unless historical presentation coverage is updated.
+    rollback:
+      - Treat post-cleanup failures as forward-fix work; do not reintroduce runtime legacy fallbacks.
+      - Delay the cleanup migration until all cutover tests and readiness checks are green.
