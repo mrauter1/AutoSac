@@ -446,3 +446,129 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=test | phase=producer | cycle=1 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/test_producer.md
+session_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=test | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+I’m reviewing the current registry-foundation coverage and the active test-phase artifacts first. Then I’ll fill any meaningful gaps and update the phase-local test strategy and feedback files.
+
+The existing suite already covers a lot of the foundation surface, but I’m checking for untested registry-validation branches against the phase acceptance criteria before I add anything. The likely gaps are the “bad publish policy” path and selector-spec validation when auto selection is configured.
+
+The registry loader has several failure branches that are still uncovered by the current tests. I’m checking the workspace/agent-spec side too, because this phase explicitly adds selector-spec support and bootstrap validation.
+
+AC-1 still lacks explicit test coverage for invalid publish policy, and the selector-spec path isn’t directly pinned yet. I’m adding targeted deterministic tests for those branches rather than broad churn.
+
+Plan for this test turn:
+- Add targeted registry tests for currently uncovered AC-1 branches: selector-spec requirement when `mode=auto`, and invalid publish-policy validation.
+- Keep the change surface narrow by extending [tests/test_routing_registry.py](/home/marcelo/code/AutoSac/tests/test_routing_registry.py) instead of creating new fixtures.
+- Update the phase-local [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/test_strategy.md) with a behavior-to-test map and append a concise summary to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/feedback.md).
+- Rerun the focused registry/foundation test slice to confirm the additions stay deterministic.
+
+I’ve narrowed the additions to a small registry-focused patch. The new tests will cover selector-spec enforcement and publish-policy rejection paths that the current suite didn’t pin yet.
+
+The new tests are in place, along with the phase-local strategy and feedback updates. I’m running the focused foundation slice now to verify the added registry branches behave as expected.
+
+The focused test slice is still running. I’m waiting for the final result before I close out the test-author summary.
+
+The verifier slice passed with the new cases included. I’m doing a quick read-back of the touched sections so the final handoff reflects the exact coverage that landed.
+
+Scope considered
+
+- Phase-local test work for `registry-contract-foundation` only: registry validation, selector-spec support, prompt scaffolding, and workspace/readiness checks.
+- I stayed within the active phase scope and avoided runtime selector orchestration, publication-policy execution, and `route_target_id` persistence coverage because those remain out of phase.
+
+What I analyzed
+
+- Existing coverage in [tests/test_routing_registry.py](/home/marcelo/code/AutoSac/tests/test_routing_registry.py), [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py), [tests/test_hardening_validation.py](/home/marcelo/code/AutoSac/tests/test_hardening_validation.py), and [tests/test_foundation_persistence.py](/home/marcelo/code/AutoSac/tests/test_foundation_persistence.py).
+- The registry-validation branches in [shared/routing_registry.py](/home/marcelo/code/AutoSac/shared/routing_registry.py) against AC-1, plus the active phase artifacts [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/test_strategy.md) and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/feedback.md).
+
+What I changed
+
+- Added targeted registry tests in [tests/test_routing_registry.py](/home/marcelo/code/AutoSac/tests/test_routing_registry.py) for:
+  - missing `selector_spec_id` when any route target uses `specialist_selection.mode=auto`
+  - invalid publish-policy confidence values
+  - forbidden `allow_auto_publish=true` on a human-assist route target
+- Filled in the explicit behavior-to-test coverage map in [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/test_strategy.md).
+- Appended a concise test-additions summary to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/feedback.md).
+
+Key findings / decisions
+
+- The main uncovered AC-1 gaps were publish-policy rejection paths and selector-spec enforcement for auto-selection registries; both are now pinned with deterministic temp-file registry mutations.
+- I kept the additions in the existing registry test module to avoid fixture sprawl and duplicated setup.
+- Validation passed: `.venv/bin/pytest -q tests/test_routing_registry.py tests/test_ai_worker.py tests/test_hardening_validation.py tests/test_foundation_persistence.py` with `84 passed in 4.97s`.
+
+Open issues / next step
+
+- No phase-local test blockers remain from this test-author pass.
+- The next step is auditor review of the updated test coverage and phase artifacts.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=test | phase=verifier | cycle=1 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/test_verifier.md
+session_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=test | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+I’m auditing the new phase-local test coverage against the registry-foundation scope first, then I’ll update the test audit artifacts only if the coverage and flake profile hold up.
+
+I’ve confirmed the added branches, but I’m checking whether the suite also protects against the phase’s explicit “no legacy class placeholders in prompts” direction. That’s the main adjacent regression surface that can still slip through with passing happy-path prompt tests.
+
+The current prompt tests prove the new placeholders render, but they do not pin the corresponding “legacy placeholders and hardcoded taxonomy stay out” requirement yet. I’m checking the wider test tree once to confirm that omission isn’t already covered elsewhere before I record it as a coverage gap.
+
+The focused suite is passing so far. I’m waiting for the final result, then I’ll update the audit artifacts based on the remaining coverage gap rather than on execution health.
+
+I’m recording one blocking coverage gap: the prompt tests prove the new registry-driven fields render, but they still do not pin the negative side of AC-2. That leaves room for a silent regression where legacy class placeholders or hardcoded taxonomy text are reintroduced without breaking the suite.
+
+The audit artifacts are updated. I’m reading them back once to make sure the incomplete state and the blocking finding line up cleanly before I close the verifier turn.
+
+Scope considered
+
+- Phase-local audit of the registry-contract-foundation test additions and the active test artifacts.
+- I limited writes to the audit artifacts under [registry-contract-foundation](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation).
+
+What I analyzed
+
+- The updated test coverage in [tests/test_routing_registry.py](/home/marcelo/code/AutoSac/tests/test_routing_registry.py), plus adjacent prompt and workspace behavior already covered by [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py), [tests/test_hardening_validation.py](/home/marcelo/code/AutoSac/tests/test_hardening_validation.py), and [tests/test_foundation_persistence.py](/home/marcelo/code/AutoSac/tests/test_foundation_persistence.py).
+- The phase-local artifacts [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/test_strategy.md), [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/feedback.md), and [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/criteria.md).
+
+What I reviewed
+
+- Whether the added tests close the meaningful AC-1 validation gaps without introducing flake risk.
+- Whether the full phase acceptance surface is protected, especially AC-2’s requirement that rendered prompts not retain legacy class placeholders or hardcoded business taxonomy text.
+- The focused execution health of the relevant suite slice.
+
+Key findings / decisions
+
+- The new AC-1 registry tests are valid and deterministic, and the focused suite passed: `.venv/bin/pytest -q tests/test_routing_registry.py tests/test_ai_worker.py tests/test_hardening_validation.py tests/test_foundation_persistence.py` with `84 passed in 4.51s`.
+- I marked [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/criteria.md) as reliable and behaviorally aligned, but left coverage/regression/edge-case criteria incomplete.
+- I appended one blocking finding to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/feedback.md):
+- `TST-001`: the prompt tests assert presence of new registry-driven content but do not assert absence of legacy prompt placeholders or hardcoded ticket-class routing text, leaving a material silent-regression path against AC-2.
+
+Open issues / next step
+
+- The producer should extend the existing router, selector, and specialist prompt tests with negative assertions that legacy class placeholders and ticket-class routing text are absent from rendered prompts.
+- Test audit remains incomplete until that AC-2 regression guard is added.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
