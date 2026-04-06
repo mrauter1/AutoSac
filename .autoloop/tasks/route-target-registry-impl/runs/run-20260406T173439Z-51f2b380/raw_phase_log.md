@@ -682,3 +682,125 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=producer | cycle=1 | attempt=1 | thread_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+---
+provider=codex
+mode=start
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_producer.md
+session_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+---
+I’m treating the PRD/ARD and active phase artifacts as the contract for this turn. First I’m reading the spec, phase notes, and the relevant persistence/migration code so I can map the required additive changes without pulling unrelated files into scope.
+
+The repo already has substantial in-flight changes from earlier work, including the foundation phase. I’m narrowing to the migration, model, ticket-write, and persistence-test surfaces now so the additive phase lands on top without disturbing unrelated edits.
+
+The foundation code already introduced registry-backed contracts, but the data model is still on the legacy write path. I’m checking the existing migration history and test fixtures next so the additive migration matches current naming and test patterns instead of inventing a parallel path.
+
+I’ve confirmed the runtime still writes only `ticket_class` and that the current pipeline remains intentionally legacy for specialist execution. Now I’m extracting the exact migration/compatibility requirements from the spec and comparing them against the existing model/test surfaces before I edit anything.
+
+The migration shape is clear now: additive `tickets.route_target_id`, backfill from `ticket_class`, and widen `ai_run_steps.step_kind` to admit `selector` without adding any new taxonomy constraint. I’m checking the naming conventions and the current test harness one more time, then I’ll patch the schema/model/helper/test files together.
+
+I have enough context to patch now. The main design choice is to centralize the compatibility rule in one ticket write helper: it will dual-write `route_target_id` plus the legacy `ticket_class` shadow when there is a 1:1 mapping, and reject non-legacy targets during this window instead of letting runtime code drift around the DB constraint.
+
+I’m editing the schema, ticketing helper, and worker call-site together so the new column and dual-write rule stay centralized instead of being duplicated across runtime code. After that I’ll add focused persistence tests and only touch the phase artifact files needed to record the decision and validation.
+
+The core code path is updated. I’m adding regression checks now for the exact acceptance points: migration source, selector step-kind widening, helper dual-write behavior, and rejection of non-legacy targets during the compatibility window.
+
+I’ve patched the main files, but the worktree already had earlier foundation-phase edits in some of these modules. I’m reading the touched sections directly now to make sure my additive changes landed cleanly on top of that existing state before I run validation.
+
+The patch landed cleanly. I’m running targeted validation next against the touched persistence and worker tests so I can catch any compatibility regressions before I update the phase notes.
+
+The targeted suite has finished its assertions; I’m polling once for the final exit so I can record the validation result precisely in the implementation notes and decisions.
+
+I’ve validated the code path. I’m updating the phase artifacts now with the concrete files touched, the centralized compatibility decision, and the exact verification I ran so the next loop doesn’t have to reconstruct the rationale from the diff.
+
+Scope considered
+
+- Phase-local additive migration foundation only: schema/model dual-write support, compatibility-safe ticket persistence, selector step-kind persistence, and regression coverage.
+- I kept ops/runtime reads on the legacy `ticket_class` path and did not pull unrelated dirty files into scope.
+
+What I analyzed
+
+- The authoritative spec and phase artifacts, plus current persistence/runtime surfaces in [shared/models.py](/home/marcelo/code/AutoSac/shared/models.py), [shared/ticketing.py](/home/marcelo/code/AutoSac/shared/ticketing.py), [worker/triage.py](/home/marcelo/code/AutoSac/worker/triage.py), [shared/migrations/versions/20260406_0004_agent_pipeline.py](/home/marcelo/code/AutoSac/shared/migrations/versions/20260406_0004_agent_pipeline.py), and the existing registry/tests.
+
+What I changed
+
+- Added additive migration [20260406_0005_route_target_compatibility.py](/home/marcelo/code/AutoSac/shared/migrations/versions/20260406_0005_route_target_compatibility.py) to add `tickets.route_target_id`, backfill it from `ticket_class`, and widen `ai_run_steps.step_kind` to `('router', 'selector', 'specialist')`.
+- Updated [shared/models.py](/home/marcelo/code/AutoSac/shared/models.py) to expose `Ticket.route_target_id` and the selector step kind.
+- Replaced the legacy classification helper with `apply_ai_route_target()` in [shared/ticketing.py](/home/marcelo/code/AutoSac/shared/ticketing.py), centralizing compatibility dual-write and rejecting non-legacy targets during this window.
+- Updated [worker/triage.py](/home/marcelo/code/AutoSac/worker/triage.py) to use that helper while preserving legacy ops-only fields until the later read-path cutover.
+- Added regression coverage in [tests/test_foundation_persistence.py](/home/marcelo/code/AutoSac/tests/test_foundation_persistence.py) and adjusted worker tests in [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py).
+- Recorded the phase decisions and notes in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt) and [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/implementation_notes.md).
+
+Key findings / decisions
+
+- The safest compatibility boundary is one helper that dual-writes `route_target_id` plus the 1:1 legacy `ticket_class` shadow; this prevents accidental persistence of `manual_review` before cutover.
+- I kept `ai_confidence`, `impact_level`, and `development_needed` writes in the worker only because current ops detail rendering still reads them; the helper itself no longer owns those stale classification fields.
+- Validation passed:
+  - `python -m py_compile shared/models.py shared/ticketing.py worker/triage.py shared/migrations/versions/20260406_0005_route_target_compatibility.py tests/test_foundation_persistence.py tests/test_ai_worker.py`
+  - `.venv/bin/pytest -q tests/test_foundation_persistence.py tests/test_ai_worker.py tests/test_routing_registry.py`
+  - Result: `75 passed`
+
+Open issues / next step
+
+- No blocker in this phase-local scope.
+- Next phase should cut runtime/UI reads over to `route_target_id`, then remove compatibility-only `ticket_class` writes and the legacy column/constraint in cleanup.
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=verifier | cycle=1 | attempt=1 | thread_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_verifier.md
+session_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+---
+I’m reviewing the additive migration phase against the spec, the shared decisions, and the actual diff. First I’m reading the phase artifacts and the touched code paths so I can check intent fidelity and regression risk before I write findings.
+
+The direct `git diff` came back empty because these files are already part of the current dirty baseline. I’m checking the working tree status and reading the current file contents directly instead of assuming diff-to-HEAD reflects just this phase.
+
+I’m past the first-pass audit. The remaining question is whether the phase’s “selector step persistence” and “dual-write compatibility” requirements were actually exercised, or only asserted indirectly from source text. I’m checking for real persistence-path coverage and for any unintended behavior in the migration/helper design before I write the review outcome.
+
+I found one likely gap already: the new tests assert migration text and helper behavior, but I have not found a real persistence-path test that actually writes or validates a `selector` step row. I’m checking whether any other ticket write paths still touch `ticket_class` directly, because that would undermine the phase’s “temporary dual-write path” requirement.
+
+I’ve isolated the review outcome. The implementation is cohesive, but it misses the acceptance criterion that specifically calls for migration/persistence coverage: the new tests never actually exercise selector-step persistence or route-target backfill through a persistence path. I’m recording that as the blocking finding and updating the criteria accordingly.
+
+Scope considered
+
+- Phase-local review of the additive migration foundation against the phase contract, the spec, and [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt).
+- I limited edits to the verifier-owned artifacts [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/criteria.md) and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/feedback.md).
+
+What I analyzed
+
+- The current implementation in [shared/ticketing.py](/home/marcelo/code/AutoSac/shared/ticketing.py), [shared/models.py](/home/marcelo/code/AutoSac/shared/models.py), [worker/triage.py](/home/marcelo/code/AutoSac/worker/triage.py), [20260406_0005_route_target_compatibility.py](/home/marcelo/code/AutoSac/shared/migrations/versions/20260406_0005_route_target_compatibility.py), and the new persistence tests in [tests/test_foundation_persistence.py](/home/marcelo/code/AutoSac/tests/test_foundation_persistence.py).
+- The implementation notes in [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/implementation_notes.md).
+
+What I reviewed
+
+- Whether AC-1 through AC-3 are actually satisfied, especially the requirement for migration and persistence coverage of backfill, dual-write, selector step persistence, and the non-legacy-target guard.
+- Whether the helper and migration design stay within the additive compatibility window and avoid introducing new taxonomy constraints.
+
+Key findings / decisions
+
+- One blocking finding was recorded in [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/feedback.md):
+  - `IMP-001`: the new tests only inspect migration source text / metadata and do not actually exercise a persistence path for `route_target_id` backfill or `AIRunStep(step_kind="selector")`, so AC-3 is not met yet.
+- I updated [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/criteria.md) accordingly. Only `Technical Debt / Simplicity` is checked.
+
+Open issues / next step
+
+- Add a real persistence-oriented test for the additive migration behavior: prove `route_target_id` backfill occurs and a `selector` step can be persisted successfully.
+- After that, rerun review for completion.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
