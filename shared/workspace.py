@@ -3,14 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 
+from shared.agent_specs import load_all_agent_specs, required_workspace_skill_paths
 from shared.config import Settings
 from shared.contracts import (
     WORKSPACE_AGENTS_CONTENT,
     WORKSPACE_AGENTS_RELATIVE_PATH,
     WORKSPACE_BOOTSTRAP_VERSION,
-    WORKSPACE_SKILL_CONTENT,
-    WORKSPACE_SKILL_RELATIVE_PATH,
 )
+from shared.routing_registry import load_routing_registry
 
 
 def _write_exact_file(path: Path, contents: str) -> None:
@@ -46,6 +46,7 @@ def verify_workspace_mounts(settings: Settings) -> None:
 
 
 def verify_workspace_contract_paths(settings: Settings) -> None:
+    load_routing_registry()
     verify_workspace_mounts(settings)
     for label, path in (
         ("workspace", settings.triage_workspace_dir),
@@ -57,23 +58,29 @@ def verify_workspace_contract_paths(settings: Settings) -> None:
             raise NotADirectoryError(f"Required {label} directory is not a directory: {path}")
         path.stat()
 
-    for label, path in (
-        ("AGENTS.md", settings.workspace_agents_path),
-        ("stage1-triage skill", settings.workspace_skill_path),
-    ):
+    for label, path in (("AGENTS.md", settings.workspace_agents_path),):
         if not path.exists():
             raise FileNotFoundError(f"Required {label} file does not exist: {path}")
         if not path.is_file():
             raise FileNotFoundError(f"Required {label} path is not a file: {path}")
         path.stat()
+    for relative_path in required_workspace_skill_paths():
+        path = settings.triage_workspace_dir / relative_path
+        if not path.exists():
+            raise FileNotFoundError(f"Required workspace skill file does not exist: {path}")
+        if not path.is_file():
+            raise FileNotFoundError(f"Required workspace skill path is not a file: {path}")
+        path.stat()
 
 
 def bootstrap_workspace(settings: Settings) -> None:
+    load_routing_registry()
     settings.triage_workspace_dir.mkdir(parents=True, exist_ok=True)
     settings.runs_dir.mkdir(parents=True, exist_ok=True)
     verify_workspace_mounts(settings)
     _write_exact_file(settings.triage_workspace_dir / WORKSPACE_AGENTS_RELATIVE_PATH, WORKSPACE_AGENTS_CONTENT)
-    _write_exact_file(settings.triage_workspace_dir / WORKSPACE_SKILL_RELATIVE_PATH, WORKSPACE_SKILL_CONTENT)
+    for spec in load_all_agent_specs():
+        _write_exact_file(settings.workspace_skill_file_path(spec.skill_id), spec.skill_text)
     _ensure_git_repo(settings.triage_workspace_dir)
 
 
@@ -88,5 +95,6 @@ def workspace_contract_snapshot(settings: Settings) -> dict[str, str]:
         "repo_mount_dir": str(settings.repo_mount_dir),
         "manuals_mount_dir": str(settings.manuals_mount_dir),
         "agents_path": str(settings.triage_workspace_dir / WORKSPACE_AGENTS_RELATIVE_PATH),
-        "skill_path": str(settings.triage_workspace_dir / WORKSPACE_SKILL_RELATIVE_PATH),
+        "skills_dir": str(settings.workspace_skills_dir),
+        "skill_ids": ",".join(spec.skill_id for spec in load_all_agent_specs()),
     }

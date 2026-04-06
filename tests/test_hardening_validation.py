@@ -9,6 +9,7 @@ import sys
 
 import pytest
 
+from shared.agent_specs import required_workspace_skill_paths
 from shared.config import Settings
 
 
@@ -39,9 +40,7 @@ def _make_settings(tmp_path: Path) -> Settings:
 def _load_web_stack():
     pytest.importorskip("fastapi")
     pytest.importorskip("sqlalchemy")
-    pytest.importorskip("argon2")
     from fastapi.testclient import TestClient
-
     import app.main as app_main
 
     return {
@@ -75,8 +74,10 @@ def test_verify_workspace_contract_paths_requires_agents_and_skill_files(tmp_pat
         verify_workspace_contract_paths(settings)
 
     settings.workspace_agents_path.write_text("agents", encoding="utf-8")
-    settings.workspace_skill_path.parent.mkdir(parents=True, exist_ok=True)
-    settings.workspace_skill_path.write_text("skill", encoding="utf-8")
+    for relative_path in required_workspace_skill_paths():
+        path = settings.triage_workspace_dir / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("skill", encoding="utf-8")
 
     verify_workspace_contract_paths(settings)
 
@@ -89,6 +90,7 @@ def test_readyz_returns_ready_when_database_and_workspace_checks_pass(monkeypatc
     monkeypatch.setattr(stack["app_main"], "get_settings", lambda: settings)
     monkeypatch.setattr(stack["app_main"], "ping_database", lambda resolved: None)
     monkeypatch.setattr(stack["app_main"], "verify_workspace_contract_paths", lambda resolved: None)
+    monkeypatch.setattr(stack["app_main"], "assert_ai_run_history_ready", lambda resolved: None)
     monkeypatch.setattr(
         stack["app_main"],
         "log_web_event",
@@ -126,6 +128,27 @@ def test_readyz_returns_503_and_logs_failure(monkeypatch, tmp_path):
     assert response.json() == {"status": "not_ready", "error": "db down"}
     assert ("readiness_failed", {"level": "error", "error": "db down"}) in observed
     assert any(event == "request_completed" and payload["status_code"] == 503 for event, payload in observed)
+
+
+def test_readyz_returns_503_when_ai_run_history_is_not_backfilled(monkeypatch, tmp_path):
+    stack = _load_web_stack()
+    settings = _make_settings(tmp_path)
+
+    monkeypatch.setattr(stack["app_main"], "get_settings", lambda: settings)
+    monkeypatch.setattr(stack["app_main"], "ping_database", lambda resolved: None)
+    monkeypatch.setattr(stack["app_main"], "verify_workspace_contract_paths", lambda resolved: None)
+    monkeypatch.setattr(
+        stack["app_main"],
+        "assert_ai_run_history_ready",
+        lambda resolved: (_ for _ in ()).throw(RuntimeError("AI run history is not ready: backfill pending")),
+    )
+
+    app = stack["app_main"].create_app()
+    with stack["TestClient"](app) as client:
+        response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "not_ready", "error": "AI run history is not ready: backfill pending"}
 
 
 def test_healthz_request_is_structured_logged(monkeypatch):
@@ -183,6 +206,7 @@ def test_env_example_and_readme_capture_acceptance_contract():
     assert "python -m pip install -r requirements.txt" in readme_source
     assert "Runtime scripts load `.env` automatically" in readme_source
     assert "alembic upgrade head" in readme_source
+    assert "python scripts/backfill_ai_run_steps.py" in readme_source
     assert "GET /readyz" in readme_source
     assert "python scripts/bootstrap_workspace.py" in readme_source
     assert "python scripts/preflight_setup.py --ensure-workspace-dirs --setup-postgres-local" in readme_source
@@ -231,6 +255,71 @@ def _script_env(tmp_path: Path) -> dict[str, str]:
         }
     )
     return env
+
+
+def _create_runtime_schema(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE system_state (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE ai_runs (
+                id TEXT PRIMARY KEY,
+                ticket_id TEXT,
+                status TEXT NOT NULL,
+                triggered_by TEXT,
+                requested_by_user_id TEXT,
+                input_hash TEXT,
+                model_name TEXT,
+                pipeline_version TEXT,
+                final_step_id TEXT,
+                final_agent_spec_id TEXT,
+                final_output_contract TEXT,
+                final_output_json TEXT,
+                prompt_path TEXT,
+                schema_path TEXT,
+                final_output_path TEXT,
+                stdout_jsonl_path TEXT,
+                stderr_path TEXT,
+                started_at TEXT,
+                ended_at TEXT,
+                error_text TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE ai_run_steps (
+                id TEXT PRIMARY KEY,
+                ai_run_id TEXT NOT NULL,
+                step_index INTEGER NOT NULL,
+                step_kind TEXT NOT NULL,
+                agent_spec_id TEXT NOT NULL,
+                agent_spec_version TEXT NOT NULL,
+                output_contract TEXT NOT NULL,
+                model_name TEXT,
+                status TEXT NOT NULL,
+                prompt_path TEXT,
+                schema_path TEXT,
+                final_output_path TEXT,
+                stdout_jsonl_path TEXT,
+                stderr_path TEXT,
+                output_json TEXT,
+                error_text TEXT,
+                started_at TEXT,
+                ended_at TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
 
 
 def test_get_settings_allows_missing_codex_api_key(monkeypatch, tmp_path):
@@ -287,20 +376,10 @@ def _last_json_line(output: str) -> dict[str, object]:
 def test_bootstrap_web_and_worker_scripts_validate_end_to_end(tmp_path):
     env = _script_env(tmp_path)
     db_path = tmp_path / "triage.db"
-
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE system_state (
-                key TEXT PRIMARY KEY,
-                value_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
+    _create_runtime_schema(db_path)
 
     bootstrap = _run_script(["scripts/bootstrap_workspace.py"], env=env)
-    assert '"bootstrap_version": "stage1-v1"' in bootstrap.stdout
+    assert '"bootstrap_version": "stage1-v3"' in bootstrap.stdout
     with sqlite3.connect(db_path) as connection:
         rows = dict(connection.execute("SELECT key, value_json FROM system_state").fetchall())
     assert "bootstrap_version" in rows
@@ -331,11 +410,48 @@ def test_script_checks_fail_before_workspace_bootstrap(tmp_path):
     worker = _run_script(["scripts/run_worker.py", "--check"], env=env, check=False)
 
     assert web.returncode != 0
-    assert "Web smoke check failed: /readyz did not return the expected payload" in web.stderr
+    assert "Web smoke check failed: /readyz returned 503" in web.stderr
 
     assert worker.returncode != 0
     assert "Required " in worker.stderr
     assert "does not exist" in worker.stderr
+
+
+def test_script_checks_fail_when_backfill_is_pending(tmp_path):
+    env = _script_env(tmp_path)
+    db_path = tmp_path / "triage.db"
+    _create_runtime_schema(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO ai_runs (
+                id,
+                ticket_id,
+                status,
+                pipeline_version,
+                final_output_json,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run-1",
+                "ticket-1",
+                "succeeded",
+                None,
+                None,
+                "2026-04-06T00:00:00+00:00",
+            ),
+        )
+
+    _run_script(["scripts/bootstrap_workspace.py"], env=env)
+    web = _run_script(["scripts/run_web.py", "--check"], env=env, check=False)
+    worker = _run_script(["scripts/run_worker.py", "--check"], env=env, check=False)
+
+    assert web.returncode != 0
+    assert "AI run history is not ready" in web.stderr
+    assert worker.returncode != 0
+    assert "AI run history is not ready" in worker.stderr
 
 
 def test_setup_postgres_local_check_only_accepts_localhost_url():

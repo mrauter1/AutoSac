@@ -5,16 +5,17 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 import uuid
 
 import pytest
 
 from shared.config import Settings, get_database_url
+from shared.agent_specs import load_all_agent_specs
 from shared.contracts import (
     APP_ROUTES,
     CLI_COMMAND_NAMES,
     WORKSPACE_AGENTS_CONTENT,
-    WORKSPACE_SKILL_CONTENT,
 )
 from shared.workspace import bootstrap_workspace
 
@@ -213,7 +214,8 @@ def test_bootstrap_workspace_writes_exact_files_and_initializes_git_repo(tmp_pat
     bootstrap_workspace(settings)
 
     assert settings.workspace_agents_path.read_text(encoding="utf-8") == WORKSPACE_AGENTS_CONTENT
-    assert settings.workspace_skill_path.read_text(encoding="utf-8") == WORKSPACE_SKILL_CONTENT
+    for spec in load_all_agent_specs():
+        assert settings.workspace_skill_file_path(spec.skill_id).read_text(encoding="utf-8") == spec.skill_text
     assert (settings.triage_workspace_dir / ".git").is_dir()
     subprocess.run(
         ["git", "rev-parse", "--verify", "HEAD"],
@@ -245,6 +247,14 @@ def test_initial_migration_contains_required_sessions_table_and_active_run_index
     assert 'op.create_table(\n        "sessions"' in migration_source
     assert 'op.create_table(\n        "ai_runs"' in migration_source
     assert "CREATE UNIQUE INDEX uq_ai_runs_active_ticket ON ai_runs (ticket_id) WHERE status IN ('pending', 'running')" in migration_source
+
+
+def test_agent_pipeline_migration_adds_run_steps_and_final_output_fields():
+    migration_source = Path("shared/migrations/versions/20260406_0004_agent_pipeline.py").read_text(encoding="utf-8")
+
+    assert 'op.create_table(\n        "ai_run_steps"' in migration_source
+    assert 'op.add_column("ai_runs", sa.Column("final_output_json"' in migration_source
+    assert 'op.add_column("ai_runs", sa.Column("final_agent_spec_id"' in migration_source
 
 
 def test_preauth_login_session_creation_hashes_browser_token_and_sets_short_expiry(monkeypatch):
@@ -448,7 +458,7 @@ def test_create_admin_script_reports_matching_admin_as_success(monkeypatch, caps
 
     create_admin.main()
 
-    assert observed["defaults"] == ("db", "stage1-v1")
+    assert observed["defaults"] == ("db", "stage1-v3")
     assert capsys.readouterr().out.strip() == "Admin user admin@example.com already matched the requested bootstrap state"
 
 
@@ -483,7 +493,7 @@ def test_bootstrap_workspace_script_seeds_system_state_defaults(monkeypatch, cap
     monkeypatch.setattr(
         bootstrap_script,
         "workspace_contract_snapshot",
-        lambda resolved_settings: {"bootstrap_version": "stage1-v1", "workspace_dir": str(resolved_settings.triage_workspace_dir)},
+        lambda resolved_settings: {"bootstrap_version": "stage1-v3", "workspace_dir": str(resolved_settings.triage_workspace_dir)},
     )
 
     bootstrap_script.main()
@@ -492,10 +502,10 @@ def test_bootstrap_workspace_script_seeds_system_state_defaults(monkeypatch, cap
         ("ensure_uploads_dir", settings),
         ("bootstrap_workspace", settings),
         ("session_scope", settings),
-        ("ensure_system_state_defaults", "db", "stage1-v1"),
+        ("ensure_system_state_defaults", "db", "stage1-v3"),
     ]
     assert json.loads(capsys.readouterr().out) == {
-        "bootstrap_version": "stage1-v1",
+        "bootstrap_version": "stage1-v3",
         "workspace_dir": str(settings.triage_workspace_dir),
     }
 
@@ -594,3 +604,148 @@ def test_additive_preauth_migration_declares_store_and_expiry_index():
     assert 'sa.Column("next_path", sa.Text(), nullable=True)' in migration_source
     assert 'sa.UniqueConstraint("token_hash"' in migration_source
     assert 'op.create_index(\n        "ix_preauth_login_sessions_expires_at"' in migration_source
+
+
+def test_backfill_ai_run_steps_hydrates_accepted_legacy_run(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+    from scripts import backfill_ai_run_steps
+    from shared.agent_specs import LEGACY_AGENT_SPEC_ID, LEGACY_PIPELINE_VERSION
+
+    output_path = tmp_path / "final.json"
+    output_path.write_text(
+        json.dumps(
+            {
+                "ticket_class": "support",
+                "confidence": 0.95,
+                "impact_level": "medium",
+                "requester_language": "en",
+                "summary_short": "Accepted analysis",
+                "summary_internal": "Internal accepted analysis",
+                "development_needed": False,
+                "needs_clarification": False,
+                "clarifying_questions": [],
+                "incorrect_or_conflicting_details": [],
+                "evidence_found": True,
+                "relevant_paths": [{"path": "manuals/access.md", "reason": "Relevant doc"}],
+                "answer_scope": "document_scoped",
+                "evidence_status": "verified",
+                "misuse_or_safety_risk": False,
+                "human_review_reason": "",
+                "recommended_next_action": "auto_public_reply",
+                "auto_public_reply_allowed": True,
+                "public_reply_markdown": "Reply",
+                "internal_note_markdown": "Note",
+            }
+        ),
+        encoding="utf-8",
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=uuid.uuid4(),
+        status="succeeded",
+        pipeline_version=None,
+        final_output_path=str(output_path),
+        final_output_json=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        prompt_path="/tmp/prompt.txt",
+        schema_path="/tmp/schema.json",
+        stdout_jsonl_path="/tmp/stdout.jsonl",
+        stderr_path="/tmp/stderr.txt",
+        model_name="gpt-test",
+        error_text=None,
+        started_at=None,
+        ended_at=None,
+        created_at="2026-04-06T00:00:00+00:00",
+    )
+
+    class _FakeBackfillDb:
+        def __init__(self):
+            self.added = []
+
+        def add(self, item):
+            self.added.append(item)
+
+        def flush(self):
+            for item in self.added:
+                if getattr(item, "id", None) is None:
+                    item.id = uuid.uuid4()
+
+    fake_db = _FakeBackfillDb()
+    settings = _make_settings(tmp_path)
+
+    monkeypatch.setattr(backfill_ai_run_steps, "get_settings", lambda: settings)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr(backfill_ai_run_steps, "session_scope", fake_session_scope)
+    monkeypatch.setattr(backfill_ai_run_steps, "_candidate_runs", lambda db: [run])
+    monkeypatch.setattr(backfill_ai_run_steps, "_load_existing_step", lambda db, run_id: None)
+
+    summary = backfill_ai_run_steps.run_backfill(dry_run=False)
+
+    assert summary["blocking_errors"] == 0
+    assert summary["created_steps"] == 1
+    assert run.pipeline_version == LEGACY_PIPELINE_VERSION
+    assert run.final_agent_spec_id == LEGACY_AGENT_SPEC_ID
+    assert run.final_output_contract == "triage_result"
+    assert run.final_output_json["ticket_class"] == "support"
+    assert run.final_step_id is not None
+
+
+def test_backfill_ai_run_steps_fails_for_accepted_run_without_valid_output(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+    from scripts import backfill_ai_run_steps
+
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=uuid.uuid4(),
+        status="human_review",
+        pipeline_version=None,
+        final_output_path=str(tmp_path / "missing.json"),
+        final_output_json=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        prompt_path=None,
+        schema_path=None,
+        stdout_jsonl_path=None,
+        stderr_path=None,
+        model_name="gpt-test",
+        error_text=None,
+        started_at=None,
+        ended_at=None,
+        created_at="2026-04-06T00:00:00+00:00",
+    )
+
+    class _FakeBackfillDb:
+        def __init__(self):
+            self.added = []
+
+        def add(self, item):
+            self.added.append(item)
+
+        def flush(self):
+            raise AssertionError("flush should not be called for blocking accepted runs")
+
+    settings = _make_settings(tmp_path)
+
+    monkeypatch.setattr(backfill_ai_run_steps, "get_settings", lambda: settings)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield _FakeBackfillDb()
+
+    monkeypatch.setattr(backfill_ai_run_steps, "session_scope", fake_session_scope)
+    monkeypatch.setattr(backfill_ai_run_steps, "_candidate_runs", lambda db: [run])
+    monkeypatch.setattr(backfill_ai_run_steps, "_load_existing_step", lambda db, run_id: None)
+
+    summary = backfill_ai_run_steps.run_backfill(dry_run=False)
+
+    assert summary["blocking_errors"] == 1
+    assert summary["accepted_runs_missing_output"] == 1
+    assert run.pipeline_version is None
+    assert run.final_step_id is None

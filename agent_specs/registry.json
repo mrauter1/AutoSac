@@ -1,0 +1,198 @@
+{
+  "version": 1,
+  "router_spec_id": "router",
+  "selector_spec_id": "specialist-selector",
+  "route_targets": [
+    {
+      "id": "support",
+      "label": "Support",
+      "kind": "direct_ai",
+      "enabled": true,
+      "ops_visible": true,
+      "router_description": "How-to help, product usage guidance, low-risk troubleshooting, and straightforward operational questions.",
+      "handler": {
+        "specialist_selection": {
+          "mode": "fixed",
+          "specialist_id": "support"
+        }
+      },
+      "publish_policy": {
+        "allow_auto_publish": true,
+        "min_response_confidence_for_auto_publish": "high",
+        "max_risk_level_for_auto_publish": "low",
+        "allow_draft_for_human": true,
+        "allow_manual_only": true
+      }
+    },
+    {
+      "id": "access_config",
+      "label": "Access and Configuration",
+      "kind": "direct_ai",
+      "enabled": true,
+      "ops_visible": true,
+      "router_description": "Permissions, roles, setup gating, account provisioning, and configuration access issues.",
+      "handler": {
+        "specialist_selection": {
+          "mode": "fixed",
+          "specialist_id": "access-config"
+        }
+      },
+      "publish_policy": {
+        "allow_auto_publish": true,
+        "min_response_confidence_for_auto_publish": "high",
+        "max_risk_level_for_auto_publish": "low",
+        "allow_draft_for_human": true,
+        "allow_manual_only": true
+      }
+    },
+    {
+      "id": "data_ops",
+      "label": "Data Operations",
+      "kind": "direct_ai",
+      "enabled": true,
+      "ops_visible": true,
+      "router_description": "Operational data correction, import or export work, reconciliation, cleanup, and backfill-style requests.",
+      "handler": {
+        "specialist_selection": {
+          "mode": "fixed",
+          "specialist_id": "data-ops"
+        }
+      },
+      "publish_policy": {
+        "allow_auto_publish": true,
+        "min_response_confidence_for_auto_publish": "high",
+        "max_risk_level_for_auto_publish": "low",
+        "allow_draft_for_human": true,
+        "allow_manual_only": true
+      }
+    },
+    {
+      "id": "bug",
+      "label": "Bug",
+      "kind": "direct_ai",
+      "enabled": true,
+      "ops_visible": true,
+      "router_description": "Likely defects, regressions, or broken product behavior that need debugging-oriented handling.",
+      "handler": {
+        "specialist_selection": {
+          "mode": "fixed",
+          "specialist_id": "bug"
+        }
+      },
+      "publish_policy": {
+        "allow_auto_publish": true,
+        "min_response_confidence_for_auto_publish": "high",
+        "max_risk_level_for_auto_publish": "low",
+        "allow_draft_for_human": true,
+        "allow_manual_only": true
+      }
+    },
+    {
+      "id": "feature",
+      "label": "Feature Request",
+      "kind": "direct_ai",
+      "enabled": true,
+      "ops_visible": true,
+      "router_description": "Enhancement requests, missing capabilities, workflow changes, automation requests, and UX improvements.",
+      "handler": {
+        "specialist_selection": {
+          "mode": "fixed",
+          "specialist_id": "feature"
+        }
+      },
+      "publish_policy": {
+        "allow_auto_publish": true,
+        "min_response_confidence_for_auto_publish": "high",
+        "max_risk_level_for_auto_publish": "low",
+        "allow_draft_for_human": true,
+        "allow_manual_only": true
+      }
+    },
+    {
+      "id": "unknown",
+      "label": "Unknown",
+      "kind": "direct_ai",
+      "enabled": true,
+      "ops_visible": true,
+      "router_description": "Compatibility-phase fallback for ambiguous or mixed-signal cases that cannot yet use the final human-assist route target.",
+      "handler": {
+        "specialist_selection": {
+          "mode": "fixed",
+          "specialist_id": "unknown"
+        }
+      },
+      "publish_policy": {
+        "allow_auto_publish": false,
+        "min_response_confidence_for_auto_publish": "very_high",
+        "max_risk_level_for_auto_publish": "none",
+        "allow_draft_for_human": true,
+        "allow_manual_only": true
+      }
+    },
+    {
+      "id": "manual_review",
+      "label": "Manual Review",
+      "kind": "human_assist",
+      "enabled": false,
+      "ops_visible": true,
+      "router_description": "Use after route-target cutover when the case is ambiguous, high risk, or better handled by a human operator.",
+      "handler": {
+        "human_queue_status": "waiting_on_dev_ti",
+        "specialist_selection": {
+          "mode": "auto"
+        }
+      },
+      "publish_policy": {
+        "allow_auto_publish": false,
+        "min_response_confidence_for_auto_publish": "very_high",
+        "max_risk_level_for_auto_publish": "none",
+        "allow_draft_for_human": true,
+        "allow_manual_only": true
+      }
+    }
+  ],
+  "specialists": [
+    {
+      "id": "support",
+      "display_name": "Support Specialist",
+      "spec_id": "support",
+      "enabled": true,
+      "can_assist_human": true
+    },
+    {
+      "id": "access-config",
+      "display_name": "Access and Configuration Specialist",
+      "spec_id": "access-config",
+      "enabled": true,
+      "can_assist_human": true
+    },
+    {
+      "id": "data-ops",
+      "display_name": "Data Operations Specialist",
+      "spec_id": "data-ops",
+      "enabled": true,
+      "can_assist_human": true
+    },
+    {
+      "id": "bug",
+      "display_name": "Bug Specialist",
+      "spec_id": "bug",
+      "enabled": true,
+      "can_assist_human": true
+    },
+    {
+      "id": "feature",
+      "display_name": "Feature Specialist",
+      "spec_id": "feature",
+      "enabled": true,
+      "can_assist_human": true
+    },
+    {
+      "id": "unknown",
+      "display_name": "Unknown-Case Specialist",
+      "spec_id": "unknown",
+      "enabled": true,
+      "can_assist_human": false
+    }
+  ]
+}

@@ -40,43 +40,43 @@ def _make_settings(tmp_path: Path, *, codex_api_key: str | None = "test-key") ->
 
 def _load_worker_symbols():
     pytest.importorskip("sqlalchemy")
-    pytest.importorskip("argon2")
     pytest.importorskip("pydantic")
 
+    from shared.agent_specs import load_agent_spec
     from worker.main import heartbeat_loop
-    from worker.codex_runner import (
-        CodexRunError,
-        build_codex_command,
-        build_triage_prompt,
-        execute_codex_run,
-        prepare_codex_run,
-    )
+    from worker.output_contracts import RouterResult
+    from worker.pipeline import execute_triage_pipeline
+    from worker.prompt_renderer import render_agent_prompt
+    from worker.step_runner import StepRunError, build_codex_command, execute_step, prepare_step_run, write_run_manifest_snapshot
     from worker.triage import (
         _apply_success_result,
         _mark_failed,
         _prepare_run,
-        resolve_triage_outcome,
-        TriageResultError,
         build_requester_visible_fingerprint,
         process_ai_run,
-        validate_triage_result,
+        resolve_triage_outcome,
     )
+    from worker.triage_validation import TriageResultError, validate_triage_result
 
     return {
         "_apply_success_result": _apply_success_result,
         "_mark_failed": _mark_failed,
         "_prepare_run": _prepare_run,
-        "CodexRunError": CodexRunError,
-        "resolve_triage_outcome": resolve_triage_outcome,
-        "TriageResultError": TriageResultError,
         "build_codex_command": build_codex_command,
         "build_requester_visible_fingerprint": build_requester_visible_fingerprint,
-        "build_triage_prompt": build_triage_prompt,
-        "execute_codex_run": execute_codex_run,
+        "execute_step": execute_step,
+        "execute_triage_pipeline": execute_triage_pipeline,
         "heartbeat_loop": heartbeat_loop,
-        "prepare_codex_run": prepare_codex_run,
+        "load_agent_spec": load_agent_spec,
         "process_ai_run": process_ai_run,
+        "prepare_step_run": prepare_step_run,
+        "render_agent_prompt": render_agent_prompt,
+        "resolve_triage_outcome": resolve_triage_outcome,
+        "RouterResult": RouterResult,
+        "StepRunError": StepRunError,
+        "TriageResultError": TriageResultError,
         "validate_triage_result": validate_triage_result,
+        "write_run_manifest_snapshot": write_run_manifest_snapshot,
     }
 
 
@@ -128,6 +128,17 @@ def _make_context(
         internal_messages=[internal_message],
         public_attachments=public_attachments or [attachment],
     )
+
+
+def _route_payload(**overrides):
+    if "ticket_class" in overrides and "route_target_id" not in overrides:
+        overrides["route_target_id"] = overrides.pop("ticket_class")
+    payload = {
+        "route_target_id": "support",
+        "routing_rationale": "The requester is asking for help using an existing workflow.",
+    }
+    payload.update(overrides)
+    return payload
 
 
 def _valid_payload(**overrides):
@@ -231,44 +242,33 @@ def test_requester_visible_fingerprint_excludes_internal_messages():
     assert symbols["build_requester_visible_fingerprint"](first) == symbols["build_requester_visible_fingerprint"](second)
 
 
-def test_resolve_triage_outcome_allows_low_confidence_best_effort_reply(tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-    ticket = SimpleNamespace(clarification_rounds=0)
-
-    outcome = symbols["resolve_triage_outcome"](
-        ticket,
-        symbols["validate_triage_result"](
-            _valid_payload(confidence=0.80, recommended_next_action="auto_public_reply"),
-            settings,
-        ),
-        settings,
-    )
-
-    assert outcome.run_status == "succeeded"
-    assert outcome.effective_action == "auto_public_reply"
-    assert outcome.warning_text is None
-
-
-def test_prepare_codex_run_writes_prompt_and_schema(tmp_path):
+def test_prepare_step_run_writes_prompt_and_schema(tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
     context = _make_context()
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
 
-    prepared = symbols["prepare_codex_run"](
+    prepared = symbols["prepare_step_run"](
         settings,
-        ticket_id=context.ticket.id,
         run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
         context=context,
+        router_result=router_result,
+        target_ticket_class="support",
     )
 
-    assert prepared.prompt_path.read_text(encoding="utf-8") == prepared.prompt
-    assert prepared.schema_path.read_text(encoding="utf-8").startswith("{")
-    assert str(context.ticket.id) in str(prepared.run_dir)
+    assert prepared.paths.prompt_path.read_text(encoding="utf-8") == prepared.prompt
+    assert prepared.paths.schema_path.read_text(encoding="utf-8").startswith("{")
+    assert str(context.ticket.id) in str(prepared.paths.run_dir)
+    assert prepared.paths.step_dir.name.startswith("02-support")
     assert prepared.image_paths == [Path("/tmp/example.png")]
 
 
-def test_prepare_codex_run_filters_non_image_attachments(tmp_path):
+def test_prepare_step_run_filters_non_image_attachments(tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
     context = _make_context(
@@ -289,18 +289,25 @@ def test_prepare_codex_run_filters_non_image_attachments(tmp_path):
             ),
         ]
     )
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
 
-    prepared = symbols["prepare_codex_run"](
+    prepared = symbols["prepare_step_run"](
         settings,
-        ticket_id=context.ticket.id,
         run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
         context=context,
+        router_result=router_result,
+        target_ticket_class="support",
     )
 
     assert prepared.image_paths == [Path("/tmp/example.png")]
 
 
-def test_prepare_codex_run_excludes_spoofed_image_mime_without_verified_dimensions(tmp_path):
+def test_prepare_step_run_excludes_spoofed_image_mime_without_verified_dimensions(tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
     context = _make_context(
@@ -314,18 +321,25 @@ def test_prepare_codex_run_excludes_spoofed_image_mime_without_verified_dimensio
             )
         ]
     )
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
 
-    prepared = symbols["prepare_codex_run"](
+    prepared = symbols["prepare_step_run"](
         settings,
-        ticket_id=context.ticket.id,
         run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
         context=context,
+        router_result=router_result,
+        target_ticket_class="support",
     )
 
     assert prepared.image_paths == []
 
 
-def test_build_triage_prompt_includes_public_and_internal_context():
+def test_render_agent_prompt_includes_public_internal_and_router_context():
     symbols = _load_worker_symbols()
     context = _make_context(
         public_body="Requester sees an error",
@@ -333,13 +347,22 @@ def test_build_triage_prompt_includes_public_and_internal_context():
         requester_role="dev_ti",
         requester_can_view_internal_messages=True,
     )
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(
+        _route_payload(route_target_id="support", routing_rationale="Looks like usage help.")
+    )
 
-    prompt = symbols["build_triage_prompt"](context)
+    prompt = symbols["render_agent_prompt"](
+        spec,
+        context=context,
+        router_result=router_result,
+        target_ticket_class="support",
+    )
 
+    assert prompt.startswith("$triage-support")
     assert "Public messages:" in prompt
     assert "Internal messages:" in prompt
-    assert "Ticket requester role:" in prompt
-    assert "Requester can view internal messages:" in prompt
+    assert "Route target ID: support" in prompt
     assert "Requester sees an error" in prompt
     assert "Dev/TI suspects role drift" in prompt
     assert "dev_ti" in prompt
@@ -350,11 +373,18 @@ def test_build_codex_command_matches_required_contract(tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
     context = _make_context()
-    prepared = symbols["prepare_codex_run"](
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+    prepared = symbols["prepare_step_run"](
         settings,
-        ticket_id=context.ticket.id,
         run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
         context=context,
+        router_result=router_result,
+        target_ticket_class="support",
     )
 
     command, env = symbols["build_codex_command"](settings, prepared=prepared)
@@ -384,11 +414,18 @@ def test_build_codex_command_omits_api_key_when_not_configured(monkeypatch, tmp_
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path, codex_api_key=None)
     context = _make_context()
-    prepared = symbols["prepare_codex_run"](
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+    prepared = symbols["prepare_step_run"](
         settings,
-        ticket_id=context.ticket.id,
         run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
         context=context,
+        router_result=router_result,
+        target_ticket_class="support",
     )
 
     monkeypatch.setenv("CODEX_API_KEY", "stale-parent-key")
@@ -397,47 +434,68 @@ def test_build_codex_command_omits_api_key_when_not_configured(monkeypatch, tmp_
     assert "CODEX_API_KEY" not in env
 
 
-def test_execute_codex_run_passes_prompt_via_stdin(monkeypatch, tmp_path):
+def test_execute_step_passes_prompt_via_stdin(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
     context = _make_context()
-    prepared = symbols["prepare_codex_run"](
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+    prepared = symbols["prepare_step_run"](
         settings,
-        ticket_id=context.ticket.id,
         run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
         context=context,
+        router_result=router_result,
+        target_ticket_class="support",
     )
-    prepared.final_output_path.write_text(json.dumps(_valid_payload()), encoding="utf-8")
+    prepared.paths.final_output_path.write_text(json.dumps(_valid_payload()), encoding="utf-8")
     observed = {}
+
+    monkeypatch.setattr("worker.step_runner._create_running_step_row", lambda settings, prepared: uuid.uuid4())
+    monkeypatch.setattr("worker.step_runner._update_step_row", lambda **kwargs: None)
+    monkeypatch.setattr("worker.step_runner.write_step_manifest", lambda *args, **kwargs: None)
 
     def fake_run(command, **kwargs):
         observed["command"] = command
         observed["input"] = kwargs["input"]
         return SimpleNamespace(returncode=0, stdout='{"event":"ok"}\n', stderr="")
 
-    monkeypatch.setattr("worker.codex_runner.subprocess.run", fake_run)
+    monkeypatch.setattr("worker.step_runner.subprocess.run", fake_run)
 
-    artifacts = symbols["execute_codex_run"](settings, prepared=prepared)
+    result = symbols["execute_step"](settings, prepared=prepared)
 
     assert observed["command"][-1] == "-"
     assert prepared.prompt not in observed["command"]
     assert observed["input"] == prepared.prompt
-    assert artifacts.output_payload["recommended_next_action"] == "auto_public_reply"
+    assert result.output_payload["recommended_next_action"] == "auto_public_reply"
 
 
-def test_execute_codex_run_handles_timeout_streams_as_bytes(monkeypatch, tmp_path):
+def test_execute_step_handles_timeout_streams_as_bytes(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
     context = _make_context()
-    prepared = symbols["prepare_codex_run"](
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+    prepared = symbols["prepare_step_run"](
         settings,
-        ticket_id=context.ticket.id,
         run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
         context=context,
+        router_result=router_result,
+        target_ticket_class="support",
     )
 
+    monkeypatch.setattr("worker.step_runner._create_running_step_row", lambda settings, prepared: uuid.uuid4())
+    monkeypatch.setattr("worker.step_runner._update_step_row", lambda **kwargs: None)
+    monkeypatch.setattr("worker.step_runner.write_step_manifest", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        "worker.codex_runner.subprocess.run",
+        "worker.step_runner.subprocess.run",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             subprocess.TimeoutExpired(
                 cmd=["codex"],
@@ -448,202 +506,76 @@ def test_execute_codex_run_handles_timeout_streams_as_bytes(monkeypatch, tmp_pat
         ),
     )
 
-    with pytest.raises(symbols["CodexRunError"], match="timed out"):
-        symbols["execute_codex_run"](settings, prepared=prepared)
+    with pytest.raises(symbols["StepRunError"], match="timed out"):
+        symbols["execute_step"](settings, prepared=prepared)
 
-    assert prepared.stdout_jsonl_path.read_text(encoding="utf-8") == '{"event":"partial"}\n'
-    assert prepared.stderr_path.read_text(encoding="utf-8") == "stderr-bytes"
+    assert prepared.paths.stdout_jsonl_path.read_text(encoding="utf-8") == '{"event":"partial"}\n'
+    assert prepared.paths.stderr_path.read_text(encoding="utf-8") == "stderr-bytes"
 
 
-def test_prepare_run_skips_when_last_processed_hash_matches(monkeypatch, tmp_path):
+def test_execute_triage_pipeline_flags_router_specialist_class_mismatch(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
-    ticket = SimpleNamespace(
-        id=uuid.uuid4(),
-        reference="T-000003",
-        title="Duplicate content",
-        status="ai_triage",
-        urgent=False,
-        last_processed_hash="",
-        clarification_rounds=0,
-        requeue_requested=False,
-        requeue_trigger=None,
-    )
-    context = _make_context(ticket=ticket)
-    ticket.last_processed_hash = symbols["build_requester_visible_fingerprint"](context)
-    run = SimpleNamespace(
-        id=uuid.uuid4(),
-        ticket_id=ticket.id,
-        status="running",
-        triggered_by="new_ticket",
-        input_hash=None,
+    context = _make_context()
+    observed = {"manifest_updates": []}
+
+    monkeypatch.setattr("worker.pipeline.prepare_step_run", lambda *args, **kwargs: SimpleNamespace(
+        run_id=kwargs["run_id"],
+        ticket_id=kwargs["ticket_id"],
+        step_index=kwargs["step_index"],
+        step_kind=kwargs["step_kind"],
+        spec=kwargs["spec"],
         model_name=None,
-        prompt_path=None,
-        schema_path=None,
-        final_output_path=None,
-        stdout_jsonl_path=None,
-        stderr_path=None,
-        error_text=None,
-        ended_at=None,
-    )
-    fake_db = _FakeDb(run=run)
-    observed = {"requeue": 0, "status_changes": 0}
-
-    @contextmanager
-    def fake_session_scope(_settings):
-        yield fake_db
-
-    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
-    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
-    monkeypatch.setattr(
-        "worker.triage.prepare_codex_run",
-        lambda *args, **kwargs: SimpleNamespace(
-            prompt_path=tmp_path / "prompt.txt",
-            schema_path=tmp_path / "schema.json",
-            final_output_path=tmp_path / "final.json",
-            stdout_jsonl_path=tmp_path / "stdout.jsonl",
-            stderr_path=tmp_path / "stderr.txt",
+        paths=SimpleNamespace(run_dir=tmp_path / "run", as_payload=lambda: {}),
+    ))
+    outputs = [
+        SimpleNamespace(
+            step_id=uuid.uuid4(),
+            prepared=SimpleNamespace(
+                step_index=1,
+                step_kind="router",
+                spec=SimpleNamespace(id="router", version="1", output_contract="router_result"),
+                paths=SimpleNamespace(run_dir=tmp_path / "run", as_payload=lambda: {}),
+            ),
+            output_payload=_route_payload(ticket_class="support"),
         ),
-    )
-    monkeypatch.setattr(
-        "worker.triage.process_deferred_requeue",
-        lambda db, ticket: observed.__setitem__("requeue", observed["requeue"] + 1),
-    )
-    monkeypatch.setattr(
-        "worker.triage.record_status_change",
-        lambda *args, **kwargs: observed.__setitem__("status_changes", observed["status_changes"] + 1),
-    )
-
-    prepared = symbols["_prepare_run"](settings, run_id=run.id)
-
-    assert prepared is None
-    assert run.status == "skipped"
-    assert run.ended_at is not None
-    assert observed["requeue"] == 1
-    assert observed["status_changes"] == 0
-
-
-def test_prepare_run_skip_does_not_change_non_ai_triage_status(monkeypatch, tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-    ticket = SimpleNamespace(
-        id=uuid.uuid4(),
-        reference="T-000003",
-        title="Duplicate content",
-        status="waiting_on_dev_ti",
-        urgent=False,
-        last_processed_hash="same-hash",
-        clarification_rounds=0,
-        requeue_requested=False,
-        requeue_trigger=None,
-    )
-    context = _make_context(ticket=ticket)
-    run = SimpleNamespace(
-        id=uuid.uuid4(),
-        ticket_id=ticket.id,
-        status="running",
-        triggered_by="new_ticket",
-        input_hash=None,
-        model_name=None,
-        prompt_path=None,
-        schema_path=None,
-        final_output_path=None,
-        stdout_jsonl_path=None,
-        stderr_path=None,
-        error_text=None,
-        ended_at=None,
-    )
-    fake_db = _FakeDb(run=run)
-    observed = {"requeue": 0, "status_changes": 0}
-
-    @contextmanager
-    def fake_session_scope(_settings):
-        yield fake_db
-
-    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
-    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
-    monkeypatch.setattr("worker.triage.build_requester_visible_fingerprint", lambda context: "same-hash")
-    monkeypatch.setattr(
-        "worker.triage.prepare_codex_run",
-        lambda *args, **kwargs: SimpleNamespace(
-            prompt_path=tmp_path / "prompt.txt",
-            schema_path=tmp_path / "schema.json",
-            final_output_path=tmp_path / "final.json",
-            stdout_jsonl_path=tmp_path / "stdout.jsonl",
-            stderr_path=tmp_path / "stderr.txt",
+        SimpleNamespace(
+            step_id=uuid.uuid4(),
+            prepared=SimpleNamespace(
+                step_index=2,
+                step_kind="specialist",
+                spec=SimpleNamespace(id="support", version="1", output_contract="triage_result"),
+                paths=SimpleNamespace(run_dir=tmp_path / "run", as_payload=lambda: {}),
+            ),
+            output_payload=_valid_payload(
+                ticket_class="bug",
+                answer_scope="general_reasoning",
+                evidence_status="not_applicable",
+                evidence_found=False,
+                relevant_paths=[],
+                public_reply_markdown="The internal team will review the likely bug path and follow up.",
+                recommended_next_action="auto_confirm_and_route",
+                internal_note_markdown="",
+            ),
         ),
-    )
+    ]
+    monkeypatch.setattr("worker.pipeline.execute_step", lambda *args, **kwargs: outputs.pop(0))
     monkeypatch.setattr(
-        "worker.triage.process_deferred_requeue",
-        lambda db, ticket: observed.__setitem__("requeue", observed["requeue"] + 1),
-    )
-    monkeypatch.setattr(
-        "worker.triage.record_status_change",
-        lambda *args, **kwargs: observed.__setitem__("status_changes", observed["status_changes"] + 1),
+        "worker.pipeline.write_run_manifest_snapshot",
+        lambda settings, run_id: observed["manifest_updates"].append(run_id),
     )
 
-    prepared = symbols["_prepare_run"](settings, run_id=run.id)
-
-    assert prepared is None
-    assert ticket.status == "waiting_on_dev_ti"
-    assert run.status == "skipped"
-    assert observed["requeue"] == 1
-    assert observed["status_changes"] == 0
-
-
-def test_apply_success_result_publishes_internal_note_before_public_action(monkeypatch, tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-    ticket = SimpleNamespace(
-        id=uuid.uuid4(),
-        reference="T-000004",
-        title="Permission issue",
-        status="ai_triage",
-        urgent=False,
-        last_processed_hash=None,
-        clarification_rounds=0,
-        requeue_requested=False,
-        requeue_trigger=None,
-    )
-    context = _make_context(ticket=ticket)
-    publication_hash = symbols["build_requester_visible_fingerprint"](context)
-    run = SimpleNamespace(
-        id=uuid.uuid4(),
-        ticket_id=ticket.id,
-        status="running",
-        input_hash=publication_hash,
-        ended_at=None,
-        error_text=None,
-    )
-    fake_db = _FakeDb(run=run)
-    events: list[str] = []
-
-    @contextmanager
-    def fake_session_scope(_settings):
-        yield fake_db
-
-    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
-    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
-    monkeypatch.setattr("worker.triage.apply_ai_classification", lambda *args, **kwargs: events.append("classification"))
-    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: events.append("internal"))
-    monkeypatch.setattr(
-        "worker.triage.publish_ai_public_reply",
-        lambda *args, **kwargs: events.append(f"public:{kwargs['last_ai_action']}"),
-    )
-    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: events.append("draft"))
-    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: events.append("route"))
-    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: events.append("requeue"))
-
-    symbols["_apply_success_result"](
+    result = symbols["execute_triage_pipeline"](
         settings,
-        run_id=run.id,
-        result=symbols["validate_triage_result"](_valid_payload(), settings),
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        context=context,
     )
 
-    assert events == ["classification", "internal", "public:auto_public_reply", "requeue"]
-    assert ticket.last_processed_hash == publication_hash
-    assert run.status == "succeeded"
-    assert run.ended_at is not None
+    assert result.force_human_review_reason is not None
+    assert "router classified the ticket as support" in result.force_human_review_reason
+    assert result.triage_result.ticket_class == "bug"
+    assert len(observed["manifest_updates"]) == 2
 
 
 def test_validate_triage_result_requires_questions_for_clarification(tmp_path):
@@ -667,10 +599,7 @@ def test_validate_triage_result_requires_document_sources_for_document_scoped_an
     settings = _make_settings(tmp_path)
 
     with pytest.raises(symbols["TriageResultError"], match="document_scoped answers must include relevant_paths"):
-        symbols["validate_triage_result"](
-            _valid_payload(relevant_paths=[]),
-            settings,
-        )
+        symbols["validate_triage_result"](_valid_payload(relevant_paths=[]), settings)
 
 
 def test_validate_triage_result_requires_human_review_reason_for_misuse_risk(tmp_path):
@@ -723,26 +652,7 @@ def test_validate_triage_result_requires_uncertainty_caveat_for_low_risk_guess(t
         )
 
 
-def test_validate_triage_result_allows_low_risk_guess_with_explicit_caveat(tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-
-    result = symbols["validate_triage_result"](
-        _valid_payload(
-            evidence_found=False,
-            evidence_status="not_found_low_risk_guess",
-            public_reply_markdown=(
-                "Best-effort answer: I could not verify this in manuals/ or app/, but the most likely issue is "
-                "that the report permission is disabled."
-            ),
-        ),
-        settings,
-    )
-
-    assert result.evidence_status == "not_found_low_risk_guess"
-
-
-def test_resolve_triage_outcome_allows_general_reasoning_bug_auto_confirm(tmp_path):
+def test_resolve_triage_outcome_allows_low_confidence_best_effort_reply(tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
     ticket = SimpleNamespace(clarification_rounds=0)
@@ -750,166 +660,10 @@ def test_resolve_triage_outcome_allows_general_reasoning_bug_auto_confirm(tmp_pa
     outcome = symbols["resolve_triage_outcome"](
         ticket,
         symbols["validate_triage_result"](
-            _valid_payload(
-                ticket_class="bug",
-                answer_scope="general_reasoning",
-                evidence_status="not_applicable",
-                evidence_found=False,
-                relevant_paths=[],
-                recommended_next_action="auto_confirm_and_route",
-                public_reply_markdown="The internal team will review the likely bug path and follow up.",
-            ),
+            _valid_payload(confidence=0.80, recommended_next_action="auto_public_reply"),
             settings,
         ),
         settings,
-    )
-
-    assert outcome.run_status == "succeeded"
-    assert outcome.effective_action == "auto_confirm_and_route"
-    assert outcome.warning_text is None
-
-
-def test_resolve_triage_outcome_marks_clarification_as_succeeded(tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-    ticket = SimpleNamespace(clarification_rounds=0)
-
-    outcome = symbols["resolve_triage_outcome"](
-        ticket,
-        symbols["validate_triage_result"](
-            _valid_payload(
-                recommended_next_action="ask_clarification",
-                needs_clarification=True,
-                clarifying_questions=["Which report is affected?"],
-                auto_public_reply_allowed=True,
-                public_reply_markdown="",
-                internal_note_markdown="",
-            ),
-            settings,
-        ),
-        settings,
-    )
-
-    assert outcome.run_status == "succeeded"
-    assert outcome.effective_action == "ask_clarification"
-    assert outcome.warning_text is None
-
-
-def test_resolve_triage_outcome_routes_misuse_risk_to_human_review(tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-    ticket = SimpleNamespace(clarification_rounds=0)
-
-    outcome = symbols["resolve_triage_outcome"](
-        ticket,
-        symbols["validate_triage_result"](
-            _valid_payload(
-                misuse_or_safety_risk=True,
-                human_review_reason="The request could enable misuse if answered automatically.",
-                recommended_next_action="auto_public_reply",
-            ),
-            settings,
-        ),
-        settings,
-    )
-
-    assert outcome.run_status == "human_review"
-    assert outcome.effective_action == "draft_public_reply"
-    assert "misuse or safety risk" in outcome.warning_text
-    assert "could enable misuse" in outcome.warning_text
-
-
-def test_resolve_triage_outcome_routes_clarification_limit_to_human_review(tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-    ticket = SimpleNamespace(clarification_rounds=2)
-
-    outcome = symbols["resolve_triage_outcome"](
-        ticket,
-        symbols["validate_triage_result"](
-            _valid_payload(
-                recommended_next_action="ask_clarification",
-                needs_clarification=True,
-                clarifying_questions=["Which report is affected?"],
-                auto_public_reply_allowed=True,
-                public_reply_markdown="",
-                internal_note_markdown="",
-            ),
-            settings,
-        ),
-        settings,
-    )
-
-    assert outcome.run_status == "human_review"
-    assert outcome.effective_action == "draft_public_reply"
-    assert "clarification limit reached" in outcome.warning_text
-
-
-def test_validate_triage_result_allows_route_dev_ti_without_public_reply(tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-
-    result = symbols["validate_triage_result"](
-        _valid_payload(
-            recommended_next_action="route_dev_ti",
-            auto_public_reply_allowed=False,
-            public_reply_markdown="",
-            confidence=0.40,
-            evidence_found=False,
-            evidence_status="not_found_low_risk_guess",
-            human_review_reason="A developer should review the likely but unverified process answer.",
-        ),
-        settings,
-    )
-
-    assert result.recommended_next_action == "route_dev_ti"
-
-
-def test_resolve_triage_outcome_downgrades_invalid_auto_reply_to_human_review(tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-    ticket = SimpleNamespace(clarification_rounds=0)
-
-    outcome = symbols["resolve_triage_outcome"](
-        ticket,
-        symbols["validate_triage_result"](
-            _valid_payload(
-                recommended_next_action="auto_public_reply",
-                auto_public_reply_allowed=False,
-            ),
-            settings,
-        ),
-        settings,
-    )
-
-    assert outcome.run_status == "human_review"
-    assert outcome.effective_action == "draft_public_reply"
-    assert "downgraded" in outcome.warning_text
-
-
-def test_resolve_triage_outcome_bypasses_human_review_for_internal_requester(tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-    ticket = SimpleNamespace(clarification_rounds=0)
-
-    outcome = symbols["resolve_triage_outcome"](
-        ticket,
-        symbols["validate_triage_result"](
-            _valid_payload(
-                ticket_class="bug",
-                answer_scope="general_reasoning",
-                evidence_status="not_applicable",
-                recommended_next_action="auto_public_reply",
-                auto_public_reply_allowed=False,
-                confidence=0.10,
-                evidence_found=False,
-                relevant_paths=[],
-                internal_note_markdown="",
-            ),
-            settings,
-        ),
-        settings,
-        requester_can_view_internal_messages=True,
     )
 
     assert outcome.run_status == "succeeded"
@@ -917,28 +671,288 @@ def test_resolve_triage_outcome_bypasses_human_review_for_internal_requester(tmp
     assert outcome.warning_text is None
 
 
-def test_resolve_triage_outcome_still_human_reviews_safety_risk_for_internal_requester(tmp_path):
+def test_prepare_run_skips_when_last_processed_hash_matches(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
-    ticket = SimpleNamespace(clarification_rounds=0)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000003",
+        title="Duplicate content",
+        status="ai_triage",
+        urgent=False,
+        last_processed_hash="",
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    ticket.last_processed_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        triggered_by="new_ticket",
+        input_hash=None,
+        model_name=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        error_text=None,
+        ended_at=None,
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {"requeue": 0, "status_changes": 0}
 
-    outcome = symbols["resolve_triage_outcome"](
-        ticket,
-        symbols["validate_triage_result"](
-            _valid_payload(
-                misuse_or_safety_risk=True,
-                human_review_reason="The request includes potentially unsafe instructions.",
-                internal_note_markdown="",
-            ),
-            settings,
-        ),
-        settings,
-        requester_can_view_internal_messages=True,
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr(
+        "worker.triage.process_deferred_requeue",
+        lambda db, ticket: observed.__setitem__("requeue", observed["requeue"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.record_status_change",
+        lambda *args, **kwargs: observed.__setitem__("status_changes", observed["status_changes"] + 1),
     )
 
-    assert outcome.run_status == "human_review"
-    assert outcome.effective_action == "draft_public_reply"
-    assert "unsafe instructions" in outcome.warning_text
+    prepared = symbols["_prepare_run"](settings, run_id=run.id)
+
+    assert prepared is None
+    assert run.status == "skipped"
+    assert run.pipeline_version == "agent-pipeline-v1"
+    assert run.ended_at is not None
+    assert observed["requeue"] == 1
+    assert observed["status_changes"] == 0
+
+
+def test_prepare_run_skip_does_not_change_non_ai_triage_status(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000003",
+        title="Duplicate content",
+        status="waiting_on_dev_ti",
+        urgent=False,
+        last_processed_hash="same-hash",
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        triggered_by="new_ticket",
+        input_hash=None,
+        model_name=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        error_text=None,
+        ended_at=None,
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {"requeue": 0, "status_changes": 0}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage.build_requester_visible_fingerprint", lambda context: "same-hash")
+    monkeypatch.setattr(
+        "worker.triage.process_deferred_requeue",
+        lambda db, ticket: observed.__setitem__("requeue", observed["requeue"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.record_status_change",
+        lambda *args, **kwargs: observed.__setitem__("status_changes", observed["status_changes"] + 1),
+    )
+
+    prepared = symbols["_prepare_run"](settings, run_id=run.id)
+
+    assert prepared is None
+    assert ticket.status == "waiting_on_dev_ti"
+    assert run.status == "skipped"
+    assert run.pipeline_version == "agent-pipeline-v1"
+    assert observed["requeue"] == 1
+    assert observed["status_changes"] == 0
+
+
+def test_apply_success_result_publishes_internal_note_before_public_action_and_sets_final_fields(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000004",
+        title="Permission issue",
+        status="ai_triage",
+        urgent=False,
+        last_processed_hash=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    publication_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash=publication_hash,
+        ended_at=None,
+        error_text=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        model_name=None,
+    )
+    fake_db = _FakeDb(run=run)
+    events: list[str] = []
+    observed = {"manifest_runs": []}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage.apply_ai_classification", lambda *args, **kwargs: events.append("classification"))
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: events.append("internal"))
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: events.append(f"public:{kwargs['last_ai_action']}"),
+    )
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: events.append("draft"))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: events.append("route"))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: events.append("requeue"))
+    monkeypatch.setattr(
+        "worker.triage.write_run_manifest_snapshot",
+        lambda settings, run_id: observed["manifest_runs"].append(run_id),
+    )
+
+    result = symbols["validate_triage_result"](_valid_payload(), settings)
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        result=result,
+        final_step_id=uuid.uuid4(),
+        final_agent_spec_id="support",
+        final_output_contract="triage_result",
+        final_output_json=result.model_dump(),
+        final_model_name="gpt-test",
+    )
+
+    assert events == ["classification", "internal", "public:auto_public_reply", "requeue"]
+    assert ticket.last_processed_hash == publication_hash
+    assert run.status == "succeeded"
+    assert run.final_agent_spec_id == "support"
+    assert run.final_output_contract == "triage_result"
+    assert run.final_output_json["ticket_class"] == "support"
+    assert run.model_name == "gpt-test"
+    assert run.ended_at is not None
+    assert observed["manifest_runs"] == [run.id]
+
+
+def test_apply_success_result_force_human_review_creates_draft(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000006",
+        title="Mismatch review",
+        status="ai_triage",
+        urgent=False,
+        last_processed_hash=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    publication_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash=publication_hash,
+        ended_at=None,
+        error_text=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        model_name=None,
+    )
+    fake_db = _FakeDb(run=run)
+    events: list[str] = []
+    observed = {"manifest_runs": []}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage.apply_ai_classification", lambda *args, **kwargs: events.append("classification"))
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_internal_note",
+        lambda *args, **kwargs: observed.setdefault("internal_note", kwargs["body_markdown"]),
+    )
+    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: events.append("public"))
+    monkeypatch.setattr(
+        "worker.triage.create_ai_draft",
+        lambda *args, **kwargs: events.append("draft"),
+    )
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: events.append("route"))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: events.append("requeue"))
+    monkeypatch.setattr(
+        "worker.triage.write_run_manifest_snapshot",
+        lambda settings, run_id: observed["manifest_runs"].append(run_id),
+    )
+
+    result = symbols["validate_triage_result"](
+        _valid_payload(
+            ticket_class="bug",
+            answer_scope="general_reasoning",
+            evidence_status="not_applicable",
+            evidence_found=False,
+            relevant_paths=[],
+            public_reply_markdown="The internal team will review the likely bug path and follow up.",
+            recommended_next_action="auto_confirm_and_route",
+            internal_note_markdown="",
+        ),
+        settings,
+    )
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        result=result,
+        final_step_id=uuid.uuid4(),
+        final_agent_spec_id="support",
+        final_output_contract="triage_result",
+        final_output_json=result.model_dump(),
+        final_model_name="gpt-test",
+        force_human_review_reason="Pipeline mismatch: router classified the ticket as support but the specialist classified it as bug.",
+    )
+
+    assert events == ["classification", "draft", "requeue"]
+    assert run.status == "human_review"
+    assert "Pipeline mismatch" in run.error_text
+    assert "Additional review reason" in observed["internal_note"]
+    assert observed["manifest_runs"] == [run.id]
 
 
 def test_apply_success_result_supersedes_stale_run_without_publication(monkeypatch, tmp_path):
@@ -966,6 +980,7 @@ def test_apply_success_result_supersedes_stale_run_without_publication(monkeypat
     )
     fake_db = _FakeDb(run=run)
     observed = {"internal": 0, "public": 0, "requeue": 0}
+    manifest_runs: list[uuid.UUID] = []
 
     @contextmanager
     def fake_session_scope(_settings):
@@ -985,236 +1000,46 @@ def test_apply_success_result_supersedes_stale_run_without_publication(monkeypat
         "worker.triage.process_deferred_requeue",
         lambda *args, **kwargs: observed.__setitem__("requeue", observed["requeue"] + 1),
     )
+    monkeypatch.setattr(
+        "worker.triage.write_run_manifest_snapshot",
+        lambda settings, run_id: manifest_runs.append(run_id),
+    )
 
     symbols["_apply_success_result"](
         settings,
         run_id=run.id,
         result=symbols["validate_triage_result"](_valid_payload(), settings),
+        final_step_id=uuid.uuid4(),
+        final_agent_spec_id="support",
+        final_output_contract="triage_result",
+        final_output_json=_valid_payload(),
+        final_model_name="gpt-test",
     )
 
     assert run.status == "superseded"
     assert run.ended_at is not None
     assert observed == {"internal": 0, "public": 0, "requeue": 1}
-
-
-def test_apply_success_result_creates_human_review_draft_with_fallback_note(monkeypatch, tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-    ticket = SimpleNamespace(
-        id=uuid.uuid4(),
-        reference="T-000006",
-        title="Potentially unsafe request",
-        status="ai_triage",
-        urgent=False,
-        last_processed_hash=None,
-        clarification_rounds=0,
-        requeue_requested=False,
-        requeue_trigger=None,
-    )
-    context = _make_context(ticket=ticket)
-    publication_hash = symbols["build_requester_visible_fingerprint"](context)
-    run = SimpleNamespace(
-        id=uuid.uuid4(),
-        ticket_id=ticket.id,
-        status="running",
-        input_hash=publication_hash,
-        ended_at=None,
-        error_text=None,
-    )
-    fake_db = _FakeDb(run=run)
-    events: list[str] = []
-
-    @contextmanager
-    def fake_session_scope(_settings):
-        yield fake_db
-
-    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
-    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
-    monkeypatch.setattr("worker.triage.apply_ai_classification", lambda *args, **kwargs: events.append("classification"))
-    observed = {}
-    monkeypatch.setattr(
-        "worker.triage.publish_ai_internal_note",
-        lambda *args, **kwargs: (
-            events.append("internal"),
-            observed.setdefault("internal_note", kwargs["body_markdown"]),
-        ),
-    )
-    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: events.append("public"))
-    monkeypatch.setattr(
-        "worker.triage.create_ai_draft",
-        lambda *args, **kwargs: (
-            events.append("draft"),
-            observed.setdefault("draft_body", kwargs["body_markdown"]),
-        ),
-    )
-    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: events.append("route"))
-    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: events.append("requeue"))
-
-    symbols["_apply_success_result"](
-        settings,
-        run_id=run.id,
-        result=symbols["validate_triage_result"](
-            _valid_payload(
-                misuse_or_safety_risk=True,
-                human_review_reason="The request could enable misuse if answered automatically.",
-                recommended_next_action="route_dev_ti",
-                auto_public_reply_allowed=False,
-                internal_note_markdown="",
-                public_reply_markdown="",
-            ),
-            settings,
-        ),
-    )
-
-    assert events == ["classification", "internal", "draft", "requeue"]
-    assert run.status == "human_review"
-    assert "misuse" in run.error_text
-    assert "The internal team is reviewing this request" in observed["draft_body"]
-    assert "Human review reason" in observed["internal_note"]
-
-
-def test_apply_success_result_publishes_clarification_directly(monkeypatch, tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-    ticket = SimpleNamespace(
-        id=uuid.uuid4(),
-        reference="T-000007",
-        title="Need clarification",
-        status="ai_triage",
-        urgent=False,
-        last_processed_hash=None,
-        clarification_rounds=0,
-        requeue_requested=False,
-        requeue_trigger=None,
-    )
-    context = _make_context(ticket=ticket)
-    publication_hash = symbols["build_requester_visible_fingerprint"](context)
-    run = SimpleNamespace(
-        id=uuid.uuid4(),
-        ticket_id=ticket.id,
-        status="running",
-        input_hash=publication_hash,
-        ended_at=None,
-        error_text=None,
-    )
-    fake_db = _FakeDb(run=run)
-    events: list[str] = []
-
-    @contextmanager
-    def fake_session_scope(_settings):
-        yield fake_db
-
-    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
-    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
-    monkeypatch.setattr("worker.triage.apply_ai_classification", lambda *args, **kwargs: events.append("classification"))
-    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: events.append("internal"))
-    observed = {}
-    monkeypatch.setattr(
-        "worker.triage.publish_ai_public_reply",
-        lambda *args, **kwargs: (
-            events.append(f"public:{kwargs['last_ai_action']}"),
-            observed.setdefault("body_markdown", kwargs["body_markdown"]),
-        ),
-    )
-    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: events.append("draft"))
-    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: events.append("route"))
-    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: events.append("requeue"))
-
-    symbols["_apply_success_result"](
-        settings,
-        run_id=run.id,
-        result=symbols["validate_triage_result"](
-            _valid_payload(
-                recommended_next_action="ask_clarification",
-                needs_clarification=True,
-                clarifying_questions=["Which report is affected?"],
-                auto_public_reply_allowed=True,
-                public_reply_markdown="",
-                internal_note_markdown="",
-            ),
-            settings,
-        ),
-    )
-
-    assert events == ["classification", "public:ask_clarification", "requeue"]
-    assert run.status == "succeeded"
-    assert run.error_text is None
-    assert "Which report is affected?" in observed["body_markdown"]
-
-
-def test_apply_success_result_skips_blank_internal_note(monkeypatch, tmp_path):
-    symbols = _load_worker_symbols()
-    settings = _make_settings(tmp_path)
-    ticket = SimpleNamespace(
-        id=uuid.uuid4(),
-        reference="T-000008",
-        title="Self-contained answer",
-        status="ai_triage",
-        urgent=False,
-        last_processed_hash=None,
-        clarification_rounds=0,
-        requeue_requested=False,
-        requeue_trigger=None,
-    )
-    context = _make_context(ticket=ticket)
-    publication_hash = symbols["build_requester_visible_fingerprint"](context)
-    run = SimpleNamespace(
-        id=uuid.uuid4(),
-        ticket_id=ticket.id,
-        status="running",
-        input_hash=publication_hash,
-        ended_at=None,
-        error_text=None,
-    )
-    fake_db = _FakeDb(run=run)
-    observed = {"internal": 0, "public": 0}
-
-    @contextmanager
-    def fake_session_scope(_settings):
-        yield fake_db
-
-    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
-    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
-    monkeypatch.setattr("worker.triage.apply_ai_classification", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        "worker.triage.publish_ai_internal_note",
-        lambda *args, **kwargs: observed.__setitem__("internal", observed["internal"] + 1),
-    )
-    monkeypatch.setattr(
-        "worker.triage.publish_ai_public_reply",
-        lambda *args, **kwargs: observed.__setitem__("public", observed["public"] + 1),
-    )
-    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: None)
-    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: None)
-    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: None)
-
-    symbols["_apply_success_result"](
-        settings,
-        run_id=run.id,
-        result=symbols["validate_triage_result"](
-            _valid_payload(internal_note_markdown=""),
-            settings,
-        ),
-    )
-
-    assert observed == {"internal": 0, "public": 1}
+    assert manifest_runs == [run.id]
 
 
 def test_process_ai_run_marks_failed_when_publication_step_raises(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
-    prepared = SimpleNamespace(run_id=uuid.uuid4(), prepared_codex_run=SimpleNamespace())
+    prepared = SimpleNamespace(run_id=uuid.uuid4(), ticket_id=uuid.uuid4(), context=SimpleNamespace())
+    pipeline_result = SimpleNamespace(
+        triage_result=SimpleNamespace(),
+        specialist_step=SimpleNamespace(
+            step_id=uuid.uuid4(),
+            prepared=SimpleNamespace(spec=SimpleNamespace(id="support", output_contract="triage_result"), model_name="gpt-test"),
+            output_payload=_valid_payload(),
+        ),
+        force_human_review_reason=None,
+    )
     observed = {}
 
     monkeypatch.setattr("worker.triage._prepare_run", lambda *args, **kwargs: prepared)
-    monkeypatch.setattr(
-        "worker.triage.execute_codex_run",
-        lambda *args, **kwargs: SimpleNamespace(output_payload=_valid_payload()),
-    )
-    monkeypatch.setattr(
-        "worker.triage.validate_triage_result",
-        lambda payload, settings: SimpleNamespace(),
-    )
+    monkeypatch.setattr("worker.triage.execute_triage_pipeline", lambda *args, **kwargs: pipeline_result)
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "worker.triage._apply_success_result",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("publish failed")),
@@ -1230,16 +1055,17 @@ def test_process_ai_run_marks_failed_when_publication_step_raises(monkeypatch, t
     assert observed["error_text"] == "Unexpected worker error: publish failed"
 
 
-def test_process_ai_run_marks_failed_when_codex_errors(monkeypatch, tmp_path):
+def test_process_ai_run_marks_failed_when_step_errors(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
-    prepared = SimpleNamespace(run_id=uuid.uuid4(), prepared_codex_run=SimpleNamespace())
+    prepared = SimpleNamespace(run_id=uuid.uuid4(), ticket_id=uuid.uuid4(), context=SimpleNamespace())
     observed = {}
 
     monkeypatch.setattr("worker.triage._prepare_run", lambda *args, **kwargs: prepared)
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        "worker.triage.execute_codex_run",
-        lambda *args, **kwargs: (_ for _ in ()).throw(symbols["CodexRunError"]("codex failed")),
+        "worker.triage.execute_triage_pipeline",
+        lambda *args, **kwargs: (_ for _ in ()).throw(symbols["StepRunError"]("router failed")),
     )
     monkeypatch.setattr(
         "worker.triage._mark_failed",
@@ -1249,7 +1075,7 @@ def test_process_ai_run_marks_failed_when_codex_errors(monkeypatch, tmp_path):
     symbols["process_ai_run"](settings, run_id=prepared.run_id)
 
     assert observed["run_id"] == prepared.run_id
-    assert observed["error_text"] == "codex failed"
+    assert observed["error_text"] == "router failed"
 
 
 def test_mark_failed_publishes_internal_failure_note_and_routes_ticket(monkeypatch, tmp_path):
@@ -1271,6 +1097,7 @@ def test_mark_failed_publishes_internal_failure_note_and_routes_ticket(monkeypat
     )
     fake_db = _FakeDb(run=run, ticket=ticket)
     observed = {"failure_note": 0, "status_changes": 0, "requeue": 0}
+    manifest_runs: list[uuid.UUID] = []
 
     @contextmanager
     def fake_session_scope(_settings):
@@ -1292,14 +1119,91 @@ def test_mark_failed_publishes_internal_failure_note_and_routes_ticket(monkeypat
         "worker.triage.process_deferred_requeue",
         lambda *args, **kwargs: observed.__setitem__("requeue", observed["requeue"] + 1),
     )
+    monkeypatch.setattr(
+        "worker.triage.write_run_manifest_snapshot",
+        lambda settings, run_id: manifest_runs.append(run_id),
+    )
 
     symbols["_mark_failed"](settings, run_id=run.id, error_text="boom")
 
     assert run.status == "failed"
+    assert run.pipeline_version == "agent-pipeline-v1"
     assert run.error_text == "boom"
     assert run.ended_at is not None
     assert ticket.status == "waiting_on_dev_ti"
     assert observed == {"failure_note": 1, "status_changes": 1, "requeue": 1}
+    assert manifest_runs == [run.id]
+
+
+def test_write_run_manifest_snapshot_serializes_terminal_run_state(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=uuid.uuid4(),
+        pipeline_version="agent-pipeline-v1",
+        status="human_review",
+        final_step_id=uuid.uuid4(),
+        final_agent_spec_id="support",
+        final_output_contract="triage_result",
+        error_text="needs approval",
+        ended_at=SimpleNamespace(isoformat=lambda: "2026-04-06T01:00:00+00:00"),
+    )
+    step = SimpleNamespace(
+        id=uuid.uuid4(),
+        step_index=2,
+        step_kind="specialist",
+        agent_spec_id="support",
+        agent_spec_version="1",
+        output_contract="triage_result",
+        status="succeeded",
+        model_name="gpt-test",
+        prompt_path="/tmp/prompt.txt",
+        schema_path="/tmp/schema.json",
+        final_output_path="/tmp/final.json",
+        stdout_jsonl_path="/tmp/stdout.jsonl",
+        stderr_path="/tmp/stderr.txt",
+    )
+    observed = {}
+
+    class _FakeScalarResult:
+        def __init__(self, items):
+            self._items = items
+
+        def scalars(self):
+            return self
+
+        def __iter__(self):
+            return iter(self._items)
+
+    class _FakeManifestDb:
+        def get(self, model, key):
+            if getattr(model, "__name__", "") == "AIRun" and key == run.id:
+                return run
+            return None
+
+        def execute(self, statement):
+            return _FakeScalarResult([step])
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield _FakeManifestDb()
+
+    monkeypatch.setattr("worker.step_runner.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.step_runner.build_run_dir", lambda settings, ticket_id, run_id: tmp_path / "run")
+    monkeypatch.setattr(
+        "worker.step_runner.write_run_manifest",
+        lambda run_dir, **kwargs: observed.update({"run_dir": run_dir, **kwargs}),
+    )
+
+    symbols["write_run_manifest_snapshot"](settings, run_id=run.id)
+
+    assert observed["status"] == "human_review"
+    assert observed["pipeline_version"] == "agent-pipeline-v1"
+    assert observed["final_output_contract"] == "triage_result"
+    assert observed["error_text"] == "needs approval"
+    assert observed["ended_at"] == "2026-04-06T01:00:00+00:00"
+    assert observed["steps"][0]["status"] == "succeeded"
 
 
 def test_heartbeat_loop_emits_while_stop_event_controls_exit(monkeypatch, tmp_path):
@@ -1321,7 +1225,6 @@ def test_heartbeat_loop_emits_while_stop_event_controls_exit(monkeypatch, tmp_pa
 
 def test_emit_worker_heartbeat_initializes_system_state_defaults(monkeypatch, tmp_path):
     pytest.importorskip("sqlalchemy")
-    pytest.importorskip("argon2")
     from worker.main import emit_worker_heartbeat
 
     settings = _make_settings(tmp_path)
@@ -1339,5 +1242,5 @@ def test_emit_worker_heartbeat_initializes_system_state_defaults(monkeypatch, tm
     bootstrap_state = fake_db.objects[("SystemState", "bootstrap_version")]
     heartbeat_state = fake_db.objects[("SystemState", "worker_heartbeat")]
     assert fake_db.flush_calls == 1
-    assert bootstrap_state.value_json == {"version": "stage1-v1"}
+    assert bootstrap_state.value_json == {"version": "stage1-v3"}
     assert heartbeat_state.value_json["status"] == "alive"

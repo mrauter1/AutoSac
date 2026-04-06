@@ -1,0 +1,10 @@
+{
+  "id": "specialist-selector",
+  "version": "1",
+  "kind": "selector",
+  "description": "Choose the best specialist from the allowed candidates for a selected route target.",
+  "skill_id": "triage-specialist-selector",
+  "output_contract": "specialist_selector_result",
+  "model_override": null,
+  "timeout_seconds_override": null
+}
