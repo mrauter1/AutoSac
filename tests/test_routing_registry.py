@@ -132,11 +132,38 @@ def test_load_routing_registry_rejects_invalid_auto_config_for_direct_ai(tmp_pat
         load_routing_registry(_write_registry(tmp_path, payload))
 
 
+def test_load_routing_registry_rejects_missing_selector_spec_id_for_auto_targets(tmp_path: Path) -> None:
+    payload = _registry_payload()
+    payload["selector_spec_id"] = None
+
+    with pytest.raises(RoutingRegistryError, match="selector_spec_id is required"):
+        load_routing_registry(_write_registry(tmp_path, payload))
+
+
 def test_load_routing_registry_rejects_invalid_none_config_for_direct_ai(tmp_path: Path) -> None:
     payload = _registry_payload()
     payload["route_targets"][0]["handler"]["specialist_selection"] = {"mode": "none"}
 
     with pytest.raises(RoutingRegistryError, match="must use kind=human_assist"):
+        load_routing_registry(_write_registry(tmp_path, payload))
+
+
+def test_load_routing_registry_rejects_invalid_publish_policy_confidence(tmp_path: Path) -> None:
+    payload = _registry_payload()
+    payload["route_targets"][0]["publish_policy"]["min_response_confidence_for_auto_publish"] = "sometimes"
+
+    with pytest.raises(RoutingRegistryError, match="invalid min_response_confidence_for_auto_publish"):
+        load_routing_registry(_write_registry(tmp_path, payload))
+
+
+def test_load_routing_registry_rejects_human_assist_auto_publish(tmp_path: Path) -> None:
+    payload = _registry_payload()
+    for route_target in payload["route_targets"]:
+        if route_target["id"] == "manual_review":
+            route_target["publish_policy"]["allow_auto_publish"] = True
+            break
+
+    with pytest.raises(RoutingRegistryError, match="must not allow auto publish"):
         load_routing_registry(_write_registry(tmp_path, payload))
 
 
