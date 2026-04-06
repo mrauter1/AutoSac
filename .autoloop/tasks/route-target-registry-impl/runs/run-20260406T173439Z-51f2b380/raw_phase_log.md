@@ -1479,3 +1479,114 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=test | phase=producer | cycle=1 | attempt=1 | thread_id=019d641e-60af-7c23-8f20-e00eeba4bde4
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/test_producer.md
+session_id=019d641e-60af-7c23-8f20-e00eeba4bde4
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=test | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d641e-60af-7c23-8f20-e00eeba4bde4
+---
+I’m treating this as a test-hardening pass on the cleanup-verification phase, not a reimplementation pass. First I’m reading the active test artifacts and the current cleanup-related tests so I can fill any remaining coverage gaps without widening scope.
+
+There’s one obvious test gap left from the cleanup patch: the new historical ops adapter path itself. The current suite covers the migration/model/runtime cleanup well, but I don’t see direct assertions that `present_ai_run_output()` now exposes legacy `confidence`/`impact_level`/`development_needed` from `triage_result`, so I’m adding that before I update the phase artifacts.
+
+I’ve identified three test additions that materially harden this phase without widening it: one for the free-form legacy `triage_result` contract, one for the presenter’s legacy route-target fallback, and one for the presenter exposing legacy triage fields into ops detail. I’m patching those now, then I’ll rerun the focused suite and update the test-phase artifacts.
+
+I’ve patched the coverage gaps without changing runtime code. Now I’m running the focused suite again so the strategy/feedback artifacts reflect the actual post-test state, not just the intended additions.
+
+The compile pass is clean. The test run is still going; once that closes I’ll update the test strategy, append the test-author feedback summary, and only then decide whether this turn needs a test-side decision note.
+
+The new tests are green. I’m doing one last smoke pass on the explicit readiness commands as part of the test-phase evidence, then I’ll write the phase artifacts with the exact behavior-to-coverage map.
+
+I have the final evidence I need. I’m writing the test strategy as an explicit behavior-to-coverage map, then I’ll append the test-summary feedback and one test-side decision note that explains why these assertions live at the adapter boundary rather than adding a new migration harness.
+
+Scope considered
+
+- Cleanup-verification test scope only: the new `ticket_class` cleanup migration/model state, legacy `triage_result` compatibility boundary, ops historical presentation, and the required smoke/readiness commands.
+
+What I analyzed
+
+- Existing cleanup-phase coverage in [tests/test_foundation_persistence.py](/home/marcelo/code/AutoSac/tests/test_foundation_persistence.py), [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py), [tests/test_ops_workflow.py](/home/marcelo/code/AutoSac/tests/test_ops_workflow.py), and [tests/test_routing_registry.py](/home/marcelo/code/AutoSac/tests/test_routing_registry.py).
+- The cleanup-phase decisions and the new adapter behavior in [app/ai_run_presenters.py](/home/marcelo/code/AutoSac/app/ai_run_presenters.py) and [app/routes_ops.py](/home/marcelo/code/AutoSac/app/routes_ops.py).
+
+What I changed
+
+- Added a contract test in [tests/test_routing_registry.py](/home/marcelo/code/AutoSac/tests/test_routing_registry.py) that locks `triage_result.ticket_class` to a free-form historical string instead of a hardcoded taxonomy literal.
+- Added presenter coverage in [tests/test_ops_workflow.py](/home/marcelo/code/AutoSac/tests/test_ops_workflow.py) for:
+  - fallback route-target presentation from legacy `ticket_class`
+  - legacy confidence/impact/development-needed extraction from `triage_result`
+  - `_ticket_detail_context()` carrying those legacy fields into ops detail state
+- Updated [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/cleanup-verification/test_strategy.md), [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/cleanup-verification/feedback.md), and appended the test-side decision note under the active header in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt).
+
+Key findings / decisions
+
+- The main remaining gap was adapter-boundary coverage, not migration/runtime coverage; the added tests now pin that historical compatibility path explicitly.
+- Validation passed:
+  - `python -m py_compile tests/test_routing_registry.py tests/test_ops_workflow.py`
+  - `.venv/bin/pytest -q tests/test_routing_registry.py tests/test_ops_workflow.py tests/test_foundation_persistence.py tests/test_ai_worker.py` -> `113 passed`
+  - `python scripts/run_web.py --check` -> `ok`
+  - `python scripts/run_worker.py --check` -> `ok`
+
+Open issues / next step
+
+- No open test-phase issues in scope.
+- The cleanup phase now has direct coverage for migration/model cleanup, preserved runtime invariants, historical presenter fallback, and the required readiness/smoke commands.
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=test | phase=verifier | cycle=1 | attempt=1 | thread_id=019d641e-60af-7c23-8f20-e00eeba4bde4
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/test_verifier.md
+session_id=019d641e-60af-7c23-8f20-e00eeba4bde4
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=test | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d641e-60af-7c23-8f20-e00eeba4bde4
+---
+I’m auditing the cleanup-verification test additions against the phase contract and the shared decisions. First I’m reading the active test artifacts plus the newly added regression tests so I can judge whether they actually cover the changed behaviors and preserved invariants, not just whether they pass.
+
+I don’t see an obvious contract miss yet, but I’m doing one last targeted search for adjacent fallback coverage before I mark this complete. If the suite already covers raw unknown route-target display elsewhere, there’s no reason to turn a cleanup-phase audit into wider churn.
+
+The added tests still look coherent and targeted. I’m waiting on the rerun outputs to settle, then I’ll update the auditor-owned criteria/feedback based on whether anything material showed up in the final pass.
+
+I’ve finished the final pass. The targeted regression suite and both smoke checks are green, and I didn’t find a missing material coverage path or flaky assumption in the cleanup-phase additions, so I’m marking the audit artifacts accordingly.
+
+Scope considered
+
+- Cleanup-verification test scope only: the newly added regression tests in `tests/test_routing_registry.py` and `tests/test_ops_workflow.py`, the phase test strategy, the shared decisions for historical compatibility, and the required smoke/readiness commands.
+
+What I analyzed
+
+- The active test artifacts in `.autoloop/tasks/route-target-registry-impl/test/phases/cleanup-verification/`.
+- The cleanup-phase test additions covering free-form legacy `triage_result.ticket_class`, presenter fallback from legacy `ticket_class`, and ops-detail propagation of legacy triage fields.
+- The shared decisions that keep historical compatibility bounded to presentation/backfill paths without restoring live runtime writes.
+
+What I reviewed
+
+- Confirmed the added tests align with AC-1 through AC-3 and the cleanup-phase test strategy.
+- Re-ran `.venv/bin/pytest -q tests/test_routing_registry.py tests/test_ops_workflow.py tests/test_foundation_persistence.py tests/test_ai_worker.py` and got `113 passed`.
+- Re-ran `python scripts/run_web.py --check` and `python scripts/run_worker.py --check`; both returned `ok`.
+- Updated `criteria.md` to all checked and appended `TST-000` to `feedback.md`.
+
+Key findings / decisions
+
+- No blocking findings.
+- No non-blocking audit defects were found in phase scope.
+- The new tests cover the most material cleanup-phase risk: historical compatibility surviving at the adapter boundary while `ticket_class` remains absent from the live runtime path.
+
+Open issues / next step
+
+- No open test-audit issues. This test phase is ready to close.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
