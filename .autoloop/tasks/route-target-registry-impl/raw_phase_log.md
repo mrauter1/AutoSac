@@ -295,3 +295,53 @@ Key findings / decisions
 Open issues / next step
 
 - The next phase can build the additive migration and dual-write foundation on top of this registry layer, then move runtime selector/human-assist execution and publication policy onto the new contracts.
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=verifier | cycle=1 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_verifier.md
+session_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+I’m reviewing the phase-local implementation against the spec, phase contract, and shared decisions first, then I’ll update only the verifier-owned autoloop artifacts with the findings and criteria status.
+
+I’ve narrowed the review to two things now: whether the registry/prompt/bootstrap goals are actually met, and whether the compatibility-phase worker path quietly regressed despite the “no persistence behavior change yet” boundary. I’m checking the remaining hardcoded-taxonomy surfaces and the live specialist prompt/contract alignment now.
+
+I found one material regression risk in the compatibility-phase worker path, and it’s localized: the live specialist prompts no longer match the still-live `triage_result` contract. I’m recording that as a blocking finding and marking the criteria to match.
+
+Scope considered
+
+- Phase-local review of the registry-contract foundation work against the authoritative spec, active phase contract, implementation notes, and shared decisions.
+- I broadened only far enough to inspect the current live worker path because this phase explicitly preserves runtime persistence behavior while changing prompt/contract scaffolding.
+
+What I analyzed
+
+- The implemented registry, selector spec, routing-registry loader, prompt renderer, workspace/bootstrap checks, output-contract module, and the compatibility-phase router/specialist pipeline path.
+- The active verifier artifacts in [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/criteria.md) and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/feedback.md), plus the shared decisions ledger in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt).
+
+What I reviewed
+
+- Whether AC-1 through AC-3 are met without quietly regressing the still-live compatibility worker path.
+- Whether the implementation stays within the phase boundary of “no runtime persistence behavior change yet”.
+- Whether the prompt/manifest/runtime contract alignment remains coherent while specialist execution is still on `triage_result`.
+
+Key findings / decisions
+
+- Updated [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/criteria.md): `Technical Debt / Simplicity` and `Maintainability / Validation` are checked; the correctness/safety criteria remain unchecked because there is a blocking regression risk.
+- Appended one blocking finding to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/feedback.md):
+- `IMP-001`: the live specialist manifests still execute `triage_result`, but the rewritten specialist prompts no longer explicitly instruct the model how to satisfy the required legacy `ticket_class` field. That leaves the current compatibility worker path dependent on schema-only inference and can increase validation failures or mismatch downgrades despite the phase’s “preserve current persistence behavior” contract.
+
+Open issues / next step
+
+- The producer should either keep a centralized compatibility-phase prompt instruction that any required `ticket_class` field must match the selected route target, or complete the specialist contract/runtime cutover in the same phase so prompts and manifests are no longer out of sync.
+- Review is not complete yet because that prompt/runtime alignment issue is blocking.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
