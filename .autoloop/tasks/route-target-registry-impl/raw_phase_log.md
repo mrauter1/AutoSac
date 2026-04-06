@@ -862,3 +862,53 @@ Open issues / next step
 
 - No new blocker found in this follow-up.
 - The next step is reviewer re-verification so [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/feedback.md) and [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/criteria.md) can be updated if `IMP-001` is satisfied.
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=verifier | cycle=2 | attempt=1 | thread_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_verifier.md
+session_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+---
+I’m re-reviewing the phase after the implementer’s follow-up. First I’m checking the updated persistence test and the current reviewer artifacts so I can decide whether the earlier blocker is actually resolved before I touch the criteria or feedback.
+
+The blocker looks resolved: the suite now has direct persistence coverage for backfill and selector-row insertion, and the earlier dual-write / disabled-target checks are still intact. I’m updating the reviewer artifacts to reflect that there are no remaining blocking findings and the phase is complete.
+
+Scope considered
+
+- Phase-local re-review of additive migration foundation after the implementer’s cycle-2 follow-up.
+- I limited edits to reviewer-owned artifacts: [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/criteria.md) and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/feedback.md).
+
+What I analyzed
+
+- The updated persistence coverage in [tests/test_foundation_persistence.py](/home/marcelo/code/AutoSac/tests/test_foundation_persistence.py).
+- The already-implemented compatibility helper and model surfaces in [shared/ticketing.py](/home/marcelo/code/AutoSac/shared/ticketing.py) and [shared/models.py](/home/marcelo/code/AutoSac/shared/models.py).
+- The producer notes in [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/implementation_notes.md).
+
+What I reviewed
+
+- Whether the earlier blocker `IMP-001` was actually resolved.
+- Whether AC-1 through AC-3 are now satisfied without introducing new regressions or out-of-scope behavior.
+
+Key findings / decisions
+
+- No blocking findings remain.
+- `IMP-001` was updated to non-blocking/resolved in [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/feedback.md) because the suite now includes direct sqlite-backed persistence coverage for:
+  - additive `route_target_id` backfill on stored ticket rows
+  - successful persistence of `AIRunStep(step_kind="selector")`
+- All criteria are now checked in [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/criteria.md).
+
+Open issues / next step
+
+- No open issue remains in this phase-local review.
+- Phase can be treated as complete for the current scope.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
