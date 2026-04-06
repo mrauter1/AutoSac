@@ -189,3 +189,150 @@ phase_mode=single
 phase_ids=registry-contract-foundation,additive-migration-foundation,runtime-routing-ops-cutover,cleanup-verification
 explicit=True
 current_phase_index=0
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=producer | cycle=1 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+provider=codex
+mode=start
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_producer.md
+session_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+I’m pulling the phase contract, spec, and current routing/prompt/bootstrap code first so I can map the required changes before editing. Then I’ll implement only the registry-contract foundation scope and verify the affected checks and tests.
+
+I’ve confirmed the planning context and phase boundaries. Next I’m tracing the current registry-adjacent code paths and the already-added untracked files so I can implement this phase on top of the existing branch state instead of fighting it.
+
+The current branch already has the agent-spec and worker pipeline scaffolding in place, but the taxonomy is still hardcoded exactly where the phase says it should stop being hardcoded. I’m reading the prompt templates, workspace contract text, and validation entry points now so the edits line up with the existing partial refactor.
+
+The code confirms the current mismatch: prompt text, workspace instructions, and runtime schemas still embed the legacy taxonomy. I’m moving to the contract section of the spec now to mirror the exact registry shape and validation rules instead of inventing them from the plan summary.
+
+I have the exact registry and contract rules now. I’m pulling the later persistence and readiness sections plus the current tests so the implementation lands on the right interfaces and I can add only the phase-local coverage the spec expects.
+
+I’m checking the remaining runtime touch points before editing. The key question is how far to move the live pipeline in this phase without violating the explicit “no persistence behavior change yet” boundary, so I’m reading the current triage code and test expectations around contract usage.
+
+I’ve resolved the likely blast radius. The safest foundation pass is: make router and prompt rendering registry-driven now, add selector support and validations, keep the current specialist persistence path intact for this phase, and wire registry integrity into bootstrap/readiness so startup fails early on bad topology.
+
+Plan for this phase:
+1. Add the registry foundation: `agent_specs/registry.json`, selector spec folder, and `shared/routing_registry.py` with strict topology/spec validation and typed accessors.
+2. Update shared/runtime scaffolding: allow selector manifests, wire registry validation into workspace/bootstrap/readiness, and add contract models plus validation hooks for registry-driven IDs.
+3. Refactor prompt rendering and prompt templates to use generated route-target/specialist catalogs and route-target placeholders without hardcoded taxonomy text.
+4. Adjust the current pipeline just enough to consume the new router contract through the registry while keeping the legacy specialist persistence path unchanged for this phase.
+5. Add targeted tests for registry validation, prompt rendering, startup/workspace integrity, and the minimal router-path compatibility surface, then update implementation notes and decisions.
+
+I’m making the foundation edits now: adding the registry and selector spec, then replacing the taxonomy-bound prompt/skill text with registry-driven placeholders while keeping the current specialist write-path in place for this phase.
+
+The registry assets are in. I’m wiring the typed loader and the shared scaffolding now so prompts, startup checks, and router-path validation all resolve through one canonical registry instead of literals spread across modules.
+
+I found two schema-shape issues while wiring the loader: some registry fields are optional by spec, and the validator needs to allow them without weakening the fail-fast behavior. I’m tightening that now before I hook the runtime-side contract validation on top of it.
+
+I’m replacing the contract module next. The new models will validate registry-backed `route_target_id` and `specialist_id` values, but I’m keeping `triage_result` available as a legacy model so this phase doesn’t force the later publication/persistence refactor in the same diff.
+
+I’m on the prompt/runtime bridge now. This is the part that makes the registry matter operationally in this phase: generated catalogs, route-target handoff placeholders, and the current router path resolving specialists through the registry instead of the hardcoded map.
+
+The main plumbing is in place. I’m doing a read pass on the new loader and prompt formatter now to catch any schema/typing mistakes before I move on to tests and the remaining contract updates.
+
+The core code compiles. I’m updating the targeted tests now: first the existing worker prompt/router helpers so they match the new router contract, then I’ll add dedicated registry and prompt-rendering coverage for the new phase behavior.
+
+I’m adding the phase-local coverage now: strict registry validation cases, prompt rendering off the generated catalogs, contract checks for the new registry-backed IDs, and a readiness-path test that proves a broken registry stops startup.
+
+I’ve reached verification. I’m running the new registry/prompt tests plus the existing worker/hardening slices they touch so I can catch any contract drift before updating the phase artifacts.
+
+The first test pass surfaced a few failures rather than a broad breakage, which is good. I’m pulling the exact failing assertions now and will patch those instead of widening the change set.
+
+One failure is real code-path wrapping, one is a prompt assertion mismatch, and the rest are environmental: the web stack can’t import because `python-multipart` isn’t installed here. I’m checking whether that package is supposed to be part of the repo before I decide between a repo fix and a test-only skip.
+
+`python-multipart` is already declared in `requirements.txt`, so the remaining web-script failures are just this environment missing a required runtime dependency. I’m installing that declared package rather than weakening the tests.
+
+The remaining repo-side fixes are small: wrap registry validation errors as contract errors, align the selector prompt wording, and update the bootstrap-version assertions to the new workspace contract version. After that I’ll rerun the same slice under the repo venv so the subprocess checks inherit the declared dependencies.
+
+I’ve patched the real failures. I’m rerunning the same slice under the repo venv now so the script subprocesses use the declared dependency set instead of the host Python.
+
+The rerun is clean so far. I’m waiting for the final test exit and then I’ll update the phase notes and decision ledger with the exact scope, non-changes, and validation performed.
+
+I’ve finished code and validation. I’m writing the phase artifacts now: concise implementation notes for the next turn, plus the few non-obvious decisions that would be easy to drift from if they were left implicit.
+
+I’m doing one last diff scan for just the files touched in this phase so the close-out reflects the actual blast radius and I don’t accidentally summarize unrelated branch work.
+
+Scope considered
+
+- Phase-local foundation only: registry seed, selector spec support, registry validation, registry-driven prompt scaffolding, and workspace/readiness checks.
+- I kept selector runtime orchestration, publication policy, `route_target_id` persistence migration, and ops/UI cutover out of scope.
+
+What I analyzed
+
+- The contract in [Autosac_Route_Target_Registry_PRD_ARD.md](/home/marcelo/code/AutoSac/Autosac_Route_Target_Registry_PRD_ARD.md), the active phase artifacts, and the current agent-spec, prompt, workspace, and worker paths.
+- The existing router/specialist execution flow in [worker/pipeline.py](/home/marcelo/code/AutoSac/worker/pipeline.py), prompt rendering in [worker/prompt_renderer.py](/home/marcelo/code/AutoSac/worker/prompt_renderer.py), contract validation in [worker/output_contracts.py](/home/marcelo/code/AutoSac/worker/output_contracts.py), and bootstrap/readiness checks in [shared/workspace.py](/home/marcelo/code/AutoSac/shared/workspace.py).
+
+What I changed
+
+- Added the canonical registry in [agent_specs/registry.json](/home/marcelo/code/AutoSac/agent_specs/registry.json) and the selector spec in [agent_specs/specialist-selector/manifest.json](/home/marcelo/code/AutoSac/agent_specs/specialist-selector/manifest.json).
+- Added typed registry loading/validation in [shared/routing_registry.py](/home/marcelo/code/AutoSac/shared/routing_registry.py) and extended [shared/agent_specs.py](/home/marcelo/code/AutoSac/shared/agent_specs.py) to allow `kind="selector"`.
+- Made router/selector/specialist prompt rendering registry-driven in [worker/prompt_renderer.py](/home/marcelo/code/AutoSac/worker/prompt_renderer.py) and updated the prompt/skill text under [agent_specs/router/prompt.md](/home/marcelo/code/AutoSac/agent_specs/router/prompt.md) and [agent_specs/support/prompt.md](/home/marcelo/code/AutoSac/agent_specs/support/prompt.md).
+- Replaced router/selector/foundation contract definitions and registry-backed validation in [worker/output_contracts.py](/home/marcelo/code/AutoSac/worker/output_contracts.py), and wired the current compatibility router path through the registry in [worker/pipeline.py](/home/marcelo/code/AutoSac/worker/pipeline.py) and [worker/step_runner.py](/home/marcelo/code/AutoSac/worker/step_runner.py).
+- Bumped the workspace contract to `stage1-v3` in [shared/contracts.py](/home/marcelo/code/AutoSac/shared/contracts.py), made [shared/workspace.py](/home/marcelo/code/AutoSac/shared/workspace.py) fail fast on bad registry state, and updated the phase artifacts in [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/implementation_notes.md) and [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt).
+- Added targeted coverage in [tests/test_routing_registry.py](/home/marcelo/code/AutoSac/tests/test_routing_registry.py) and updated affected expectations in [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py), [tests/test_foundation_persistence.py](/home/marcelo/code/AutoSac/tests/test_foundation_persistence.py), and [tests/test_hardening_validation.py](/home/marcelo/code/AutoSac/tests/test_hardening_validation.py).
+
+Key findings / decisions
+
+- I intentionally kept specialist runtime execution on legacy `triage_result` in this phase so persistence/publication behavior does not move ahead of the later runtime-cutover phase.
+- The seed registry includes `manual_review` but keeps it disabled for new runs, and marks `unknown` as not human-assist-eligible for future auto-candidate expansion.
+- Validation passed with `.venv/bin/pytest -q tests/test_routing_registry.py tests/test_ai_worker.py tests/test_hardening_validation.py tests/test_foundation_persistence.py` with `81 passed`.
+
+Open issues / next step
+
+- The next phase can build the additive migration and dual-write foundation on top of this registry layer, then move runtime selector/human-assist execution and publication policy onto the new contracts.
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=verifier | cycle=1 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_verifier.md
+session_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+I’m reviewing the phase-local implementation against the spec, phase contract, and shared decisions first, then I’ll update only the verifier-owned autoloop artifacts with the findings and criteria status.
+
+I’ve narrowed the review to two things now: whether the registry/prompt/bootstrap goals are actually met, and whether the compatibility-phase worker path quietly regressed despite the “no persistence behavior change yet” boundary. I’m checking the remaining hardcoded-taxonomy surfaces and the live specialist prompt/contract alignment now.
+
+I found one material regression risk in the compatibility-phase worker path, and it’s localized: the live specialist prompts no longer match the still-live `triage_result` contract. I’m recording that as a blocking finding and marking the criteria to match.
+
+Scope considered
+
+- Phase-local review of the registry-contract foundation work against the authoritative spec, active phase contract, implementation notes, and shared decisions.
+- I broadened only far enough to inspect the current live worker path because this phase explicitly preserves runtime persistence behavior while changing prompt/contract scaffolding.
+
+What I analyzed
+
+- The implemented registry, selector spec, routing-registry loader, prompt renderer, workspace/bootstrap checks, output-contract module, and the compatibility-phase router/specialist pipeline path.
+- The active verifier artifacts in [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/criteria.md) and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/feedback.md), plus the shared decisions ledger in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt).
+
+What I reviewed
+
+- Whether AC-1 through AC-3 are met without quietly regressing the still-live compatibility worker path.
+- Whether the implementation stays within the phase boundary of “no runtime persistence behavior change yet”.
+- Whether the prompt/manifest/runtime contract alignment remains coherent while specialist execution is still on `triage_result`.
+
+Key findings / decisions
+
+- Updated [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/criteria.md): `Technical Debt / Simplicity` and `Maintainability / Validation` are checked; the correctness/safety criteria remain unchecked because there is a blocking regression risk.
+- Appended one blocking finding to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/feedback.md):
+- `IMP-001`: the live specialist manifests still execute `triage_result`, but the rewritten specialist prompts no longer explicitly instruct the model how to satisfy the required legacy `ticket_class` field. That leaves the current compatibility worker path dependent on schema-only inference and can increase validation failures or mismatch downgrades despite the phase’s “preserve current persistence behavior” contract.
+
+Open issues / next step
+
+- The producer should either keep a centralized compatibility-phase prompt instruction that any required `ticket_class` field must match the selected route target, or complete the specialist contract/runtime cutover in the same phase so prompts and manifests are no longer out of sync.
+- Review is not complete yet because that prompt/runtime alignment issue is blocking.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
