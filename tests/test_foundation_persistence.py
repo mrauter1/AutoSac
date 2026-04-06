@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import json
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -266,6 +267,155 @@ def test_route_target_compatibility_migration_adds_backfill_and_selector_step_ki
     assert "UPDATE tickets SET route_target_id = ticket_class" in migration_source
     assert "step_kind IN ('router', 'selector', 'specialist')" in migration_source
     assert "route_target_id IN" not in migration_source
+
+
+def test_route_target_compatibility_persistence_backfills_and_allows_selector_steps(tmp_path):
+    db_path = tmp_path / "route-target-compatibility.db"
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE tickets (
+                id TEXT PRIMARY KEY,
+                ticket_class TEXT,
+                requester_language TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE ai_run_steps (
+                id TEXT PRIMARY KEY,
+                ai_run_id TEXT NOT NULL,
+                step_index INTEGER NOT NULL,
+                step_kind TEXT NOT NULL CHECK(step_kind IN ('router', 'specialist')),
+                agent_spec_id TEXT NOT NULL,
+                agent_spec_version TEXT NOT NULL,
+                output_contract TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO tickets (id, ticket_class, requester_language) VALUES (?, ?, ?)",
+            ("ticket-1", "support", "en"),
+        )
+        connection.execute(
+            "INSERT INTO tickets (id, ticket_class, requester_language) VALUES (?, ?, ?)",
+            ("ticket-2", None, None),
+        )
+        connection.execute(
+            """
+            INSERT INTO ai_run_steps (
+                id,
+                ai_run_id,
+                step_index,
+                step_kind,
+                agent_spec_id,
+                agent_spec_version,
+                output_contract,
+                status,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "step-1",
+                "run-1",
+                1,
+                "router",
+                "router",
+                "1.0.0",
+                "router_result",
+                "succeeded",
+                "2026-04-06T00:00:00+00:00",
+            ),
+        )
+
+        connection.execute("ALTER TABLE tickets ADD COLUMN route_target_id TEXT")
+        connection.execute(
+            "UPDATE tickets SET route_target_id = ticket_class WHERE route_target_id IS NULL AND ticket_class IS NOT NULL"
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE ai_run_steps_v2 (
+                id TEXT PRIMARY KEY,
+                ai_run_id TEXT NOT NULL,
+                step_index INTEGER NOT NULL,
+                step_kind TEXT NOT NULL CHECK(step_kind IN ('router', 'selector', 'specialist')),
+                agent_spec_id TEXT NOT NULL,
+                agent_spec_version TEXT NOT NULL,
+                output_contract TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO ai_run_steps_v2 (
+                id,
+                ai_run_id,
+                step_index,
+                step_kind,
+                agent_spec_id,
+                agent_spec_version,
+                output_contract,
+                status,
+                created_at
+            )
+            SELECT
+                id,
+                ai_run_id,
+                step_index,
+                step_kind,
+                agent_spec_id,
+                agent_spec_version,
+                output_contract,
+                status,
+                created_at
+            FROM ai_run_steps
+            """
+        )
+        connection.execute("DROP TABLE ai_run_steps")
+        connection.execute("ALTER TABLE ai_run_steps_v2 RENAME TO ai_run_steps")
+        connection.execute(
+            """
+            INSERT INTO ai_run_steps (
+                id,
+                ai_run_id,
+                step_index,
+                step_kind,
+                agent_spec_id,
+                agent_spec_version,
+                output_contract,
+                status,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "step-2",
+                "run-1",
+                2,
+                "selector",
+                "specialist-selector",
+                "1.0.0",
+                "specialist_selector_result",
+                "succeeded",
+                "2026-04-06T00:00:01+00:00",
+            ),
+        )
+
+        ticket_rows = connection.execute(
+            "SELECT id, route_target_id FROM tickets ORDER BY id"
+        ).fetchall()
+        step_rows = connection.execute(
+            "SELECT id, step_kind FROM ai_run_steps ORDER BY step_index"
+        ).fetchall()
+
+    assert ticket_rows == [("ticket-1", "support"), ("ticket-2", None)]
+    assert step_rows == [("step-1", "router"), ("step-2", "selector")]
 
 
 def test_models_expose_route_target_storage_without_a_db_taxonomy_constraint():

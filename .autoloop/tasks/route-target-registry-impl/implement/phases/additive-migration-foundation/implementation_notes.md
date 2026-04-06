@@ -63,9 +63,10 @@
 
 - `python -m py_compile shared/models.py shared/ticketing.py worker/triage.py shared/migrations/versions/20260406_0005_route_target_compatibility.py tests/test_foundation_persistence.py tests/test_ai_worker.py`
 - `.venv/bin/pytest -q tests/test_foundation_persistence.py tests/test_ai_worker.py tests/test_routing_registry.py`
-  Result: `75 passed`
+  Result: `76 passed`
 
 ## Centralization / deduplication
 
 - Compatibility-phase route-target persistence is centralized in `shared.ticketing.apply_ai_route_target`.
 - The non-legacy dual-write guard is shared by runtime code and persistence tests instead of being reimplemented in multiple worker call sites.
+- The persistence suite now includes one sqlite-backed schema transition test that covers additive backfill plus `selector` step insertion without introducing a separate bespoke migration harness.

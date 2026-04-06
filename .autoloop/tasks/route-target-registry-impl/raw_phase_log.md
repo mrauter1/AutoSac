@@ -813,3 +813,52 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=producer | cycle=2 | attempt=1 | thread_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_producer.md
+session_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+---
+I’m addressing the reviewer’s only blocker: the new coverage needs to exercise a real persistence path instead of just asserting migration text. First I’m looking for an existing local DB or schema-test harness I can reuse so the fix stays phase-local and doesn’t introduce a one-off testing pattern.
+
+I found a lightweight way to satisfy the blocker without broadening scope: a sqlite-backed persistence test in the existing foundation suite that simulates the additive schema change, verifies `route_target_id` backfill on stored rows, and proves a `selector` step row can be inserted after the step-kind constraint widens.
+
+The persistence test is in place. I’m running the focused suite again now to make sure the sqlite-backed migration simulation behaves as intended and that the existing helper/runtime coverage still passes on top of it.
+
+I’ve resolved the blocker in code and validation. I’m refreshing the implementation notes now so the phase artifact reflects the new sqlite-backed persistence coverage instead of the earlier source-only test posture.
+
+Scope considered
+
+- Phase-local follow-up to resolve reviewer finding `IMP-001` without expanding beyond additive migration foundation scope.
+- I limited code changes to the persistence test surface and refreshed [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/implementation_notes.md). I did not edit reviewer-owned [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/criteria.md).
+
+What I analyzed
+
+- The blocking feedback in [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/feedback.md).
+- Existing schema/persistence test patterns in [tests/test_foundation_persistence.py](/home/marcelo/code/AutoSac/tests/test_foundation_persistence.py) and the lightweight sqlite schema harness already used in [tests/test_hardening_validation.py](/home/marcelo/code/AutoSac/tests/test_hardening_validation.py).
+
+What I changed
+
+- Added a sqlite-backed persistence test in [tests/test_foundation_persistence.py](/home/marcelo/code/AutoSac/tests/test_foundation_persistence.py) that simulates the additive schema transition, verifies `tickets.route_target_id` backfill from stored `ticket_class`, and proves an `ai_run_steps` row with `step_kind="selector"` can be inserted after the widened constraint.
+- Updated [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/implementation_notes.md) to reflect the stronger persistence coverage and the new validation count.
+
+Key findings / decisions
+
+- I reused a small sqlite-backed schema transition test instead of adding a separate migration harness, which keeps the fix local while directly addressing AC-3 and `IMP-001`.
+- Validation passed:
+  - `python -m py_compile tests/test_foundation_persistence.py`
+  - `.venv/bin/pytest -q tests/test_foundation_persistence.py tests/test_ai_worker.py tests/test_routing_registry.py`
+  - Result: `76 passed`
+
+Open issues / next step
+
+- No new blocker found in this follow-up.
+- The next step is reviewer re-verification so [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/feedback.md) and [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/additive-migration-foundation/criteria.md) can be updated if `IMP-001` is satisfied.
