@@ -22,8 +22,8 @@
         </div>
         <h3>{{ ticket.title }}</h3>
         <p class="muted">{{ row.creator.display_name if row.creator else "Unknown requester" }}</p>
-        {% if ticket.ticket_class %}
-        <p class="muted">{{ ticket.ticket_class.replace("_", " ").title() }}</p>
+        {% if row.route_target_display.id %}
+        <p class="muted">{{ row.route_target_display.label }}</p>
         {% endif %}
         {% if row.pending_draft %}
         <p class="muted">Pending draft approval</p>

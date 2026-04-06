@@ -18,11 +18,11 @@
       </select>
     </label>
     <label class="field">
-      <span>Class</span>
-      <select name="ticket_class">
-        <option value="">All classes</option>
-        {% for value in class_options %}
-        <option value="{{ value }}" {% if filters.ticket_class == value %}selected{% endif %}>{{ value.replace("_", " ").title() }}</option>
+      <span>Route target</span>
+      <select name="route_target_id">
+        <option value="">All route targets</option>
+        {% for option in route_target_options %}
+        <option value="{{ option.id }}" {% if filters.route_target_id == option.id %}selected{% endif %}>{{ option.label }}</option>
         {% endfor %}
       </select>
     </label>

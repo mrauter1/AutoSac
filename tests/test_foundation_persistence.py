@@ -434,11 +434,12 @@ def test_models_expose_route_target_storage_without_a_db_taxonomy_constraint():
     assert route_target_constraints == []
 
 
-def test_apply_ai_route_target_dual_writes_route_target_and_legacy_ticket_class():
+def test_apply_ai_route_target_sets_route_target_and_requester_language_without_touching_legacy_ticket_class():
     pytest.importorskip("sqlalchemy")
     from shared.ticketing import apply_ai_route_target
 
     ticket = _make_ticket()
+    ticket.ticket_class = "support"
 
     apply_ai_route_target(ticket, route_target_id="support", requester_language="en")
 
@@ -447,18 +448,17 @@ def test_apply_ai_route_target_dual_writes_route_target_and_legacy_ticket_class(
     assert ticket.requester_language == "en"
 
 
-def test_apply_ai_route_target_rejects_non_legacy_route_targets_during_compatibility_window():
+def test_apply_ai_route_target_allows_manual_review_after_cutover():
     pytest.importorskip("sqlalchemy")
     from shared.ticketing import apply_ai_route_target
 
     ticket = _make_ticket()
 
-    with pytest.raises(ValueError, match="compatibility dual-write window"):
-        apply_ai_route_target(ticket, route_target_id="manual_review", requester_language="en")
+    apply_ai_route_target(ticket, route_target_id="manual_review", requester_language="en")
 
-    assert getattr(ticket, "route_target_id", None) is None
+    assert ticket.route_target_id == "manual_review"
     assert ticket.ticket_class is None
-    assert ticket.requester_language is None
+    assert ticket.requester_language == "en"
 
 
 def test_preauth_login_session_creation_hashes_browser_token_and_sets_short_expiry(monkeypatch):

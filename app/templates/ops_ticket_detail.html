@@ -7,8 +7,11 @@
   <div class="ticket-card__meta">
     <span class="ticket-ref">{{ ticket.reference }}</span>
     <span class="status-pill">{{ ops_status_label(ticket.status) }}</span>
-    {% if ticket.ticket_class %}
-    <span class="status-pill">{{ ticket.ticket_class.replace("_", " ").title() }}</span>
+    {% if route_target_display.id %}
+    <span class="status-pill">{{ route_target_display.label }}</span>
+    {% endif %}
+    {% if route_target_display.kind %}
+    <span class="status-pill">{{ route_target_display.kind.replace("_", " ").title() }}</span>
     {% endif %}
     {% if ticket.urgent %}
     <span class="urgent-pill">Urgent</span>
@@ -72,45 +75,73 @@
       <h2>AI analysis</h2>
       <dl class="meta-list meta-list--compact">
         <div>
-          <dt>Class</dt>
-          <dd>{{ ticket.ticket_class or "Unclassified" }}</dd>
+          <dt>Route target</dt>
+          <dd>{{ route_target_display.label }}</dd>
+        </div>
+        <div>
+          <dt>Target kind</dt>
+          <dd>{{ route_target_display.kind.replace("_", " ").title() if route_target_display.kind else "Unknown" }}</dd>
         </div>
         <div>
           <dt>Latest run</dt>
           <dd>{{ latest_run.status.replace("_", " ").title() if latest_run else "No runs yet" }}</dd>
         </div>
       </dl>
-      {% if ai_summary_short or ai_summary_internal %}
+      {% if analysis_view.summary_short or analysis_view.summary_internal or analysis_view.handoff_reason %}
       <div class="stack stack--tight">
-        {% if ai_summary_short %}
+        {% if analysis_view.summary_short %}
         <div>
           <strong>Summary</strong>
-          <p class="muted">{{ ai_summary_short }}</p>
+          <p class="muted">{{ analysis_view.summary_short }}</p>
         </div>
         {% endif %}
-        {% if ai_summary_internal %}
+        {% if analysis_view.summary_internal %}
         <div>
           <strong>Internal summary</strong>
-          <p class="muted">{{ ai_summary_internal }}</p>
+          <p class="muted">{{ analysis_view.summary_internal }}</p>
+        </div>
+        {% endif %}
+        {% if analysis_view.handoff_reason %}
+        <div>
+          <strong>Handoff reason</strong>
+          <p class="muted">{{ analysis_view.handoff_reason }}</p>
         </div>
         {% endif %}
       </div>
       {% endif %}
-      {% if latest_run and latest_run.error_text or ai_relevant_paths or latest_ai_note or latest_analysis_run or latest_run and not latest_analysis_run or latest_run and latest_analysis_run and latest_run.id != latest_analysis_run.id or ticket.ai_confidence is not none or ticket.impact_level or ticket.development_needed is not none or ticket.requester_language or ticket.last_ai_action or ticket.requeue_requested %}
+      {% if latest_run and latest_run.error_text or ai_relevant_paths or latest_ai_note or latest_analysis_steps or latest_run_steps or analysis_view.response_confidence or analysis_view.risk_level or analysis_view.publish_mode_recommendation or analysis_view.risk_reason or analysis_view.assistant_used is not none or ticket.ai_confidence is not none or ticket.impact_level or ticket.development_needed is not none or ticket.requester_language or ticket.last_ai_action or ticket.requeue_requested %}
       <details class="analysis-disclosure">
         <summary>More analysis</summary>
         <div class="analysis-disclosure__content stack stack--tight">
           <dl class="meta-list meta-list--compact">
+            {% if analysis_view.response_confidence %}
             <div>
-              <dt>Confidence</dt>
+              <dt>Response confidence</dt>
+              <dd>{{ analysis_view.response_confidence }}</dd>
+            </div>
+            {% endif %}
+            {% if analysis_view.risk_level %}
+            <div>
+              <dt>Risk level</dt>
+              <dd>{{ analysis_view.risk_level }}</dd>
+            </div>
+            {% endif %}
+            {% if analysis_view.publish_mode_recommendation %}
+            <div>
+              <dt>Publish recommendation</dt>
+              <dd>{{ analysis_view.publish_mode_recommendation.replace("_", " ").title() }}</dd>
+            </div>
+            {% endif %}
+            <div>
+              <dt>Legacy confidence</dt>
               <dd>{{ ticket.ai_confidence if ticket.ai_confidence is not none else "Unknown" }}</dd>
             </div>
             <div>
-              <dt>Impact</dt>
+              <dt>Legacy impact</dt>
               <dd>{{ ticket.impact_level or "unknown" }}</dd>
             </div>
             <div>
-              <dt>Development needed</dt>
+              <dt>Legacy development needed</dt>
               <dd>{{ "Yes" if ticket.development_needed else "No" if ticket.development_needed is not none else "Unknown" }}</dd>
             </div>
             <div>
@@ -125,11 +156,29 @@
               <dt>Requeue requested</dt>
               <dd>{{ "Yes" if ticket.requeue_requested else "No" }}</dd>
             </div>
+            {% if analysis_view.assistant_used is not none %}
+            <div>
+              <dt>Assistant used</dt>
+              <dd>{{ "Yes" if analysis_view.assistant_used else "No" }}</dd>
+            </div>
+            {% endif %}
+            {% if analysis_view.assistant_specialist_id %}
+            <div>
+              <dt>Assistant specialist</dt>
+              <dd>{{ analysis_view.assistant_specialist_id }}</dd>
+            </div>
+            {% endif %}
           </dl>
           {% if latest_run and latest_run.error_text %}
           <div>
             <strong>{% if latest_run.status == "failed" %}Run error{% else %}Run warning{% endif %}</strong>
             <p class="muted">{{ latest_run.error_text }}</p>
+          </div>
+          {% endif %}
+          {% if analysis_view.risk_reason %}
+          <div>
+            <strong>Risk rationale</strong>
+            <p class="muted">{{ analysis_view.risk_reason }}</p>
           </div>
           {% endif %}
           {% if ai_relevant_paths %}
@@ -148,39 +197,69 @@
             <div class="message-card__body">{{ latest_ai_note_html | safe }}</div>
           </div>
           {% endif %}
-          {% if latest_analysis_run %}
+          {% if latest_analysis_steps %}
           <div>
-            <strong>Analysis artifacts</strong>
-            <ul class="attachment-list">
-              {% if latest_analysis_run.prompt_path %}<li><code>{{ latest_analysis_run.prompt_path }}</code></li>{% endif %}
-              {% if latest_analysis_run.schema_path %}<li><code>{{ latest_analysis_run.schema_path }}</code></li>{% endif %}
-              {% if latest_analysis_run.final_output_path %}<li><code>{{ latest_analysis_run.final_output_path }}</code></li>{% endif %}
-              {% if latest_analysis_run.stdout_jsonl_path %}<li><code>{{ latest_analysis_run.stdout_jsonl_path }}</code></li>{% endif %}
-              {% if latest_analysis_run.stderr_path %}<li><code>{{ latest_analysis_run.stderr_path }}</code></li>{% endif %}
-            </ul>
+            <strong>Analysis steps</strong>
+            {% for step in latest_analysis_steps %}
+            <div class="stack stack--tight">
+              <p class="muted">
+                Step {{ step.step_index }}
+                · {{ step.step_kind.replace("_", " ").title() }}
+                · {{ step.agent_spec_id.replace("-", " ").replace("_", " ").title() }}
+                · {{ step.status.replace("_", " ").title() }}
+              </p>
+              <ul class="attachment-list">
+                {% if step.prompt_path %}<li><code>{{ step.prompt_path }}</code></li>{% endif %}
+                {% if step.schema_path %}<li><code>{{ step.schema_path }}</code></li>{% endif %}
+                {% if step.final_output_path %}<li><code>{{ step.final_output_path }}</code></li>{% endif %}
+                {% if step.stdout_jsonl_path %}<li><code>{{ step.stdout_jsonl_path }}</code></li>{% endif %}
+                {% if step.stderr_path %}<li><code>{{ step.stderr_path }}</code></li>{% endif %}
+              </ul>
+            </div>
+            {% endfor %}
           </div>
           {% endif %}
-          {% if latest_run and latest_analysis_run and latest_run.id != latest_analysis_run.id %}
+          {% if latest_run and latest_analysis_run and latest_run.id != latest_analysis_run.id and latest_run_steps %}
           <div>
-            <strong>Latest run artifacts</strong>
-            <ul class="attachment-list">
-              {% if latest_run.prompt_path %}<li><code>{{ latest_run.prompt_path }}</code></li>{% endif %}
-              {% if latest_run.schema_path %}<li><code>{{ latest_run.schema_path }}</code></li>{% endif %}
-              {% if latest_run.final_output_path %}<li><code>{{ latest_run.final_output_path }}</code></li>{% endif %}
-              {% if latest_run.stdout_jsonl_path %}<li><code>{{ latest_run.stdout_jsonl_path }}</code></li>{% endif %}
-              {% if latest_run.stderr_path %}<li><code>{{ latest_run.stderr_path }}</code></li>{% endif %}
-            </ul>
+            <strong>Latest run steps</strong>
+            {% for step in latest_run_steps %}
+            <div class="stack stack--tight">
+              <p class="muted">
+                Step {{ step.step_index }}
+                · {{ step.step_kind.replace("_", " ").title() }}
+                · {{ step.agent_spec_id.replace("-", " ").replace("_", " ").title() }}
+                · {{ step.status.replace("_", " ").title() }}
+              </p>
+              <ul class="attachment-list">
+                {% if step.prompt_path %}<li><code>{{ step.prompt_path }}</code></li>{% endif %}
+                {% if step.schema_path %}<li><code>{{ step.schema_path }}</code></li>{% endif %}
+                {% if step.final_output_path %}<li><code>{{ step.final_output_path }}</code></li>{% endif %}
+                {% if step.stdout_jsonl_path %}<li><code>{{ step.stdout_jsonl_path }}</code></li>{% endif %}
+                {% if step.stderr_path %}<li><code>{{ step.stderr_path }}</code></li>{% endif %}
+              </ul>
+            </div>
+            {% endfor %}
           </div>
-          {% elif latest_run and not latest_analysis_run %}
+          {% elif latest_run and not latest_analysis_run and latest_run_steps %}
           <div>
-            <strong>Latest run artifacts</strong>
-            <ul class="attachment-list">
-              {% if latest_run.prompt_path %}<li><code>{{ latest_run.prompt_path }}</code></li>{% endif %}
-              {% if latest_run.schema_path %}<li><code>{{ latest_run.schema_path }}</code></li>{% endif %}
-              {% if latest_run.final_output_path %}<li><code>{{ latest_run.final_output_path }}</code></li>{% endif %}
-              {% if latest_run.stdout_jsonl_path %}<li><code>{{ latest_run.stdout_jsonl_path }}</code></li>{% endif %}
-              {% if latest_run.stderr_path %}<li><code>{{ latest_run.stderr_path }}</code></li>{% endif %}
-            </ul>
+            <strong>Latest run steps</strong>
+            {% for step in latest_run_steps %}
+            <div class="stack stack--tight">
+              <p class="muted">
+                Step {{ step.step_index }}
+                · {{ step.step_kind.replace("_", " ").title() }}
+                · {{ step.agent_spec_id.replace("-", " ").replace("_", " ").title() }}
+                · {{ step.status.replace("_", " ").title() }}
+              </p>
+              <ul class="attachment-list">
+                {% if step.prompt_path %}<li><code>{{ step.prompt_path }}</code></li>{% endif %}
+                {% if step.schema_path %}<li><code>{{ step.schema_path }}</code></li>{% endif %}
+                {% if step.final_output_path %}<li><code>{{ step.final_output_path }}</code></li>{% endif %}
+                {% if step.stdout_jsonl_path %}<li><code>{{ step.stdout_jsonl_path }}</code></li>{% endif %}
+                {% if step.stderr_path %}<li><code>{{ step.stderr_path }}</code></li>{% endif %}
+              </ul>
+            </div>
+            {% endfor %}
           </div>
           {% endif %}
         </div>

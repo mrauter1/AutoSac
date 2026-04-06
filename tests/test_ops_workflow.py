@@ -11,7 +11,6 @@ import pytest
 
 def _load_symbols():
     pytest.importorskip("sqlalchemy")
-    pytest.importorskip("argon2")
     from shared.models import AIDraft, Ticket, TicketMessage, TicketStatusHistory, TicketView, User
     from shared.ticketing import (
         add_ops_internal_note,
@@ -440,9 +439,7 @@ def test_publish_ai_draft_for_ops_rejects_non_pending_draft():
 def _load_web_stack():
     pytest.importorskip("fastapi")
     pytest.importorskip("sqlalchemy")
-    pytest.importorskip("argon2")
     from fastapi.testclient import TestClient
-
     from app import auth, routes_ops
     from app.main import create_app
     from shared.db import db_session_dependency
@@ -724,7 +721,7 @@ def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):
             "grouped_rows": {key: [] for key in ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")},
             "filters": {
                 "status": "",
-                "ticket_class": "",
+                "route_target_id": "",
                 "assigned_to": "",
                 "urgent": False,
                 "unassigned_only": False,
@@ -734,7 +731,7 @@ def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):
             },
             "ops_users": [],
             "status_options": [],
-            "class_options": [],
+            "route_target_options": [],
         },
     )
     monkeypatch.setattr(
@@ -777,7 +774,7 @@ def test_ops_board_route_does_not_mark_ticket_as_read(monkeypatch):
             "grouped_rows": {key: [] for key in ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")},
             "filters": {
                 "status": "",
-                "ticket_class": "",
+                "route_target_id": "",
                 "assigned_to": "",
                 "urgent": False,
                 "unassigned_only": False,
@@ -787,7 +784,7 @@ def test_ops_board_route_does_not_mark_ticket_as_read(monkeypatch):
             },
             "ops_users": [],
             "status_options": [],
-            "class_options": [],
+            "route_target_options": [],
         },
     )
     monkeypatch.setattr(
@@ -836,6 +833,7 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
         "_ticket_detail_context",
         lambda *args, **kwargs: {
             "ticket": ticket,
+            "route_target_display": {"id": None, "label": "Unclassified", "kind": None},
             "activity_timeline": [],
             "ops_users": [],
             "status_options": [],
@@ -846,8 +844,22 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
             "pending_draft_html": "",
             "latest_run": None,
             "latest_analysis_run": None,
+            "latest_run_steps": [],
+            "latest_analysis_steps": [],
             "latest_ai_note": None,
             "latest_ai_note_html": "",
+            "analysis_view": {
+                "summary_short": "",
+                "summary_internal": "",
+                "relevant_paths": [],
+                "response_confidence": None,
+                "risk_level": None,
+                "publish_mode_recommendation": None,
+                "risk_reason": "",
+                "handoff_reason": "",
+                "assistant_used": None,
+                "assistant_specialist_id": None,
+            },
             "ai_relevant_paths": [],
             "ai_summary_short": "",
             "ai_summary_internal": "",
@@ -919,33 +931,60 @@ def test_ops_detail_route_separates_analysis_artifacts_from_latest_run(monkeypat
         status="waiting_on_user",
         urgent=False,
         updated_at=datetime.now(timezone.utc),
-        ticket_class="support",
+        route_target_id="support",
         ai_confidence=0.9,
         impact_level="low",
         development_needed=False,
         requester_language="en",
-        last_ai_action="ask_clarification",
+        last_ai_action="draft_public_reply",
         requeue_requested=False,
     )
     latest_run = SimpleNamespace(
         id=uuid.uuid4(),
         status="failed",
         error_text="boom",
-        prompt_path="/tmp/latest-prompt.txt",
-        schema_path="/tmp/latest-schema.json",
-        final_output_path="/tmp/latest-final.json",
-        stdout_jsonl_path="/tmp/latest-stdout.jsonl",
-        stderr_path="/tmp/latest-stderr.txt",
     )
     latest_analysis_run = SimpleNamespace(
         id=uuid.uuid4(),
         status="human_review",
-        prompt_path="/tmp/analysis-prompt.txt",
-        schema_path="/tmp/analysis-schema.json",
-        final_output_path="/tmp/analysis-final.json",
-        stdout_jsonl_path="/tmp/analysis-stdout.jsonl",
-        stderr_path="/tmp/analysis-stderr.txt",
     )
+    latest_run_steps = [
+        SimpleNamespace(
+            step_index=1,
+            step_kind="router",
+            agent_spec_id="router",
+            status="succeeded",
+            prompt_path="/tmp/latest-router-prompt.txt",
+            schema_path="/tmp/latest-router-schema.json",
+            final_output_path="/tmp/latest-router-final.json",
+            stdout_jsonl_path="/tmp/latest-router-stdout.jsonl",
+            stderr_path="/tmp/latest-router-stderr.txt",
+        )
+    ]
+    latest_analysis_steps = [
+        SimpleNamespace(
+            step_index=1,
+            step_kind="router",
+            agent_spec_id="router",
+            status="succeeded",
+            prompt_path="/tmp/analysis-router-prompt.txt",
+            schema_path="/tmp/analysis-router-schema.json",
+            final_output_path="/tmp/analysis-router-final.json",
+            stdout_jsonl_path="/tmp/analysis-router-stdout.jsonl",
+            stderr_path="/tmp/analysis-router-stderr.txt",
+        ),
+        SimpleNamespace(
+            step_index=2,
+            step_kind="specialist",
+            agent_spec_id="support",
+            status="succeeded",
+            prompt_path="/tmp/analysis-support-prompt.txt",
+            schema_path="/tmp/analysis-support-schema.json",
+            final_output_path="/tmp/analysis-support-final.json",
+            stdout_jsonl_path="/tmp/analysis-support-stdout.jsonl",
+            stderr_path="/tmp/analysis-support-stderr.txt",
+        ),
+    ]
 
     monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
     monkeypatch.setattr(
@@ -953,6 +992,7 @@ def test_ops_detail_route_separates_analysis_artifacts_from_latest_run(monkeypat
         "_ticket_detail_context",
         lambda *args, **kwargs: {
             "ticket": ticket,
+            "route_target_display": {"id": "support", "label": "Support", "kind": "direct_ai"},
             "creator": None,
             "assignee": None,
             "activity_timeline": [],
@@ -965,8 +1005,22 @@ def test_ops_detail_route_separates_analysis_artifacts_from_latest_run(monkeypat
             "pending_draft_html": "",
             "latest_run": latest_run,
             "latest_analysis_run": latest_analysis_run,
+            "latest_run_steps": latest_run_steps,
+            "latest_analysis_steps": latest_analysis_steps,
             "latest_ai_note": None,
             "latest_ai_note_html": "",
+            "analysis_view": {
+                "summary_short": "",
+                "summary_internal": "Accepted internal summary",
+                "relevant_paths": [],
+                "response_confidence": "high",
+                "risk_level": "low",
+                "publish_mode_recommendation": "draft_for_human",
+                "risk_reason": "Needs human review before sending.",
+                "handoff_reason": "",
+                "assistant_used": None,
+                "assistant_specialist_id": None,
+            },
             "ai_relevant_paths": [],
             "ai_summary_short": "Accepted analysis",
             "ai_summary_internal": "Accepted internal summary",
@@ -982,10 +1036,10 @@ def test_ops_detail_route_separates_analysis_artifacts_from_latest_run(monkeypat
         response = client.get(f"/ops/tickets/{ticket.reference}")
 
     assert response.status_code == 200
-    assert "Analysis artifacts" in response.text
-    assert "/tmp/analysis-final.json" in response.text
-    assert "Latest run artifacts" in response.text
-    assert "/tmp/latest-final.json" in response.text
+    assert "Analysis steps" in response.text
+    assert "/tmp/analysis-support-final.json" in response.text
+    assert "Latest run steps" in response.text
+    assert "/tmp/latest-router-final.json" in response.text
 
 
 def test_ticket_detail_context_uses_latest_accepted_analysis_run(tmp_path, monkeypatch):
@@ -996,18 +1050,16 @@ def test_ticket_detail_context_uses_latest_accepted_analysis_run(tmp_path, monke
         assigned_to_user_id=None,
     )
     latest_run = SimpleNamespace(status="failed", error_text="boom")
-    analysis_path = tmp_path / "final.json"
-    analysis_path.write_text(
-        json.dumps(
-            {
-                "summary_short": "Accepted analysis",
-                "summary_internal": "Accepted internal summary",
-                "relevant_paths": [{"path": "manuals/", "reason": "Checked first."}],
-            }
-        ),
-        encoding="utf-8",
+    analysis_run = SimpleNamespace(
+        status="human_review",
+        id=uuid.uuid4(),
+        final_output_contract="triage_result",
+        final_output_json={
+            "summary_short": "Accepted analysis",
+            "summary_internal": "Accepted internal summary",
+            "relevant_paths": [{"path": "manuals/", "reason": "Checked first."}],
+        },
     )
-    analysis_run = SimpleNamespace(status="human_review", final_output_path=str(analysis_path))
 
     class _ContextDb:
         def get(self, model, key):
@@ -1017,6 +1069,7 @@ def test_ticket_detail_context_uses_latest_accepted_analysis_run(tmp_path, monke
     monkeypatch.setattr(stack["routes_ops"], "_load_pending_draft", lambda *args, **kwargs: None)
     monkeypatch.setattr(stack["routes_ops"], "_load_latest_run", lambda *args, **kwargs: latest_run)
     monkeypatch.setattr(stack["routes_ops"], "_load_latest_analysis_run", lambda *args, **kwargs: analysis_run)
+    monkeypatch.setattr(stack["routes_ops"], "_load_run_steps", lambda *args, **kwargs: [])
     monkeypatch.setattr(stack["routes_ops"], "_load_latest_internal_ai_note", lambda *args, **kwargs: None)
     monkeypatch.setattr(stack["routes_ops"], "_load_ops_users", lambda *args, **kwargs: [])
     current_user = SimpleNamespace(id=ticket.created_by_user_id, role="admin")
@@ -1025,9 +1078,12 @@ def test_ticket_detail_context_uses_latest_accepted_analysis_run(tmp_path, monke
 
     assert context["latest_run"] is latest_run
     assert context["latest_analysis_run"] is analysis_run
+    assert context["latest_analysis_steps"] == []
     assert context["ai_summary_short"] == "Accepted analysis"
     assert context["ai_summary_internal"] == "Accepted internal summary"
     assert context["ai_relevant_paths"] == [{"path": "manuals/", "reason": "Checked first."}]
+    assert context["route_target_display"]["label"] == "Unclassified"
+    assert context["analysis_view"]["contract_id"] == "triage_result"
     assert context["public_reply_status_options"][0] == "ai_triage"
     assert context["default_public_reply_status"] == "ai_triage"
 
@@ -1127,6 +1183,7 @@ def test_ops_detail_route_renders_ai_triage_as_public_reply_option_for_self_owne
         "_ticket_detail_context",
         lambda *args, **kwargs: {
             "ticket": ticket,
+            "route_target_display": {"id": None, "label": "Unclassified", "kind": None},
             "creator": ops_user,
             "assignee": None,
             "activity_timeline": [],
@@ -1139,8 +1196,22 @@ def test_ops_detail_route_renders_ai_triage_as_public_reply_option_for_self_owne
             "pending_draft_html": "",
             "latest_run": None,
             "latest_analysis_run": None,
+            "latest_run_steps": [],
+            "latest_analysis_steps": [],
             "latest_ai_note": None,
             "latest_ai_note_html": "",
+            "analysis_view": {
+                "summary_short": "",
+                "summary_internal": "",
+                "relevant_paths": [],
+                "response_confidence": None,
+                "risk_level": None,
+                "publish_mode_recommendation": None,
+                "risk_reason": "",
+                "handoff_reason": "",
+                "assistant_used": None,
+                "assistant_specialist_id": None,
+            },
             "ai_relevant_paths": [],
             "ai_summary_short": "",
             "ai_summary_internal": "",
@@ -1179,7 +1250,7 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert "assign_ticket_for_ops" in source
     assert "set_ticket_status_for_ops" in source
     assert "Status" in filters_template
-    assert "Class" in filters_template
+    assert "Route target" in filters_template
     assert "Assigned to" in filters_template
     assert 'hx-get="{{ filters_action }}"' in filters_template
     assert 'hx-target="#{{ filters_target_id }}"' in filters_template

@@ -1022,3 +1022,76 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=producer | cycle=1 | attempt=1 | thread_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+---
+provider=codex
+mode=start
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_producer.md
+session_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+---
+I’m treating the PRD/ARD plus the active phase artifacts as the contract for this turn. I’ll read the spec, phase notes, decisions, and the relevant worker/ops code paths first so the cutover stays within scope and doesn’t trample unrelated changes.
+
+The repo already has in-progress changes from earlier phases and unrelated edits, so I’m isolating the runtime/ops path before touching anything. Next I’m reading the current worker, registry, and ops modules to see what is already implemented versus what still remains in the cutover phase.
+
+I’ve confirmed the repo is mid-migration: registry/contracts exist, but the live pipeline is still on the legacy specialist contract with mismatch downgrade logic. I’m now reading the ticket write path, triage finalization, ops views, and tests to locate the exact cutover surfaces.
+
+Plan for this phase:
+1. Inspect the remaining spec sections and the current runtime/ops/test surfaces to pin down the exact contract gaps.
+2. Refactor the worker path to registry-driven router/selector/specialist execution plus deterministic publication policy and terminal outputs.
+3. Cut ops reads and presentation over to `route_target_id` with a bounded legacy adapter and historical fallback handling.
+4. Update tests, notes, and decisions, then run targeted verification on the touched paths.
+
+The spec is explicit about three big behavior changes: specialists no longer reclassify, `human_assist + none` still ends with a terminal structured payload, and historical compatibility is presentation-only. I’m reading the remaining contract/runtime sections now so the worker refactor matches those invariants instead of approximating them.
+
+The current tests are still anchored to `triage_result`, confidence fields, and `ticket_class`-based ops UI. I’m tracing every read/write of those fields now so I can replace only the active path and keep historical rendering bounded to one presenter.
+
+I’ve confirmed the cutover affects both code and spec manifests: the runtime still points specialist specs at `triage_result`, so the worker cannot switch cleanly until those manifests/prompts are aligned too. I’m checking the spec folders and current helper modules before I start editing.
+
+I have the cutover surface mapped now: runtime execution, ticket finalization, manifests, registry seed flags, ops filter/display, and the specialist spec bundle all need to move together. I’m switching to edits next so the worker and ops UI both land on `route_target_id` and the new terminal contracts in one pass.
+
+I’m editing the runtime side first: registry flags, specialist manifests/prompts, the pipeline/publication-policy path, and manifest metadata. After that I’ll cut ops presentation over and then reconcile the tests against the new contracts.
+
+The runtime scaffolding is in place now: manifests can carry route-target metadata, draft creation can preserve the correct ticket status, and the publication-policy module exists. I’m replacing the old two-classification pipeline next so the worker stops depending on `triage_result` and mismatch handling entirely.
+
+I’ve moved past the worker cutover point. The next edit batch is the ops side: one small presenter for legacy/new run payloads, route-target-driven filter options and labels, and template changes so the UI reads `route_target_id` without breaking historical tickets.
+
+The worker and ops code are both edited now. I’m running a compile pass before touching the tests so I can catch any syntax or import regressions in the new pipeline/presenter path first.
+
+The old worker tests are too tied to the legacy contract to salvage with small edits. I’m replacing that file with a tighter suite that exercises the new router/selector/specialist flow, human-handoff synthesis, publication-policy outcomes, and manifest metadata directly.
+
+The contract updates are reflected in the tests now, at least on the main worker/registry/ops surfaces. I’m running the focused suites next to shake out behavior mismatches rather than guessing at the remaining gaps.
+
+The focused suite got most of the way through cleanly. There’s at least one behavior mismatch left in the targeted tests, so I’m pulling the exact failure now and fixing that rather than broadening the blast radius.
+
+The runtime and ops paths are green on the focused suites now. I’m doing the closeout pass: trim any obvious dead code, record the non-obvious cutover decisions, and update the phase notes with the exact scope, invariants, and validation that landed.
+
+I’m writing the phase ledger entries now. The main non-obvious cutover decisions are: `ticket_class` is now historical-only for writes, the synthesized human handoff keeps the last executed step as provenance while leaving `final_agent_spec_id` null, and ops filtering is strictly `route_target_id` even though display still tolerates historical fallbacks.
+
+Scope considered
+
+Active phase only: runtime routing cutover, deterministic publication policy, manifest metadata, and ops/UI migration to `route_target_id`. Final cleanup removal of `ticket_class` and its DB constraint stayed out of scope.
+
+What I analyzed
+
+I read the PRD/ARD, phase plan and prior notes, then traced the live worker path, registry/contracts, ticket write helpers, ops routes/templates, and the targeted worker/ops/persistence tests.
+
+What I changed
+
+I refactored [worker/pipeline.py](/home/marcelo/code/AutoSac/worker/pipeline.py), [worker/triage.py](/home/marcelo/code/AutoSac/worker/triage.py), [worker/step_runner.py](/home/marcelo/code/AutoSac/worker/step_runner.py), and new [worker/publication_policy.py](/home/marcelo/code/AutoSac/worker/publication_policy.py) to run `router -> optional selector -> optional specialist` from the registry, remove mismatch logic, synthesize `human_handoff_result` for `human_assist + none`, and always persist terminal structured output for accepted runs. I stopped new runtime writes to `ticket_class`, `ai_confidence`, `impact_level`, and `development_needed`, updated manifests/artifacts to carry route-target and publication metadata, enabled `manual_review`, disabled `unknown` for new routing, and moved specialist specs/prompts to `specialist_result`.
+
+On the ops side I added [app/ai_run_presenters.py](/home/marcelo/code/AutoSac/app/ai_run_presenters.py), switched [app/routes_ops.py](/home/marcelo/code/AutoSac/app/routes_ops.py) and the ops templates to `route_target_id` plus registry labels/kinds, and kept historical continuity bounded to presentation-only adaptation for legacy `triage_result`. Validation: `python -m py_compile ...` on touched code and `.venv/bin/pytest -q tests/test_ai_worker.py tests/test_routing_registry.py tests/test_ops_workflow.py tests/test_foundation_persistence.py` passed with `105 passed`.
+
+Key findings / decisions
+
+`ticket_class` is now historical-only on the live write path; ops filtering reads only `route_target_id`, while display tolerates historical fallback labels. For synthesized human handoffs, `final_agent_spec_id` is `null` and `final_step_id` stays on the last executed step so run artifacts still have step provenance.
+
+Open issues / next step
+
+The remaining follow-up is the later cleanup phase: remove the legacy `ticket_class` column/constraint and any remaining obsolete ticket fields once the broader rollout is ready.

@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from pathlib import Path
 from typing import Any
-import json
 import uuid
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
@@ -11,13 +9,15 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.ai_run_presenters import present_ai_run_output, present_ticket_route_target
 from app.auth import get_required_auth_session, require_ops_user, validate_csrf_token
 from app.render import render_markdown_to_html
 from app.timeline import build_author_label, load_ticket_status_history, load_users_by_ids, merge_timeline_items, serialize_status_changes
 from app.ui import build_template_context, is_htmx_request, ops_author_label, ops_status_label, templates
 from shared.db import db_session_dependency
-from shared.models import AIDraft, AIRun, Ticket, TicketAttachment, TicketMessage, TicketView, User
+from shared.models import AIDraft, AIRun, AIRunStep, Ticket, TicketAttachment, TicketMessage, TicketView, User
 from shared.permissions import is_ops_user
+from shared.routing_registry import load_routing_registry
 from shared.user_admin import create_user
 from shared.ticketing import (
     add_ops_internal_note,
@@ -35,7 +35,6 @@ router = APIRouter()
 _OPS_DRAFT_REPLY_STATUSES = ("waiting_on_user", "waiting_on_dev_ti", "resolved")
 _OPS_PUBLIC_REPLY_STATUSES = ("ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")
 _OPS_FILTERABLE_STATUSES = ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")
-_OPS_FILTERABLE_CLASSES = ("support", "access_config", "data_ops", "bug", "feature", "unknown")
 _MANAGEABLE_USER_ROLES = ("requester", "dev_ti")
 
 
@@ -149,9 +148,19 @@ def _load_latest_run(db: Session, *, ticket_id) -> AIRun | None:
 def _load_latest_analysis_run(db: Session, *, ticket_id) -> AIRun | None:
     return db.execute(
         select(AIRun)
-        .where(AIRun.ticket_id == ticket_id, AIRun.status.in_(("succeeded", "human_review")))
+        .where(
+            AIRun.ticket_id == ticket_id,
+            AIRun.status.in_(("succeeded", "human_review")),
+            AIRun.final_output_json.is_not(None),
+        )
         .order_by(AIRun.created_at.desc())
     ).scalars().first()
+
+
+def _load_run_steps(db: Session, *, run_id) -> list[AIRunStep]:
+    return list(
+        db.execute(select(AIRunStep).where(AIRunStep.ai_run_id == run_id).order_by(AIRunStep.step_index.asc())).scalars()
+    )
 
 
 def _load_pending_draft(db: Session, *, ticket_id) -> AIDraft | None:
@@ -174,23 +183,22 @@ def _load_latest_internal_ai_note(db: Session, *, ticket_id) -> TicketMessage | 
     ).scalars().first()
 
 
-def _load_run_output(run: AIRun | None) -> dict[str, object]:
-    if run is None or not run.final_output_path:
-        return {}
-    output_path = Path(run.final_output_path)
-    if not output_path.is_file():
-        return {}
-    try:
-        return json.loads(output_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return {}
+def _ops_route_target_options() -> list[dict[str, str]]:
+    registry = load_routing_registry()
+    return [
+        {
+            "id": route_target.id,
+            "label": route_target.label,
+        }
+        for route_target in registry.ops_visible_route_targets()
+    ]
 
 
 def _read_filters(request: Request) -> dict[str, object]:
     query = request.query_params
     return {
         "status": query.get("status", "").strip(),
-        "ticket_class": query.get("ticket_class", "").strip(),
+        "route_target_id": query.get("route_target_id", "").strip(),
         "assigned_to": query.get("assigned_to", "").strip(),
         "urgent": _parse_bool(query.get("urgent")),
         "unassigned_only": _parse_bool(query.get("unassigned_only")),
@@ -203,12 +211,12 @@ def _read_filters(request: Request) -> dict[str, object]:
 def _load_filtered_ticket_rows(db: Session, *, current_user: User, filters: dict[str, object]) -> list[dict[str, object]]:
     statement = select(Ticket).order_by(Ticket.updated_at.desc())
     status_filter = str(filters["status"])
-    class_filter = str(filters["ticket_class"])
+    route_target_filter = str(filters["route_target_id"])
     assigned_to_filter = str(filters["assigned_to"])
     if status_filter:
         statement = statement.where(Ticket.status == status_filter)
-    if class_filter:
-        statement = statement.where(Ticket.ticket_class == class_filter)
+    if route_target_filter:
+        statement = statement.where(Ticket.route_target_id == route_target_filter)
     if filters["urgent"]:
         statement = statement.where(Ticket.urgent.is_(True))
     if filters["unassigned_only"]:
@@ -265,6 +273,7 @@ def _load_filtered_ticket_rows(db: Session, *, current_user: User, filters: dict
                 "assignee": users.get(ticket.assigned_to_user_id),
                 "updated_for_user": updated_for_user,
                 "pending_draft": pending_draft,
+                "route_target_display": present_ticket_route_target(ticket),
             }
         )
     return rows
@@ -283,7 +292,7 @@ def _ops_filter_context(db: Session, *, current_user: User, filters: dict[str, o
         "filters": filters,
         "ops_users": _load_ops_users(db),
         "status_options": _OPS_FILTERABLE_STATUSES,
-        "class_options": _OPS_FILTERABLE_CLASSES,
+        "route_target_options": _ops_route_target_options(),
         "rows": rows,
         "grouped_rows": _group_ticket_rows(rows),
     }
@@ -299,12 +308,17 @@ def _ticket_detail_context(db: Session, *, ticket: Ticket, current_user: User) -
     pending_draft = _load_pending_draft(db, ticket_id=ticket.id)
     latest_run = _load_latest_run(db, ticket_id=ticket.id)
     latest_analysis_run = _load_latest_analysis_run(db, ticket_id=ticket.id)
+    latest_run_id = getattr(latest_run, "id", None)
+    latest_analysis_run_id = getattr(latest_analysis_run, "id", None)
+    latest_run_steps = _load_run_steps(db, run_id=latest_run_id) if latest_run_id is not None else []
+    latest_analysis_steps = _load_run_steps(db, run_id=latest_analysis_run_id) if latest_analysis_run_id is not None else []
     latest_ai_note = _load_latest_internal_ai_note(db, ticket_id=ticket.id)
-    run_output = _load_run_output(latest_analysis_run)
+    analysis_view = present_ai_run_output(latest_analysis_run)
     creator = db.get(User, ticket.created_by_user_id)
     assignee = db.get(User, ticket.assigned_to_user_id) if ticket.assigned_to_user_id else None
     return {
         "ticket": ticket,
+        "route_target_display": present_ticket_route_target(ticket),
         "creator": creator,
         "assignee": assignee,
         "activity_timeline": _build_ops_activity_timeline(db, ticket_id=ticket.id),
@@ -317,11 +331,14 @@ def _ticket_detail_context(db: Session, *, ticket: Ticket, current_user: User) -
         "pending_draft_html": render_markdown_to_html(pending_draft.body_markdown) if pending_draft else "",
         "latest_run": latest_run,
         "latest_analysis_run": latest_analysis_run,
+        "latest_run_steps": latest_run_steps,
+        "latest_analysis_steps": latest_analysis_steps,
         "latest_ai_note": latest_ai_note,
         "latest_ai_note_html": render_markdown_to_html(latest_ai_note.body_markdown) if latest_ai_note else "",
-        "ai_relevant_paths": run_output.get("relevant_paths", []) if isinstance(run_output, dict) else [],
-        "ai_summary_short": run_output.get("summary_short", "") if isinstance(run_output, dict) else "",
-        "ai_summary_internal": run_output.get("summary_internal", "") if isinstance(run_output, dict) else "",
+        "analysis_view": analysis_view,
+        "ai_relevant_paths": analysis_view["relevant_paths"],
+        "ai_summary_short": analysis_view["summary_short"],
+        "ai_summary_internal": analysis_view["summary_internal"],
     }
 
 

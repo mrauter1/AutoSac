@@ -89,7 +89,8 @@ def test_load_routing_registry_reads_current_registry() -> None:
     assert registry.selector_spec is not None
     assert registry.selector_spec.id == "specialist-selector"
     assert registry.require_enabled_route_target("support").label == "Support"
-    assert registry.require_route_target("manual_review").enabled is False
+    assert registry.require_enabled_route_target("manual_review").kind == "human_assist"
+    assert registry.require_route_target("unknown").enabled is False
 
 
 def test_load_routing_registry_rejects_duplicate_route_target_ids(tmp_path: Path) -> None:
@@ -198,8 +199,8 @@ def test_validate_contract_output_rejects_disabled_router_target() -> None:
         validate_contract_output(
             "router_result",
             {
-                "route_target_id": "manual_review",
-                "routing_rationale": "Needs a human operator.",
+                "route_target_id": "unknown",
+                "routing_rationale": "Historical-only target.",
             },
         )
 
@@ -256,7 +257,8 @@ def test_render_router_prompt_includes_generated_route_target_catalog() -> None:
     assert "Enabled route targets:" in prompt
     assert "- id: support" in prompt
     assert "- id: access_config" in prompt
-    assert "manual_review" not in prompt
+    assert "- id: manual_review" in prompt
+    assert "unknown" not in prompt
     assert "TARGET_TICKET_CLASS" not in prompt
     assert "ROUTER_TICKET_CLASS" not in prompt
     assert "ticket_class" not in prompt
@@ -298,7 +300,6 @@ def test_render_specialist_prompt_includes_route_target_context() -> None:
     assert "Route target label: Support" in prompt
     assert "Route target kind: direct_ai" in prompt
     assert "Route target description:" in prompt
-    assert "If the provided schema includes `ticket_class`, set it exactly to the selected route target ID." in prompt
     assert "TARGET_TICKET_CLASS" not in prompt
     assert "ROUTER_TICKET_CLASS" not in prompt
     assert "ticket class" not in prompt.lower()

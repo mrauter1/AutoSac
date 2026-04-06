@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "router_spec_id": "router",
   "selector_spec_id": "specialist-selector",
   "route_targets": [
@@ -112,9 +112,9 @@
       "id": "unknown",
       "label": "Unknown",
       "kind": "direct_ai",
-      "enabled": true,
+      "enabled": false,
       "ops_visible": true,
-      "router_description": "Compatibility-phase fallback for ambiguous or mixed-signal cases that cannot yet use the final human-assist route target.",
+      "router_description": "Historical-only compatibility target retained for legacy display after manual_review becomes the active ambiguous-case route target.",
       "handler": {
         "specialist_selection": {
           "mode": "fixed",
@@ -133,9 +133,9 @@
       "id": "manual_review",
       "label": "Manual Review",
       "kind": "human_assist",
-      "enabled": false,
+      "enabled": true,
       "ops_visible": true,
-      "router_description": "Use after route-target cutover when the case is ambiguous, high risk, or better handled by a human operator.",
+      "router_description": "Use when the case is ambiguous, high risk, or better handled by a human operator.",
       "handler": {
         "human_queue_status": "waiting_on_dev_ti",
         "specialist_selection": {

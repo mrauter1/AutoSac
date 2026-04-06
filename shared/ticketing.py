@@ -12,23 +12,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from shared.config import Settings
-from shared.models import (
-    AIDraft,
-    AIRun,
-    SystemState,
-    Ticket,
-    TicketAttachment,
-    TicketMessage,
-    TicketStatusHistory,
-    TicketView,
-    TICKET_CLASSES,
-    TICKET_STATUSES,
-    User,
-)
+from shared.models import AIDraft, AIRun, SystemState, Ticket, TicketAttachment, TicketMessage, TicketStatusHistory, TicketView, TICKET_STATUSES, User
 from shared.security import utc_now
 
 SYSTEM_STATE_KEYS = ("worker_heartbeat", "bootstrap_version")
-_LEGACY_COMPATIBLE_ROUTE_TARGET_IDS = frozenset(TICKET_CLASSES)
 _STATUS_SENTINEL = object()
 
 
@@ -169,24 +156,15 @@ def normalize_message_text(markdown_text: str) -> str:
     return markdown_text.strip()
 
 
-def _legacy_ticket_class_for_route_target(route_target_id: str) -> str:
-    if route_target_id not in _LEGACY_COMPATIBLE_ROUTE_TARGET_IDS:
-        raise ValueError(
-            f"Route target {route_target_id} is not allowed during the compatibility dual-write window"
-        )
-    return route_target_id
-
-
 def apply_ai_route_target(
     ticket: Ticket,
     *,
     route_target_id: str,
-    requester_language: str,
+    requester_language: str | None = None,
 ) -> None:
-    legacy_ticket_class = _legacy_ticket_class_for_route_target(route_target_id)
     ticket.route_target_id = route_target_id
-    ticket.ticket_class = legacy_ticket_class
-    ticket.requester_language = requester_language
+    if requester_language is not None:
+        ticket.requester_language = requester_language
 
 
 def _create_message(
@@ -526,6 +504,8 @@ def create_ai_draft(
     ticket: Ticket,
     ai_run_id: uuid.UUID,
     body_markdown: str,
+    next_status: str = "waiting_on_dev_ti",
+    last_ai_action: str = "draft_public_reply",
     created_at=None,
 ) -> AIDraft:
     draft_time = created_at or utc_now()
@@ -544,8 +524,8 @@ def create_ai_draft(
     _apply_ai_status(
         db,
         ticket=ticket,
-        to_status="waiting_on_dev_ti",
-        last_ai_action="draft_public_reply",
+        to_status=next_status,
+        last_ai_action=last_ai_action,
         changed_at=draft_time,
     )
     return draft

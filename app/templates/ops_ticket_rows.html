@@ -7,8 +7,8 @@
     <div class="ticket-card__meta">
       <span class="ticket-ref">{{ ticket.reference }}</span>
       <span class="status-pill">{{ ops_status_label(ticket.status) }}</span>
-      {% if ticket.ticket_class %}
-      <span class="status-pill">{{ ticket.ticket_class.replace("_", " ").title() }}</span>
+      {% if row.route_target_display.id %}
+      <span class="status-pill">{{ row.route_target_display.label }}</span>
       {% endif %}
       {% if ticket.urgent %}
       <span class="urgent-pill">Urgent</span>
