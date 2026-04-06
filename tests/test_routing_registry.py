@@ -257,6 +257,10 @@ def test_render_router_prompt_includes_generated_route_target_catalog() -> None:
     assert "- id: support" in prompt
     assert "- id: access_config" in prompt
     assert "manual_review" not in prompt
+    assert "TARGET_TICKET_CLASS" not in prompt
+    assert "ROUTER_TICKET_CLASS" not in prompt
+    assert "ticket_class" not in prompt
+    assert "ticket class" not in prompt.lower()
 
 
 def test_render_selector_prompt_includes_candidate_catalog() -> None:
@@ -271,6 +275,10 @@ def test_render_selector_prompt_includes_candidate_catalog() -> None:
     assert "Candidate specialists:" in prompt
     assert "- id: support" in prompt
     assert "- id: bug" in prompt
+    assert "TARGET_TICKET_CLASS" not in prompt
+    assert "ROUTER_TICKET_CLASS" not in prompt
+    assert "ticket_class" not in prompt
+    assert "ticket class" not in prompt.lower()
 
 
 def test_render_specialist_prompt_includes_route_target_context() -> None:
@@ -291,6 +299,10 @@ def test_render_specialist_prompt_includes_route_target_context() -> None:
     assert "Route target kind: direct_ai" in prompt
     assert "Route target description:" in prompt
     assert "If the provided schema includes `ticket_class`, set it exactly to the selected route target ID." in prompt
+    assert "TARGET_TICKET_CLASS" not in prompt
+    assert "ROUTER_TICKET_CLASS" not in prompt
+    assert "ticket class" not in prompt.lower()
+    assert "classified the ticket as" not in prompt
 
 
 def test_render_agent_prompt_raises_for_unknown_placeholder() -> None:

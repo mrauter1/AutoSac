@@ -14,7 +14,7 @@
 - Contract validation:
   disabled router target rejection, selector candidate enforcement, specialist required-field validation, and human-handoff assistant metadata validation.
 - Prompt rendering:
-  router catalog generation from enabled registry targets, selector candidate catalog rendering, specialist route-target context rendering, centralized legacy `ticket_class` alignment instruction, and missing-placeholder failure handling.
+  router catalog generation from enabled registry targets, selector candidate catalog rendering, specialist route-target context rendering, centralized legacy `ticket_class` alignment instruction, negative assertions that rendered prompts exclude legacy class placeholders and ticket-class routing phrasing, and missing-placeholder failure handling.
 - Workspace/bootstrap/readiness:
   workspace contract path verification propagates registry failures, bootstrap version remains `stage1-v3`, and workspace skill verification stays driven by loaded agent specs instead of hardcoded taxonomy.
 
@@ -28,6 +28,7 @@
 
 - Invalid registry topology is exercised through temp-file registry mutations rather than shared global fixture changes.
 - Prompt failure coverage uses a minimal fake spec to isolate placeholder-resolution errors deterministically.
+- Prompt regression checks distinguish the allowed compatibility-phase `ticket_class` schema note from forbidden legacy prompt placeholders by asserting on exact legacy tokens and ticket-class phrasing rather than banning every `ticket_class` literal.
 - Workspace verification tests use `tmp_path` and monkeypatching to avoid filesystem or service flake.
 
 ## Known gaps
