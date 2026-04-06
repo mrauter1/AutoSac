@@ -1095,3 +1095,58 @@ Key findings / decisions
 Open issues / next step
 
 The remaining follow-up is the later cleanup phase: remove the legacy `ticket_class` column/constraint and any remaining obsolete ticket fields once the broader rollout is ready.
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=verifier | cycle=1 | attempt=1 | thread_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_verifier.md
+session_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+---
+Reviewing the runtime-routing cutover against the phase contract now. I’m checking the touched worker and ops paths for regressions first, then I’ll update the phase criteria and feedback artifacts only.
+
+I’ve confirmed the verifier artifacts are still untouched. Next I’m reading the phase notes, decisions, and the changed worker/ops code paths together so the criteria update reflects actual behavior rather than just test outcomes.
+
+The core worker flow is consistent with the phase contract so far: route target selection is registry-driven, accepted runs finalize structured output, and the legacy compatibility boundary stays in ops presentation. I’m checking the persistence and ops surfaces now for any silent regressions or overreach.
+
+I haven’t found a concrete defect yet. I’m rerunning the targeted regression suite now so the verifier state reflects both code inspection and executable validation before I touch the phase artifacts.
+
+I found one real correctness issue and one artifact-accuracy issue. I’m pinning exact line references now, then I’ll record them in the phase feedback and leave the criteria consistent with an `INCOMPLETE` review outcome.
+
+I’ve finished the audit. I’m recording the blocker details in the phase feedback now; the criteria file stays with all boxes unchecked because the implementation is not review-complete yet.
+
+Scope considered
+
+- Active phase `runtime-routing-ops-cutover` only: worker routing/publication cutover, manifest metadata, ops `route_target_id` read path, and the verifier artifacts in [.autoloop/tasks/route-target-registry-impl/implement/phases/runtime-routing-ops-cutover/criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/runtime-routing-ops-cutover/criteria.md) and [.autoloop/tasks/route-target-registry-impl/implement/phases/runtime-routing-ops-cutover/feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/runtime-routing-ops-cutover/feedback.md).
+
+What I analyzed
+
+- Phase contract, shared decisions, plan, and implementation notes.
+- Runtime/ops paths in [worker/triage.py](/home/marcelo/code/AutoSac/worker/triage.py), [worker/step_runner.py](/home/marcelo/code/AutoSac/worker/step_runner.py), [worker/pipeline.py](/home/marcelo/code/AutoSac/worker/pipeline.py), [worker/publication_policy.py](/home/marcelo/code/AutoSac/worker/publication_policy.py), [shared/ticketing.py](/home/marcelo/code/AutoSac/shared/ticketing.py), [app/ai_run_presenters.py](/home/marcelo/code/AutoSac/app/ai_run_presenters.py), and [app/routes_ops.py](/home/marcelo/code/AutoSac/app/routes_ops.py).
+- Targeted regression suite: `.venv/bin/pytest -q tests/test_ai_worker.py tests/test_routing_registry.py tests/test_ops_workflow.py tests/test_foundation_persistence.py` with `105 passed in 1.87s`.
+
+What I reviewed
+
+- Publication-mode enforcement versus the registry contract and downstream draft/publication behavior.
+- Run-manifest metadata sourcing during reruns and failure paths.
+- Verifier artifacts: feedback updated, criteria left unchecked because blocking findings remain.
+
+Key findings / decisions
+
+- `IMP-001` blocking: [worker/triage.py](/home/marcelo/code/AutoSac/worker/triage.py#L178) and [worker/triage.py](/home/marcelo/code/AutoSac/worker/triage.py#L298) compute `manual_only` downgrades but still create drafts whenever the specialist returned public reply text. A route target with `allow_draft_for_human=false` would still emit a draft and `draft_public_reply`.
+- `IMP-002` blocking: [worker/step_runner.py](/home/marcelo/code/AutoSac/worker/step_runner.py#L381) prefers `ticket.route_target_id` over the current run’s router output, so rerun and pre-finalization failure manifests can show the previous route target instead of the active run’s selection.
+- Findings were appended to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/runtime-routing-ops-cutover/feedback.md). [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/runtime-routing-ops-cutover/criteria.md) remains with no checked boxes.
+
+Open issues / next step
+
+- Producer should fix the two blockers, add regression coverage for draft-disabled publication policy and rerun/failure manifest metadata, then resubmit for review.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
