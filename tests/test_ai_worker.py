@@ -172,6 +172,9 @@ def _build_route_target(
     specialist_id: str | None = None,
     candidate_specialist_ids: tuple[str, ...] = (),
     human_queue_status: str | None = None,
+    allow_auto_publish: bool | None = None,
+    allow_draft_for_human: bool = True,
+    allow_manual_only: bool = True,
 ):
     return SimpleNamespace(
         id=route_target_id,
@@ -187,11 +190,11 @@ def _build_route_target(
             ),
         ),
         publish_policy=SimpleNamespace(
-            allow_auto_publish=(kind == "direct_ai"),
+            allow_auto_publish=(kind == "direct_ai") if allow_auto_publish is None else allow_auto_publish,
             min_response_confidence_for_auto_publish="high",
             max_risk_level_for_auto_publish="low",
-            allow_draft_for_human=True,
-            allow_manual_only=True,
+            allow_draft_for_human=allow_draft_for_human,
+            allow_manual_only=allow_manual_only,
         ),
     )
 
@@ -908,6 +911,152 @@ def test_apply_success_result_human_assist_never_auto_publishes(monkeypatch, tmp
     assert run.status == "human_review"
 
 
+def test_apply_success_result_direct_ai_manual_only_does_not_create_draft_when_policy_disables_drafts(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000007A",
+        title="Need review without draft",
+        status="ai_triage",
+        urgent=False,
+        ticket_class=None,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    publication_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash=publication_hash,
+        ended_at=None,
+        error_text=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        model_name=None,
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {"route": None}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "worker.triage.route_ticket_after_ai",
+        lambda *args, **kwargs: observed.update({"route": (kwargs["next_status"], kwargs["last_ai_action"])}),
+    )
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not create draft")))
+    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not auto publish")))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(
+            route_target_id="support",
+            kind="direct_ai",
+            mode="fixed",
+            specialist_id="support",
+            allow_draft_for_human=False,
+        ),
+        specialist_payload=_specialist_payload(
+            publish_mode_recommendation="draft_for_human",
+            public_reply_markdown="Draft this reply for review.",
+            internal_note_markdown="",
+        ),
+    )
+    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+
+    assert observed["route"] == ("ai_triage", "manual_only")
+    assert run.status == "human_review"
+    assert run.final_output_contract == "specialist_result"
+
+
+def test_apply_success_result_human_assist_manual_only_does_not_create_draft_when_policy_disables_drafts(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000007B",
+        title="Need human review without draft",
+        status="ai_triage",
+        urgent=False,
+        ticket_class=None,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    publication_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash=publication_hash,
+        ended_at=None,
+        error_text=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        model_name=None,
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {"route": None}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "worker.triage.route_ticket_after_ai",
+        lambda *args, **kwargs: observed.update({"route": (kwargs["next_status"], kwargs["last_ai_action"])}),
+    )
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not create draft")))
+    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not auto publish")))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(
+            route_target_id="manual_review",
+            kind="human_assist",
+            mode="fixed",
+            specialist_id="bug",
+            human_queue_status="waiting_on_dev_ti",
+            allow_draft_for_human=False,
+        ),
+        specialist_payload=_specialist_payload(
+            publish_mode_recommendation="draft_for_human",
+            public_reply_markdown="Draft this update for the requester.",
+        ),
+        specialist_spec_id="bug",
+    )
+    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+
+    assert observed["route"] == ("waiting_on_dev_ti", "manual_only")
+    assert run.status == "human_review"
+
+
 def test_apply_success_result_supersedes_stale_run_without_publication(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
@@ -1156,6 +1305,83 @@ def test_write_run_manifest_snapshot_serializes_route_target_metadata(monkeypatc
     assert metadata["effective_publication_mode"] == "draft_for_human"
     assert observed["steps"][1]["selected_specialist_id"] == "bug"
     assert observed["steps"][2]["publish_mode_recommendation"] == "draft_for_human"
+
+
+def test_write_run_manifest_snapshot_prefers_router_output_over_stale_ticket_route_target(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=uuid.uuid4(),
+        pipeline_version="agent-pipeline-v1",
+        status="failed",
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        error_text="Selector failed",
+        ended_at=SimpleNamespace(isoformat=lambda: "2026-04-06T01:05:00+00:00"),
+    )
+    ticket = SimpleNamespace(id=run.ticket_id, route_target_id="support", last_ai_action="auto_public_reply")
+    steps = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            step_index=1,
+            step_kind="router",
+            agent_spec_id="router",
+            agent_spec_version="1",
+            output_contract="router_result",
+            status="succeeded",
+            model_name="gpt-router",
+            prompt_path="/tmp/router-prompt.txt",
+            schema_path="/tmp/router-schema.json",
+            final_output_path="/tmp/router-final.json",
+            stdout_jsonl_path="/tmp/router-stdout.jsonl",
+            stderr_path="/tmp/router-stderr.txt",
+            output_json=_route_payload(route_target_id="manual_review", routing_rationale="Needs human review."),
+        ),
+    ]
+    observed = {}
+
+    class _FakeScalarResult:
+        def __init__(self, items):
+            self._items = items
+
+        def scalars(self):
+            return self
+
+        def __iter__(self):
+            return iter(self._items)
+
+    class _FakeManifestDb:
+        def get(self, model, key):
+            name = getattr(model, "__name__", "")
+            if name == "AIRun" and key == run.id:
+                return run
+            if name == "Ticket" and key == ticket.id:
+                return ticket
+            return None
+
+        def execute(self, statement):
+            return _FakeScalarResult(steps)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield _FakeManifestDb()
+
+    monkeypatch.setattr("worker.step_runner.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.step_runner.build_run_dir", lambda settings, ticket_id, run_id: tmp_path / "run")
+    monkeypatch.setattr(
+        "worker.step_runner.write_run_manifest",
+        lambda run_dir, **kwargs: observed.update({"run_dir": run_dir, **kwargs}),
+    )
+
+    symbols["write_run_manifest_snapshot"](settings, run_id=run.id)
+
+    metadata = observed["metadata"]
+    assert metadata["route_target_id"] == "manual_review"
+    assert metadata["route_target_label"] == "Manual Review"
+    assert metadata["route_target_kind"] == "human_assist"
 
 
 def test_heartbeat_loop_emits_while_stop_event_controls_exit(monkeypatch, tmp_path):

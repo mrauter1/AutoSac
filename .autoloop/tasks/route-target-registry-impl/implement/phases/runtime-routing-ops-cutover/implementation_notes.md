@@ -24,7 +24,9 @@
 - `shared.ticketing.create_ai_draft`
 - `worker.publication_policy.resolve_effective_publication_mode`
 - `worker.pipeline.execute_triage_pipeline`
+- `worker.triage._resolve_specialist_outcome`
 - `worker.triage._apply_success_result`
+- `worker.step_runner._resolve_route_target_details`
 - `worker.step_runner.write_run_manifest_snapshot`
 - `app.ai_run_presenters.present_ai_run_output`
 - `app.routes_ops._ops_filter_context`
@@ -46,6 +48,7 @@
 ## Preserved invariants
 
 - Accepted `succeeded` and `human_review` runs always persist non-null `final_output_contract` and `final_output_json`.
+- Publication side effects now strictly follow `publication_policy.effective_mode`; `manual_only` outcomes never create drafts or public replies even if the specialist returned reply text.
 - No new worker runtime fallback path was added for legacy payloads; compatibility is confined to ops presentation.
 - Registry validation remains authoritative for enabled route targets and selectable specialists.
 
@@ -66,16 +69,17 @@
 - New specialist specs now emit `specialist_result`, so accepted runs surface response confidence/risk/publication recommendation in manifests and ops detail.
 - Direct-AI human-review outcomes now stay in `ai_triage` instead of using the old route-to-Dev/TI shortcut.
 - Human-assist routes with public drafts move tickets to the configured human queue status while keeping requester publication manual.
+- Rerun and failed-run manifests now report the active run's router-selected route target instead of inheriting the previous successful ticket route target.
 
 ## Validation performed
 
 - `python -m py_compile worker/triage.py worker/pipeline.py worker/publication_policy.py worker/step_runner.py worker/prompt_renderer.py worker/artifacts.py worker/output_contracts.py shared/ticketing.py shared/agent_specs.py app/ai_run_presenters.py app/routes_ops.py`
 - `python -m py_compile tests/test_ai_worker.py tests/test_routing_registry.py tests/test_ops_workflow.py tests/test_foundation_persistence.py`
 - `.venv/bin/pytest -q tests/test_ai_worker.py tests/test_routing_registry.py tests/test_ops_workflow.py tests/test_foundation_persistence.py`
-  Result: `105 passed`
+  Result: `108 passed`
 
 ## Centralization / deduplication
 
 - Publication gating now lives in `worker/publication_policy.py` instead of being spread across triage outcome branches.
 - Ops contract adaptation is centralized in `app/ai_run_presenters.py` instead of templates inspecting raw legacy/new payload shapes directly.
-- Run and step manifest enrichment is centralized in `worker.step_runner`/`worker.artifacts` so route-target metadata is generated once per snapshot path.
+- Run and step manifest enrichment is centralized in `worker.step_runner`/`worker.artifacts`; router-step metadata is now the first source for per-run route-target presentation so reruns cannot drift to stale ticket state.

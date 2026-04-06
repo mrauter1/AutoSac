@@ -182,6 +182,7 @@ def _resolve_specialist_outcome(
     route_target = pipeline_result.route_target
     decision = resolve_effective_publication_mode(route_target, specialist_result)
     public_reply_markdown = specialist_result.public_reply_markdown.strip()
+    effective_public_reply_markdown = public_reply_markdown if decision.effective_mode != "manual_only" else ""
 
     if route_target.kind == "direct_ai":
         if decision.effective_mode == "auto_publish":
@@ -189,7 +190,7 @@ def _resolve_specialist_outcome(
                 ResolvedRunOutcome(
                     run_status="succeeded",
                     effective_publication_mode="auto_publish",
-                    public_reply_markdown=public_reply_markdown,
+                    public_reply_markdown=effective_public_reply_markdown,
                     internal_note_markdown=specialist_result.internal_note_markdown.strip(),
                     next_status="waiting_on_user",
                     last_ai_action="auto_public_reply",
@@ -200,7 +201,7 @@ def _resolve_specialist_outcome(
             ResolvedRunOutcome(
                 run_status="human_review",
                 effective_publication_mode=decision.effective_mode,
-                public_reply_markdown=public_reply_markdown,
+                public_reply_markdown=effective_public_reply_markdown,
                 internal_note_markdown=_synthesized_direct_ai_internal_note(specialist_result),
                 next_status="ai_triage",
                 last_ai_action="draft_public_reply" if decision.effective_mode == "draft_for_human" else "manual_only",
@@ -215,13 +216,13 @@ def _resolve_specialist_outcome(
         ResolvedRunOutcome(
             run_status="human_review",
             effective_publication_mode=decision.effective_mode,
-            public_reply_markdown=public_reply_markdown,
+            public_reply_markdown=effective_public_reply_markdown,
             internal_note_markdown=_synthesized_human_assist_internal_note(
                 specialist_result,
                 router_rationale=pipeline_result.router_result.routing_rationale,
             ),
             next_status=human_queue_status,
-            last_ai_action="draft_public_reply" if public_reply_markdown else "manual_only",
+            last_ai_action="draft_public_reply" if decision.effective_mode == "draft_for_human" else "manual_only",
         ),
         decision,
     )

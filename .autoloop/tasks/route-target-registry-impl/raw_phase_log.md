@@ -1150,3 +1150,62 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=producer | cycle=2 | attempt=1 | thread_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_producer.md
+session_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+---
+Addressing the two reviewer blockers now: I’m tracing the publication-mode path in `worker/triage.py` and the run-manifest metadata path in `worker/step_runner.py`, then I’ll patch the regression tests around both behaviors before touching the phase notes.
+
+I have the minimal fix shape pinned down. I’m updating `worker/triage.py` to make `manual_only` suppress drafts at the outcome layer, and `worker/step_runner.py` to source manifest route-target metadata from the active run’s router step before the persisted ticket state.
+
+The code changes are in. I’m extending the worker tests now to hit the exact downgrade and rerun-manifest scenarios the reviewer called out, instead of relying on the previously green happy-path coverage.
+
+The new regression cases are passing. I’m running the full targeted worker/ops suite again and then I’ll refresh the phase notes so the producer artifacts capture the reviewer-driven fixes cleanly.
+
+The full suite is green again. I’ve got a runtime-created decisions header for this turn, so I’m appending the two non-obvious guardrails there before I refresh `implementation_notes.md`.
+
+Scope considered
+
+- Active phase `runtime-routing-ops-cutover` only, focused on the two verifier blockers in [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/runtime-routing-ops-cutover/feedback.md): publication downgrade side effects and rerun/failure run-manifest route-target metadata.
+- Reviewer-owned [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/runtime-routing-ops-cutover/criteria.md) was not edited.
+
+What I analyzed
+
+- Publication resolution and success finalization in [worker/triage.py](/home/marcelo/code/AutoSac/worker/triage.py#L178).
+- Run-manifest metadata sourcing in [worker/step_runner.py](/home/marcelo/code/AutoSac/worker/step_runner.py#L381).
+- Existing worker regression coverage in [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py).
+
+What I changed
+
+- In [worker/triage.py](/home/marcelo/code/AutoSac/worker/triage.py#L178), `manual_only` now suppresses draft/public side effects even when the specialist payload still contains `public_reply_markdown`; `last_ai_action` is driven by `effective_mode` for both direct-AI and human-assist outcomes.
+- In [worker/step_runner.py](/home/marcelo/code/AutoSac/worker/step_runner.py#L381), run-manifest route-target metadata now prefers the active run’s router-step output before falling back to `ticket.route_target_id`.
+- In [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py#L914) and [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py#L1336), I added regression coverage for draft-disabled `manual_only` downgrades and stale-ticket rerun manifests.
+- I updated [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/runtime-routing-ops-cutover/implementation_notes.md) and appended the non-obvious guardrails under the current turn header in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt).
+
+Key findings / decisions
+
+- `publication_policy.effective_mode` is now authoritative for side effects; structured `final_output_json` still preserves the specialist payload even when the effective mode is downgraded to `manual_only`.
+- Run manifests now represent the current run’s router decision, which avoids stale route-target labels on reruns and pre-finalization failures.
+- Validation passed:
+  `python -m py_compile worker/triage.py worker/step_runner.py tests/test_ai_worker.py`
+  `.venv/bin/pytest -q tests/test_ai_worker.py tests/test_routing_registry.py tests/test_ops_workflow.py tests/test_foundation_persistence.py`
+  Result: `108 passed in 1.89s`
+
+Open issues / next step
+
+- No known functional blockers remain in this phase slice.
+- Next step is verifier re-review against the updated worker logic and regression tests.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
