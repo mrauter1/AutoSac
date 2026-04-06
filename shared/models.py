@@ -24,7 +24,6 @@ from shared.security import utc_now
 
 USER_ROLES = ("requester", "dev_ti", "admin")
 TICKET_STATUSES = ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")
-TICKET_CLASSES = ("support", "access_config", "data_ops", "bug", "feature", "unknown")
 IMPACT_LEVELS = ("low", "medium", "high", "unknown")
 AUTHOR_TYPES = ("requester", "dev_ti", "ai", "system")
 VISIBILITIES = ("public", "internal")
@@ -104,7 +103,6 @@ class Ticket(Base):
     __tablename__ = "tickets"
     __table_args__ = (
         CheckConstraint(f"status IN {_enum_sql(TICKET_STATUSES)}", name="tickets_status"),
-        CheckConstraint(f"ticket_class IS NULL OR ticket_class IN {_enum_sql(TICKET_CLASSES)}", name="tickets_ticket_class"),
         CheckConstraint(f"impact_level IS NULL OR impact_level IN {_enum_sql(IMPACT_LEVELS)}", name="tickets_impact_level"),
         CheckConstraint(f"requeue_trigger IS NULL OR requeue_trigger IN {_enum_sql(REQUEUE_TRIGGERS)}", name="tickets_requeue_trigger"),
         Index("ix_tickets_status_updated_at", "status", text("updated_at DESC")),
@@ -127,7 +125,6 @@ class Ticket(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False)
     urgent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     route_target_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    ticket_class: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_confidence: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
     impact_level: Mapped[str | None] = mapped_column(Text, nullable=True)
     development_needed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

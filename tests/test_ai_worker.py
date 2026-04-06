@@ -636,7 +636,6 @@ def test_apply_success_result_auto_publish_sets_route_target_and_final_fields(mo
         title="Permission issue",
         status="ai_triage",
         urgent=False,
-        ticket_class="legacy-support",
         ai_confidence=0.5,
         impact_level="medium",
         development_needed=True,
@@ -690,7 +689,6 @@ def test_apply_success_result_auto_publish_sets_route_target_and_final_fields(mo
 
     assert events == ["internal", "public:auto_public_reply", "requeue"]
     assert ticket.route_target_id == "support"
-    assert ticket.ticket_class == "legacy-support"
     assert ticket.requester_language == "en"
     assert ticket.ai_confidence == 0.5
     assert ticket.impact_level == "medium"
@@ -711,7 +709,6 @@ def test_apply_success_result_draft_for_human_keeps_direct_ai_ticket_in_ai_triag
         title="Needs review",
         status="ai_triage",
         urgent=False,
-        ticket_class=None,
         requester_language=None,
         last_processed_hash=None,
         last_ai_action=None,
@@ -778,7 +775,6 @@ def test_apply_success_result_human_assist_none_synthesizes_terminal_handoff(mon
         title="Need a human",
         status="ai_triage",
         urgent=False,
-        ticket_class=None,
         requester_language=None,
         last_processed_hash=None,
         last_ai_action=None,
@@ -848,7 +844,6 @@ def test_apply_success_result_human_assist_never_auto_publishes(monkeypatch, tmp
         title="Need manual queue",
         status="ai_triage",
         urgent=False,
-        ticket_class=None,
         requester_language=None,
         last_processed_hash=None,
         last_ai_action=None,
@@ -920,7 +915,6 @@ def test_apply_success_result_direct_ai_manual_only_does_not_create_draft_when_p
         title="Need review without draft",
         status="ai_triage",
         urgent=False,
-        ticket_class=None,
         requester_language=None,
         last_processed_hash=None,
         last_ai_action=None,
@@ -994,7 +988,6 @@ def test_apply_success_result_human_assist_manual_only_does_not_create_draft_whe
         title="Need human review without draft",
         status="ai_triage",
         urgent=False,
-        ticket_class=None,
         requester_language=None,
         last_processed_hash=None,
         last_ai_action=None,
@@ -1069,7 +1062,6 @@ def test_apply_success_result_supersedes_stale_run_without_publication(monkeypat
         title="Stale input",
         status="ai_triage",
         urgent=False,
-        ticket_class=None,
         requester_language=None,
         last_processed_hash=None,
         last_ai_action=None,

@@ -52,6 +52,9 @@ def present_ai_run_output(run) -> dict[str, Any]:
         "relevant_paths": [],
         "public_reply_markdown": "",
         "internal_note_markdown": "",
+        "legacy_confidence": None,
+        "legacy_impact_level": None,
+        "legacy_development_needed": None,
         "response_confidence": None,
         "risk_level": None,
         "risk_reason": "",
@@ -69,6 +72,9 @@ def present_ai_run_output(run) -> dict[str, Any]:
                 "relevant_paths": payload.get("relevant_paths", []),
                 "public_reply_markdown": payload.get("public_reply_markdown", ""),
                 "internal_note_markdown": payload.get("internal_note_markdown", ""),
+                "legacy_confidence": payload.get("confidence"),
+                "legacy_impact_level": payload.get("impact_level"),
+                "legacy_development_needed": payload.get("development_needed"),
             }
         )
         return presentation

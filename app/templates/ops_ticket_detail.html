@@ -109,7 +109,7 @@
         {% endif %}
       </div>
       {% endif %}
-      {% if latest_run and latest_run.error_text or ai_relevant_paths or latest_ai_note or latest_analysis_steps or latest_run_steps or analysis_view.response_confidence or analysis_view.risk_level or analysis_view.publish_mode_recommendation or analysis_view.risk_reason or analysis_view.assistant_used is not none or ticket.ai_confidence is not none or ticket.impact_level or ticket.development_needed is not none or ticket.requester_language or ticket.last_ai_action or ticket.requeue_requested %}
+      {% if latest_run and latest_run.error_text or ai_relevant_paths or latest_ai_note or latest_analysis_steps or latest_run_steps or analysis_view.response_confidence or analysis_view.risk_level or analysis_view.publish_mode_recommendation or analysis_view.risk_reason or analysis_view.assistant_used is not none or analysis_view.get("legacy_confidence") is not none or analysis_view.get("legacy_impact_level") or analysis_view.get("legacy_development_needed") is not none or ticket.requester_language or ticket.last_ai_action or ticket.requeue_requested %}
       <details class="analysis-disclosure">
         <summary>More analysis</summary>
         <div class="analysis-disclosure__content stack stack--tight">
@@ -132,18 +132,24 @@
               <dd>{{ analysis_view.publish_mode_recommendation.replace("_", " ").title() }}</dd>
             </div>
             {% endif %}
+            {% if analysis_view.get("legacy_confidence") is not none %}
             <div>
               <dt>Legacy confidence</dt>
-              <dd>{{ ticket.ai_confidence if ticket.ai_confidence is not none else "Unknown" }}</dd>
+              <dd>{{ analysis_view.get("legacy_confidence") }}</dd>
             </div>
+            {% endif %}
+            {% if analysis_view.get("legacy_impact_level") %}
             <div>
               <dt>Legacy impact</dt>
-              <dd>{{ ticket.impact_level or "unknown" }}</dd>
+              <dd>{{ analysis_view.get("legacy_impact_level") }}</dd>
             </div>
+            {% endif %}
+            {% if analysis_view.get("legacy_development_needed") is not none %}
             <div>
               <dt>Legacy development needed</dt>
-              <dd>{{ "Yes" if ticket.development_needed else "No" if ticket.development_needed is not none else "Unknown" }}</dd>
+              <dd>{{ "Yes" if analysis_view.get("legacy_development_needed") else "No" }}</dd>
             </div>
+            {% endif %}
             <div>
               <dt>Requester language</dt>
               <dd>{{ ticket.requester_language or "Unknown" }}</dd>

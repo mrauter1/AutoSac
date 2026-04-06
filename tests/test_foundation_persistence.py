@@ -269,6 +269,15 @@ def test_route_target_compatibility_migration_adds_backfill_and_selector_step_ki
     assert "route_target_id IN" not in migration_source
 
 
+def test_route_target_cleanup_migration_drops_legacy_ticket_class_storage():
+    migration_source = Path("shared/migrations/versions/20260406_0006_drop_ticket_class.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'batch_op.drop_constraint(op.f("ck_tickets_tickets_ticket_class"), type_="check")' in migration_source
+    assert 'batch_op.drop_column("ticket_class")' in migration_source
+
+
 def test_route_target_compatibility_persistence_backfills_and_allows_selector_steps(tmp_path):
     db_path = tmp_path / "route-target-compatibility.db"
 
@@ -418,7 +427,58 @@ def test_route_target_compatibility_persistence_backfills_and_allows_selector_st
     assert step_rows == [("step-1", "router"), ("step-2", "selector")]
 
 
-def test_models_expose_route_target_storage_without_a_db_taxonomy_constraint():
+def test_route_target_cleanup_persistence_drops_ticket_class_column_and_keeps_route_target_data(tmp_path):
+    db_path = tmp_path / "route-target-cleanup.db"
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE tickets (
+                id TEXT PRIMARY KEY,
+                ticket_class TEXT,
+                route_target_id TEXT,
+                requester_language TEXT
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO tickets (id, ticket_class, route_target_id, requester_language) VALUES (?, ?, ?, ?)",
+            ("ticket-1", "support", "support", "en"),
+        )
+        connection.execute(
+            "INSERT INTO tickets (id, ticket_class, route_target_id, requester_language) VALUES (?, ?, ?, ?)",
+            ("ticket-2", None, "manual_review", "pt-BR"),
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE tickets_v2 (
+                id TEXT PRIMARY KEY,
+                route_target_id TEXT,
+                requester_language TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO tickets_v2 (id, route_target_id, requester_language)
+            SELECT id, route_target_id, requester_language
+            FROM tickets
+            """
+        )
+        connection.execute("DROP TABLE tickets")
+        connection.execute("ALTER TABLE tickets_v2 RENAME TO tickets")
+
+        ticket_rows = connection.execute(
+            "SELECT id, route_target_id, requester_language FROM tickets ORDER BY id"
+        ).fetchall()
+        ticket_columns = [row[1] for row in connection.execute("PRAGMA table_info(tickets)").fetchall()]
+
+    assert ticket_rows == [("ticket-1", "support", "en"), ("ticket-2", "manual_review", "pt-BR")]
+    assert ticket_columns == ["id", "route_target_id", "requester_language"]
+
+
+def test_models_expose_route_target_storage_without_db_taxonomy_constraints_or_ticket_class_column():
     pytest.importorskip("sqlalchemy")
     from sqlalchemy import CheckConstraint
 
@@ -426,25 +486,30 @@ def test_models_expose_route_target_storage_without_a_db_taxonomy_constraint():
 
     assert AI_RUN_STEP_KINDS == ("router", "selector", "specialist")
     assert "route_target_id" in Ticket.__table__.c
+    assert "ticket_class" not in Ticket.__table__.c
     route_target_constraints = [
         str(constraint.sqltext)
         for constraint in Ticket.__table__.constraints
         if isinstance(constraint, CheckConstraint) and "route_target_id" in str(constraint.sqltext)
     ]
     assert route_target_constraints == []
+    legacy_ticket_class_constraints = [
+        str(constraint.sqltext)
+        for constraint in Ticket.__table__.constraints
+        if isinstance(constraint, CheckConstraint) and "ticket_class" in str(constraint.sqltext)
+    ]
+    assert legacy_ticket_class_constraints == []
 
 
-def test_apply_ai_route_target_sets_route_target_and_requester_language_without_touching_legacy_ticket_class():
+def test_apply_ai_route_target_sets_route_target_and_requester_language():
     pytest.importorskip("sqlalchemy")
     from shared.ticketing import apply_ai_route_target
 
     ticket = _make_ticket()
-    ticket.ticket_class = "support"
 
     apply_ai_route_target(ticket, route_target_id="support", requester_language="en")
 
     assert ticket.route_target_id == "support"
-    assert ticket.ticket_class == "support"
     assert ticket.requester_language == "en"
 
 
@@ -457,7 +522,6 @@ def test_apply_ai_route_target_allows_manual_review_after_cutover():
     apply_ai_route_target(ticket, route_target_id="manual_review", requester_language="en")
 
     assert ticket.route_target_id == "manual_review"
-    assert ticket.ticket_class is None
     assert ticket.requester_language == "en"
 
 

@@ -1360,3 +1360,77 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=producer | cycle=1 | attempt=1 | thread_id=019d641e-60af-7c23-8f20-e00eeba4bde4
+---
+provider=codex
+mode=start
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_producer.md
+session_id=019d641e-60af-7c23-8f20-e00eeba4bde4
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d641e-60af-7c23-8f20-e00eeba4bde4
+---
+I’m treating the PRD/ARD and the active cleanup-verification artifacts as the contract for this turn. First I’m reading the phase docs, shared decisions, and the current code paths around `ticket_class` and route-target readiness so I can scope the cleanup without pulling unrelated changes into it.
+
+I’ve confirmed this phase starts from a dirty worktree with prior route-target work already present, so I’m staying narrowly on cleanup and verification. Next I’m mapping every remaining `ticket_class`/legacy taxonomy surface and comparing it to the phase plan so the edits only remove code that is supposed to be gone now.
+
+The remaining legacy surfaces are concentrated in model/schema definitions, the legacy triage contract, a few ops detail fields, and tests that still pin old payloads. I’m turning that into a concrete cleanup plan now, then I’ll patch the runtime/schema/test edges together so the migration and checks land consistently.
+
+I’ve isolated one important inconsistency: the runtime already cut over, but the code still carries a hardcoded legacy `TriageResult` schema and the `Ticket` model still declares the old `ticket_class` constraint/column. I’m reading the surrounding spec and tests now to decide which legacy pieces stay as presentation-only adapters and which need to be deleted outright in this phase.
+
+I’ve got enough context to start editing. The patch set will remove the live `ticket_class` model/constraint, add the cleanup migration, demote legacy `triage_result` handling to presentation-only shape parsing, and trim ops detail/tests so they assert route-target invariants instead of legacy ticket fields.
+
+I’m patching the schema/runtime edge now. This first edit removes the live `ticket_class` model/constraint so the code matches the cleanup migration that will follow, while leaving the remaining legacy analytics columns readable until a later phase removes them.
+
+The next patch is the cleanup migration itself. It drops the legacy `ticket_class` constraint/column at head, while keeping a bounded downgrade path that only reconstructs `ticket_class` for the legacy 1:1 route-target IDs.
+
+I’m updating the persistence tests alongside the migration. These changes move the regression checks from “dual-write compatibility exists” to “cleanup head has no `ticket_class` schema left, while historical backfill behavior still works.”
+
+I’ve finished the broad cleanup edits and I’m running another repo scan before touching the remaining tests/artifacts. I’m checking for any lingering live `ticket_class` references outside migrations, docs, and historical backfill paths so I don’t miss a runtime or ops edge.
+
+The remaining work is verification and artifact updates. I’m running targeted compiles/tests now against the files I changed, then I’ll do the phase notes/decision ledger once the results are stable.
+
+The compile pass is clean. The test run is still in flight; I’m waiting on the full result before I touch the loop artifacts so the notes reflect the actual validation status.
+
+The regression suite is green on the touched surfaces. I’m running the explicit smoke/readiness commands next because this phase requires `run_web.py --check` and `run_worker.py --check`, and I want to see whether the current environment is actually provisioned for them.
+
+The code-level checks passed, but the smoke checks exposed an environment issue rather than a repo defect: the workspace hasn’t been re-bootstrapped to include the new selector skill file. I’m applying the existing bootstrap path once and re-running the checks so we can distinguish “bad code” from “stale workspace state.”
+
+I’ve got green code and smoke checks now, so I’m writing the phase artifacts last. I’m recording only the non-obvious cleanup decisions that would be easy to regress later: where legacy `triage_result` still survives, and where historical ops detail now sources its legacy fields.
+
+Scope considered
+
+- Cleanup-verification only: remove live `ticket_class` head-schema/runtime usage, add the cleanup migration, keep historical `triage_result` support bounded to backfill/presentation, and re-run the required readiness/regression checks.
+
+What I analyzed
+
+- Remaining live legacy surfaces in [shared/models.py](/home/marcelo/code/AutoSac/shared/models.py), [worker/output_contracts.py](/home/marcelo/code/AutoSac/worker/output_contracts.py), [app/ai_run_presenters.py](/home/marcelo/code/AutoSac/app/ai_run_presenters.py), [app/templates/ops_ticket_detail.html](/home/marcelo/code/AutoSac/app/templates/ops_ticket_detail.html), and the persistence/worker tests.
+- Migration chain and phase artifacts, plus the workspace/readiness path used by `scripts/run_web.py --check` and `scripts/run_worker.py --check`.
+
+What I changed
+
+- Removed the head-model `ticket_class` constant/constraint/column from [shared/models.py](/home/marcelo/code/AutoSac/shared/models.py).
+- Added cleanup migration [20260406_0006_drop_ticket_class.py](/home/marcelo/code/AutoSac/shared/migrations/versions/20260406_0006_drop_ticket_class.py) to drop the legacy constraint/column, with a bounded downgrade for legacy-overlap IDs only.
+- Changed the legacy `triage_result` read model in [worker/output_contracts.py](/home/marcelo/code/AutoSac/worker/output_contracts.py) so it no longer hardcodes route-taxonomy literals.
+- Moved legacy ops-detail values to the presentation adapter in [app/ai_run_presenters.py](/home/marcelo/code/AutoSac/app/ai_run_presenters.py) and [ops_ticket_detail.html](/home/marcelo/code/AutoSac/app/templates/ops_ticket_detail.html) instead of reading ticket-row fallback fields directly.
+- Updated regression coverage in [tests/test_foundation_persistence.py](/home/marcelo/code/AutoSac/tests/test_foundation_persistence.py) and [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py), and recorded the phase notes/decisions.
+
+Key findings / decisions
+
+- `triage_result` still needs to exist for historical backfill/presentation, but only as a legacy read model; new execution does not use it.
+- Ops historical detail now gets legacy confidence/impact/development-needed from accepted run payloads, not from `tickets.ticket_class`.
+- Validation passed:
+  - `python -m py_compile ...`
+  - `.venv/bin/pytest -q tests/test_foundation_persistence.py tests/test_ai_worker.py tests/test_ops_workflow.py tests/test_routing_registry.py` -> `110 passed`
+  - `python scripts/run_web.py --check` -> passed
+  - `python scripts/run_worker.py --check` -> passed
+- The smoke checks initially failed because `/home/marcelo/autosac_workspace` was stale and missing the selector skill; re-running `bootstrap_workspace()` refreshed the workspace and cleared both checks.
+
+Open issues / next step
+
+- No code issues remain in this phase’s scope.
+- If another environment still has a pre-refresh workspace, rerun bootstrap before expecting readiness to pass.
