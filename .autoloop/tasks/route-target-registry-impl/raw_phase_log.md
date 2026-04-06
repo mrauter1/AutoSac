@@ -62,3 +62,55 @@ Updated the planner artifacts in [plan.md](/home/marcelo/code/AutoSac/.autoloop/
 The plan is now implementation-ready and aligned to the spec’s required sequencing: `registry/contracts` -> `additive migration + backfill + dual-write` -> `runtime routing/publication + ops cutover` -> `cleanup`. It explicitly locks the key non-obvious choices needed to avoid drift: preserve the current persisted class IDs as the initial direct-AI `route_target_id` set for lossless backfill, keep specialist IDs aligned to existing spec IDs, and confine legacy `triage_result` compatibility to ops presentation only.
 
 I re-read the written artifacts for consistency after fixing the migration/runtime ordering issue. No clarifying question was necessary from the current authoritative inputs.
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=plan | phase=verifier | cycle=1 | attempt=1 | thread_id=019d63dc-5d79-7db3-b4da-0fb84071cab9
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/plan_verifier.md
+session_id=019d63dc-5d79-7db3-b4da-0fb84071cab9
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=plan | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d63dc-5d79-7db3-b4da-0fb84071cab9
+---
+I’m verifying the generated plan against the authoritative spec, raw log, and shared decisions first, then I’ll update the criteria and append only the findings that materially affect implementability or safety.
+
+I found two material issues: one is a behavioral-safety ambiguity in the proposed initial taxonomy, and the other is an unresolved compatibility failure in the dual-write phase for new route-target IDs. I’m recording those as blocking findings and updating the verification checklist accordingly.
+
+The findings and checklist are recorded. I’m doing a quick final read of the verifier-owned files now, then I’ll return the required summary plus the canonical loop-control status.
+
+Scope considered
+
+- Verified the active planning artifacts against the authoritative request, raw log, spec, and shared decisions.
+- Broadened review only far enough to confirm the plan’s migration and behavior assumptions against the spec’s route-target, human-assist, and dual-write requirements.
+
+What I analyzed
+
+- The authoritative spec sections covering registry shape, human-assist behavior, publication policy, persistence changes, migration order, ops compatibility, and acceptance criteria.
+- The produced [plan.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/plan.md), [phase_plan.yaml](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/phase_plan.yaml), [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/feedback.md), [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/criteria.md), and [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt).
+
+What I reviewed
+
+- Phase ordering, dependency coherence, rollout/rollback coverage, and migration safety.
+- Whether the plan silently changed product behavior or left compatibility gaps unresolved.
+- Whether the shared decisions conflict with or silently extend the spec in risky ways.
+
+Key findings / decisions
+
+- Updated [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/criteria.md) with all boxes left unchecked because there are blocking issues.
+- Appended two blocking findings to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/feedback.md):
+- `PLAN-001`: the plan locks `unknown` as an enabled new-run `direct_ai` target while also introducing `manual_review` for ambiguous/high-risk human escalation, creating overlapping taxonomy semantics and a material behavioral-safety risk.
+- `PLAN-002`: the plan requires the mandatory dual-write phase but does not define how new route-target IDs like `manual_review` can be written to legacy `ticket_class` while the old DB constraint still exists.
+
+Open issues / next step
+
+- The producer needs to revise the plan so the initial enabled taxonomy does not silently preserve unsafe overlap between `unknown` and human-assist routing.
+- The producer also needs to add an explicit compatibility strategy for dual-writing non-legacy route-target IDs during the constrained `ticket_class` phase.
+- Verification remains incomplete until those blocking issues are resolved in the planning artifacts.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
