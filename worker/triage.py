@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 import hashlib
 import json
+from typing import Literal
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
-
+from shared.agent_specs import PIPELINE_VERSION
 from shared.config import Settings
 from shared.db import session_scope
 from shared.models import AIRun, Ticket
 from shared.security import utc_now
 from shared.ticketing import (
-    apply_ai_classification,
+    apply_ai_route_target,
     create_ai_draft,
     process_deferred_requeue,
     publish_ai_failure_note,
@@ -23,63 +22,11 @@ from shared.ticketing import (
     request_requeue,
     route_ticket_after_ai,
 )
-from worker.codex_runner import CodexRunError, PreparedCodexRun, execute_codex_run, prepare_codex_run
+from worker.output_contracts import TriageResult
+from worker.pipeline import execute_triage_pipeline
+from worker.step_runner import StepRunError, write_run_manifest_snapshot
 from worker.ticket_loader import LoadedTicketContext, load_ticket_context
-
-
-class TriageResultError(RuntimeError):
-    """Raised when the canonical Codex output violates the Stage 1 contract."""
-
-
-_UNCERTAINTY_CAVEAT_PHRASES = (
-    "could not verify",
-    "couldn't verify",
-    "did not find",
-    "didn't find",
-    "not completely sure",
-    "not fully certain",
-    "best guess",
-    "best-effort",
-    "unverified",
-)
-
-
-class RelevantPathResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    path: str
-    reason: str
-
-
-class TriageResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    ticket_class: Literal["support", "access_config", "data_ops", "bug", "feature", "unknown"]
-    confidence: float = Field(ge=0.0, le=1.0)
-    impact_level: Literal["low", "medium", "high", "unknown"]
-    requester_language: str = Field(min_length=2)
-    summary_short: str = Field(min_length=1, max_length=120)
-    summary_internal: str = Field(min_length=1)
-    development_needed: bool
-    needs_clarification: bool
-    clarifying_questions: list[str] = Field(max_length=3)
-    incorrect_or_conflicting_details: list[str]
-    evidence_found: bool
-    relevant_paths: list[RelevantPathResult]
-    answer_scope: Literal["document_scoped", "general_reasoning"]
-    evidence_status: Literal["verified", "not_found_low_risk_guess", "not_applicable"]
-    misuse_or_safety_risk: bool
-    human_review_reason: str
-    recommended_next_action: Literal[
-        "ask_clarification",
-        "auto_public_reply",
-        "auto_confirm_and_route",
-        "draft_public_reply",
-        "route_dev_ti",
-    ]
-    auto_public_reply_allowed: bool
-    public_reply_markdown: str
-    internal_note_markdown: str
+from worker.triage_validation import TriageResultError, validate_triage_result
 
 
 @dataclass(frozen=True)
@@ -87,7 +34,7 @@ class PreparedRunContext:
     run_id: uuid.UUID
     ticket_id: uuid.UUID
     input_hash: str
-    prepared_codex_run: PreparedCodexRun
+    context: LoadedTicketContext
 
 
 @dataclass(frozen=True)
@@ -122,70 +69,6 @@ def build_requester_visible_fingerprint(context: LoadedTicketContext) -> str:
     }
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-
-def validate_triage_result(payload: dict[str, object], settings: Settings) -> TriageResult:
-    try:
-        result = TriageResult.model_validate(payload)
-    except ValidationError as exc:
-        raise TriageResultError(f"Codex output failed schema validation: {exc}") from exc
-
-    public_reply = result.public_reply_markdown.strip()
-    clarifying_questions = [question.strip() for question in result.clarifying_questions if question.strip()]
-    if result.needs_clarification and not clarifying_questions:
-        raise TriageResultError("needs_clarification=true requires at least one clarifying question")
-    if not result.needs_clarification and clarifying_questions:
-        raise TriageResultError("clarifying_questions require needs_clarification=true")
-
-    _validate_scope_and_evidence(result)
-    _validate_human_review_metadata(result)
-    if result.recommended_next_action not in {"ask_clarification", "route_dev_ti"} and not public_reply:
-        raise TriageResultError(f"{result.recommended_next_action} requires a non-empty public reply")
-    return result
-
-
-def _validate_scope_and_evidence(result: TriageResult) -> None:
-    if result.answer_scope == "document_scoped":
-        if result.evidence_status == "not_applicable":
-            raise TriageResultError("document_scoped answers require verified evidence or an explicit low-risk guess")
-        if not result.relevant_paths:
-            raise TriageResultError("document_scoped answers must include relevant_paths for the sources checked")
-    elif result.evidence_status != "not_applicable":
-        raise TriageResultError("general_reasoning answers must set evidence_status=not_applicable")
-
-    if result.evidence_status == "verified":
-        if not result.evidence_found:
-            raise TriageResultError("evidence_status=verified requires evidence_found=true")
-        if not result.relevant_paths:
-            raise TriageResultError("evidence_status=verified requires relevant_paths")
-        return
-
-    if result.evidence_status == "not_found_low_risk_guess":
-        if result.answer_scope != "document_scoped":
-            raise TriageResultError("not_found_low_risk_guess is only valid for document_scoped answers")
-        if result.evidence_found:
-            raise TriageResultError("not_found_low_risk_guess requires evidence_found=false")
-        public_reply = result.public_reply_markdown.strip()
-        if public_reply and not _has_uncertainty_caveat(public_reply):
-            raise TriageResultError(
-                "document-scoped low-risk guesses must clearly say the answer was not verified in manuals/ or app/"
-            )
-        return
-
-    if result.evidence_found:
-        raise TriageResultError("evidence_status=not_applicable requires evidence_found=false")
-
-
-def _validate_human_review_metadata(result: TriageResult) -> None:
-    if result.misuse_or_safety_risk and not result.human_review_reason.strip():
-        raise TriageResultError("misuse_or_safety_risk=true requires a human_review_reason")
-    if result.recommended_next_action in {"draft_public_reply", "route_dev_ti"} and not result.human_review_reason.strip():
-        raise TriageResultError(f"{result.recommended_next_action} requires a human_review_reason")
-
-
-def _has_uncertainty_caveat(text: str) -> bool:
-    normalized = text.lower()
-    return any(phrase in normalized for phrase in _UNCERTAINTY_CAVEAT_PHRASES)
 
 
 def _clarification_public_reply(result: TriageResult) -> str:
@@ -327,6 +210,11 @@ def _prepare_run(settings: Settings, *, run_id) -> PreparedRunContext | None:
         if run.triggered_by != "manual_rerun" and current_fingerprint == context.ticket.last_processed_hash:
             run.input_hash = current_fingerprint
             run.model_name = settings.codex_model or None
+            run.pipeline_version = PIPELINE_VERSION
+            run.final_step_id = None
+            run.final_agent_spec_id = None
+            run.final_output_contract = None
+            run.final_output_json = None
             run.error_text = None
             run.status = "skipped"
             run.ended_at = utc_now()
@@ -344,27 +232,20 @@ def _prepare_run(settings: Settings, *, run_id) -> PreparedRunContext | None:
             context = load_ticket_context(db, run.ticket_id)
 
         input_hash = build_requester_visible_fingerprint(context)
-        prepared = prepare_codex_run(
-            settings,
-            ticket_id=context.ticket.id,
-            run_id=run.id,
-            context=context,
-        )
-
         run.input_hash = input_hash
-        run.model_name = settings.codex_model or None
-        run.prompt_path = str(prepared.prompt_path)
-        run.schema_path = str(prepared.schema_path)
-        run.final_output_path = str(prepared.final_output_path)
-        run.stdout_jsonl_path = str(prepared.stdout_jsonl_path)
-        run.stderr_path = str(prepared.stderr_path)
+        run.model_name = None
+        run.pipeline_version = PIPELINE_VERSION
+        run.final_step_id = None
+        run.final_agent_spec_id = None
+        run.final_output_contract = None
+        run.final_output_json = None
         run.error_text = None
 
         return PreparedRunContext(
             run_id=run.id,
             ticket_id=context.ticket.id,
             input_hash=input_hash,
-            prepared_codex_run=prepared,
+            context=context,
         )
 
 
@@ -383,14 +264,18 @@ def _mark_superseded_due_to_stale_input(db, *, run: AIRun, ticket: Ticket) -> No
     process_deferred_requeue(db, ticket=ticket)
 
 
-def _human_review_internal_note(result: TriageResult) -> str:
+def _human_review_internal_note(result: TriageResult, *, extra_reason: str | None = None) -> str:
     internal_note = result.internal_note_markdown.strip()
     if internal_note:
+        if extra_reason:
+            return "\n\n".join((internal_note, f"Additional review reason: {extra_reason}"))
         return internal_note
 
     note_parts = [result.summary_internal.strip()]
     if result.human_review_reason.strip():
         note_parts.append(f"Human review reason: {result.human_review_reason.strip()}")
+    if extra_reason:
+        note_parts.append(f"Additional review reason: {extra_reason}")
     if result.answer_scope == "document_scoped" and result.evidence_status == "not_found_low_risk_guess":
         note_parts.append(
             "No confirming evidence was found in manuals/ or app/. Treat any suggested answer as a low-risk best guess."
@@ -410,7 +295,19 @@ def _human_review_public_reply(result: TriageResult) -> str:
     return "Thanks for the details. The internal team is reviewing this request and will follow up."
 
 
-def _apply_success_result(settings: Settings, *, run_id, result: TriageResult) -> None:
+def _apply_success_result(
+    settings: Settings,
+    *,
+    run_id,
+    result: TriageResult,
+    final_step_id,
+    final_agent_spec_id: str,
+    final_output_contract: str,
+    final_output_json: dict[str, object],
+    final_model_name: str | None,
+    force_human_review_reason: str | None = None,
+) -> None:
+    should_write_manifest = False
     with session_scope(settings) as db:
         run = db.get(AIRun, run_id)
         if run is None:
@@ -420,91 +317,109 @@ def _apply_success_result(settings: Settings, *, run_id, result: TriageResult) -
 
         if context.ticket.requeue_requested or publication_hash != run.input_hash:
             _mark_superseded_due_to_stale_input(db, run=run, ticket=context.ticket)
-            return
+            should_write_manifest = True
+        else:
+            completed_at = utc_now()
+            if force_human_review_reason:
+                outcome = ResolvedTriageOutcome(
+                    run_status="human_review",
+                    effective_action="draft_public_reply",
+                    warning_text=force_human_review_reason,
+                )
+            else:
+                outcome = resolve_triage_outcome(
+                    context.ticket,
+                    result,
+                    settings,
+                    requester_can_view_internal_messages=context.requester_can_view_internal_messages,
+                )
+            apply_ai_route_target(
+                context.ticket,
+                route_target_id=result.ticket_class,
+                requester_language=result.requester_language,
+            )
+            # Legacy ops screens still read these compatibility-era fields until the route-target cutover lands.
+            context.ticket.ai_confidence = result.confidence
+            context.ticket.impact_level = result.impact_level
+            context.ticket.development_needed = result.development_needed
+            internal_note_markdown = result.internal_note_markdown.strip()
+            if outcome.run_status == "human_review":
+                internal_note_markdown = _human_review_internal_note(result, extra_reason=force_human_review_reason)
 
-        completed_at = utc_now()
-        outcome = resolve_triage_outcome(
-            context.ticket,
-            result,
-            settings,
-            requester_can_view_internal_messages=context.requester_can_view_internal_messages,
-        )
-        apply_ai_classification(
-            context.ticket,
-            ticket_class=result.ticket_class,
-            confidence=result.confidence,
-            impact_level=result.impact_level,
-            development_needed=result.development_needed,
-            requester_language=result.requester_language,
-        )
-        internal_note_markdown = result.internal_note_markdown.strip()
-        if outcome.run_status == "human_review":
-            internal_note_markdown = _human_review_internal_note(result)
+            run.pipeline_version = PIPELINE_VERSION
+            run.final_step_id = final_step_id
+            run.final_agent_spec_id = final_agent_spec_id
+            run.final_output_contract = final_output_contract
+            run.final_output_json = final_output_json
+            run.model_name = final_model_name
 
-        if internal_note_markdown:
-            publish_ai_internal_note(
-                db,
-                ticket=context.ticket,
-                ai_run_id=run.id,
-                body_markdown=internal_note_markdown,
-                created_at=completed_at,
-            )
+            if internal_note_markdown:
+                publish_ai_internal_note(
+                    db,
+                    ticket=context.ticket,
+                    ai_run_id=run.id,
+                    body_markdown=internal_note_markdown,
+                    created_at=completed_at,
+                )
 
-        action = outcome.effective_action
-        if action == "ask_clarification":
-            clarification_reply = _clarification_public_reply(result)
-            publish_ai_public_reply(
-                db,
-                ticket=context.ticket,
-                ai_run_id=run.id,
-                body_markdown=clarification_reply,
-                next_status="waiting_on_user",
-                last_ai_action="ask_clarification",
-                increment_clarification_rounds=True,
-                created_at=completed_at,
-            )
-        elif action == "auto_public_reply":
-            publish_ai_public_reply(
-                db,
-                ticket=context.ticket,
-                ai_run_id=run.id,
-                body_markdown=result.public_reply_markdown,
-                next_status="waiting_on_user",
-                last_ai_action="auto_public_reply",
-                created_at=completed_at,
-            )
-        elif action == "auto_confirm_and_route":
-            publish_ai_public_reply(
-                db,
-                ticket=context.ticket,
-                ai_run_id=run.id,
-                body_markdown=result.public_reply_markdown,
-                next_status="waiting_on_dev_ti",
-                last_ai_action="auto_confirm_and_route",
-                created_at=completed_at,
-            )
-        elif action == "draft_public_reply":
-            create_ai_draft(
-                db,
-                ticket=context.ticket,
-                ai_run_id=run.id,
-                body_markdown=_human_review_public_reply(result),
-                created_at=completed_at,
-            )
-        elif action == "route_dev_ti":
-            route_ticket_after_ai(
-                db,
-                ticket=context.ticket,
-                next_status="waiting_on_dev_ti",
-                last_ai_action="route_dev_ti",
-                created_at=completed_at,
-            )
+            action = outcome.effective_action
+            if action == "ask_clarification":
+                clarification_reply = _clarification_public_reply(result)
+                publish_ai_public_reply(
+                    db,
+                    ticket=context.ticket,
+                    ai_run_id=run.id,
+                    body_markdown=clarification_reply,
+                    next_status="waiting_on_user",
+                    last_ai_action="ask_clarification",
+                    increment_clarification_rounds=True,
+                    created_at=completed_at,
+                )
+            elif action == "auto_public_reply":
+                publish_ai_public_reply(
+                    db,
+                    ticket=context.ticket,
+                    ai_run_id=run.id,
+                    body_markdown=result.public_reply_markdown,
+                    next_status="waiting_on_user",
+                    last_ai_action="auto_public_reply",
+                    created_at=completed_at,
+                )
+            elif action == "auto_confirm_and_route":
+                publish_ai_public_reply(
+                    db,
+                    ticket=context.ticket,
+                    ai_run_id=run.id,
+                    body_markdown=result.public_reply_markdown,
+                    next_status="waiting_on_dev_ti",
+                    last_ai_action="auto_confirm_and_route",
+                    created_at=completed_at,
+                )
+            elif action == "draft_public_reply":
+                create_ai_draft(
+                    db,
+                    ticket=context.ticket,
+                    ai_run_id=run.id,
+                    body_markdown=_human_review_public_reply(result),
+                    created_at=completed_at,
+                )
+            elif action == "route_dev_ti":
+                route_ticket_after_ai(
+                    db,
+                    ticket=context.ticket,
+                    next_status="waiting_on_dev_ti",
+                    last_ai_action="route_dev_ti",
+                    created_at=completed_at,
+                )
 
-        context.ticket.last_processed_hash = publication_hash
-        run.status = outcome.run_status
-        run.ended_at = completed_at
-        run.error_text = outcome.warning_text
-        process_deferred_requeue(db, ticket=context.ticket)
+            context.ticket.last_processed_hash = publication_hash
+            run.status = outcome.run_status
+            run.ended_at = completed_at
+            run.error_text = outcome.warning_text
+            process_deferred_requeue(db, ticket=context.ticket)
+            should_write_manifest = True
+    if should_write_manifest:
+        write_run_manifest_snapshot(settings, run_id=run_id)
 
 
 def _failure_note_body(error_text: str) -> str:
@@ -518,12 +433,15 @@ def _failure_note_body(error_text: str) -> str:
 
 
 def _mark_failed(settings: Settings, *, run_id, error_text: str) -> None:
+    should_write_manifest = False
     with session_scope(settings) as db:
         run = db.get(AIRun, run_id)
         if run is None:
             return
         ticket = db.get(Ticket, run.ticket_id)
         failed_at = utc_now()
+        if getattr(run, "pipeline_version", None) is None:
+            run.pipeline_version = PIPELINE_VERSION
         run.status = "failed"
         run.ended_at = failed_at
         run.error_text = error_text
@@ -545,6 +463,9 @@ def _mark_failed(settings: Settings, *, run_id, error_text: str) -> None:
                     changed_at=failed_at,
                 )
             process_deferred_requeue(db, ticket=ticket)
+        should_write_manifest = True
+    if should_write_manifest:
+        write_run_manifest_snapshot(settings, run_id=run_id)
 
 
 def process_ai_run(settings: Settings, *, run_id) -> None:
@@ -554,10 +475,25 @@ def process_ai_run(settings: Settings, *, run_id) -> None:
         if prepared is None:
             return
         terminal_run_id = prepared.run_id
-        artifacts = execute_codex_run(settings, prepared=prepared.prepared_codex_run)
-        result = validate_triage_result(artifacts.output_payload, settings)
-        _apply_success_result(settings, run_id=prepared.run_id, result=result)
-    except (CodexRunError, TriageResultError) as exc:
+        write_run_manifest_snapshot(settings, run_id=prepared.run_id)
+        pipeline_result = execute_triage_pipeline(
+            settings,
+            run_id=prepared.run_id,
+            ticket_id=prepared.ticket_id,
+            context=prepared.context,
+        )
+        _apply_success_result(
+            settings,
+            run_id=prepared.run_id,
+            result=pipeline_result.triage_result,
+            final_step_id=pipeline_result.specialist_step.step_id,
+            final_agent_spec_id=pipeline_result.specialist_step.prepared.spec.id,
+            final_output_contract=pipeline_result.specialist_step.prepared.spec.output_contract,
+            final_output_json=pipeline_result.specialist_step.output_payload,
+            final_model_name=pipeline_result.specialist_step.prepared.model_name,
+            force_human_review_reason=pipeline_result.force_human_review_reason,
+        )
+    except (StepRunError, TriageResultError) as exc:
         _mark_failed(settings, run_id=terminal_run_id, error_text=str(exc))
     except Exception as exc:
         _mark_failed(settings, run_id=terminal_run_id, error_text=f"Unexpected worker error: {exc}")

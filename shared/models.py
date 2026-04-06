@@ -40,6 +40,8 @@ MESSAGE_SOURCES = (
 )
 AI_RUN_STATUSES = ("pending", "running", "succeeded", "human_review", "failed", "skipped", "superseded")
 AI_RUN_TRIGGERS = ("new_ticket", "requester_reply", "manual_rerun", "reopen")
+AI_RUN_STEP_KINDS = ("router", "selector", "specialist")
+AI_RUN_STEP_STATUSES = AI_RUN_STATUSES
 REQUEUE_TRIGGERS = ("requester_reply", "manual_rerun", "reopen")
 AI_DRAFT_KINDS = ("public_reply",)
 AI_DRAFT_STATUSES = ("pending_approval", "approved", "rejected", "superseded", "published")
@@ -124,6 +126,7 @@ class Ticket(Base):
     assigned_to_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     urgent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    route_target_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     ticket_class: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_confidence: Mapped[float | None] = mapped_column(Numeric(4, 3), nullable=True)
     impact_level: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -231,6 +234,11 @@ class AIRun(Base):
     requested_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     input_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pipeline_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    final_step_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    final_agent_spec_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    final_output_contract: Mapped[str | None] = mapped_column(Text, nullable=True)
+    final_output_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     prompt_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     schema_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     final_output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -239,6 +247,36 @@ class AIRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+
+
+class AIRunStep(Base):
+    __tablename__ = "ai_run_steps"
+    __table_args__ = (
+        CheckConstraint(f"step_kind IN {_enum_sql(AI_RUN_STEP_KINDS)}", name="ai_run_steps_step_kind"),
+        CheckConstraint(f"status IN {_enum_sql(AI_RUN_STEP_STATUSES)}", name="ai_run_steps_status"),
+        Index("ix_ai_run_steps_ai_run_id_step_index", "ai_run_id", "step_index"),
+        Index("uq_ai_run_steps_ai_run_id_step_index", "ai_run_id", "step_index", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ai_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ai_runs.id"), nullable=False)
+    step_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    step_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_spec_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_spec_version: Mapped[str] = mapped_column(Text, nullable=False)
+    output_contract: Mapped[str] = mapped_column(Text, nullable=False)
+    model_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schema_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    final_output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stdout_jsonl_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stderr_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
 
 

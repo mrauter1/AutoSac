@@ -833,7 +833,7 @@ def test_apply_success_result_publishes_internal_note_before_public_action_and_s
 
     monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
     monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
-    monkeypatch.setattr("worker.triage.apply_ai_classification", lambda *args, **kwargs: events.append("classification"))
+    monkeypatch.setattr("worker.triage.apply_ai_route_target", lambda *args, **kwargs: events.append("classification"))
     monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: events.append("internal"))
     monkeypatch.setattr(
         "worker.triage.publish_ai_public_reply",
@@ -910,7 +910,7 @@ def test_apply_success_result_force_human_review_creates_draft(monkeypatch, tmp_
 
     monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
     monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
-    monkeypatch.setattr("worker.triage.apply_ai_classification", lambda *args, **kwargs: events.append("classification"))
+    monkeypatch.setattr("worker.triage.apply_ai_route_target", lambda *args, **kwargs: events.append("classification"))
     monkeypatch.setattr(
         "worker.triage.publish_ai_internal_note",
         lambda *args, **kwargs: observed.setdefault("internal_note", kwargs["body_markdown"]),

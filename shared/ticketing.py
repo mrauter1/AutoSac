@@ -21,12 +21,14 @@ from shared.models import (
     TicketMessage,
     TicketStatusHistory,
     TicketView,
+    TICKET_CLASSES,
     TICKET_STATUSES,
     User,
 )
 from shared.security import utc_now
 
 SYSTEM_STATE_KEYS = ("worker_heartbeat", "bootstrap_version")
+_LEGACY_COMPATIBLE_ROUTE_TARGET_IDS = frozenset(TICKET_CLASSES)
 _STATUS_SENTINEL = object()
 
 
@@ -167,19 +169,23 @@ def normalize_message_text(markdown_text: str) -> str:
     return markdown_text.strip()
 
 
-def apply_ai_classification(
+def _legacy_ticket_class_for_route_target(route_target_id: str) -> str:
+    if route_target_id not in _LEGACY_COMPATIBLE_ROUTE_TARGET_IDS:
+        raise ValueError(
+            f"Route target {route_target_id} is not allowed during the compatibility dual-write window"
+        )
+    return route_target_id
+
+
+def apply_ai_route_target(
     ticket: Ticket,
     *,
-    ticket_class: str,
-    confidence: float,
-    impact_level: str,
-    development_needed: bool,
+    route_target_id: str,
     requester_language: str,
 ) -> None:
-    ticket.ticket_class = ticket_class
-    ticket.ai_confidence = confidence
-    ticket.impact_level = impact_level
-    ticket.development_needed = development_needed
+    legacy_ticket_class = _legacy_ticket_class_for_route_target(route_target_id)
+    ticket.route_target_id = route_target_id
+    ticket.ticket_class = legacy_ticket_class
     ticket.requester_language = requester_language
 
 

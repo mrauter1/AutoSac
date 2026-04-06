@@ -257,6 +257,60 @@ def test_agent_pipeline_migration_adds_run_steps_and_final_output_fields():
     assert 'op.add_column("ai_runs", sa.Column("final_agent_spec_id"' in migration_source
 
 
+def test_route_target_compatibility_migration_adds_backfill_and_selector_step_kind():
+    migration_source = Path("shared/migrations/versions/20260406_0005_route_target_compatibility.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'op.add_column("tickets", sa.Column("route_target_id", sa.Text(), nullable=True))' in migration_source
+    assert "UPDATE tickets SET route_target_id = ticket_class" in migration_source
+    assert "step_kind IN ('router', 'selector', 'specialist')" in migration_source
+    assert "route_target_id IN" not in migration_source
+
+
+def test_models_expose_route_target_storage_without_a_db_taxonomy_constraint():
+    pytest.importorskip("sqlalchemy")
+    from sqlalchemy import CheckConstraint
+
+    from shared.models import AI_RUN_STEP_KINDS, Ticket
+
+    assert AI_RUN_STEP_KINDS == ("router", "selector", "specialist")
+    assert "route_target_id" in Ticket.__table__.c
+    route_target_constraints = [
+        str(constraint.sqltext)
+        for constraint in Ticket.__table__.constraints
+        if isinstance(constraint, CheckConstraint) and "route_target_id" in str(constraint.sqltext)
+    ]
+    assert route_target_constraints == []
+
+
+def test_apply_ai_route_target_dual_writes_route_target_and_legacy_ticket_class():
+    pytest.importorskip("sqlalchemy")
+    from shared.ticketing import apply_ai_route_target
+
+    ticket = _make_ticket()
+
+    apply_ai_route_target(ticket, route_target_id="support", requester_language="en")
+
+    assert ticket.route_target_id == "support"
+    assert ticket.ticket_class == "support"
+    assert ticket.requester_language == "en"
+
+
+def test_apply_ai_route_target_rejects_non_legacy_route_targets_during_compatibility_window():
+    pytest.importorskip("sqlalchemy")
+    from shared.ticketing import apply_ai_route_target
+
+    ticket = _make_ticket()
+
+    with pytest.raises(ValueError, match="compatibility dual-write window"):
+        apply_ai_route_target(ticket, route_target_id="manual_review", requester_language="en")
+
+    assert getattr(ticket, "route_target_id", None) is None
+    assert ticket.ticket_class is None
+    assert ticket.requester_language is None
+
+
 def test_preauth_login_session_creation_hashes_browser_token_and_sets_short_expiry(monkeypatch):
     pytest.importorskip("sqlalchemy")
     pytest.importorskip("argon2")
