@@ -572,3 +572,113 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=test | phase=producer | cycle=2 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/test_producer.md
+session_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=test | phase=producer | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+I’m addressing the auditor’s AC-2 gap directly in the existing prompt tests. The fix is to add negative assertions that legacy class placeholders and ticket-class routing text stay out of rendered router, selector, and specialist prompts.
+
+The negative assertions need to be scoped carefully because the compatibility-phase specialist prompt intentionally still mentions the schema field `ticket_class`. I’m checking the actual remaining legacy wording surface so the new assertions only lock down the forbidden placeholders and hardcoded routing instructions, not the intentional compatibility note.
+
+I’ve scoped the assertions so router and selector prompts forbid both placeholder tokens and any `ticket_class` leakage, while the specialist prompt keeps the intentional compatibility note but still forbids the old placeholder tokens and ticket-class routing phrasing.
+
+The negative assertions are in place now. I’m rerunning the focused phase suite to confirm the new AC-2 guards pass without overconstraining the intentional compatibility note.
+
+The focused suite is still running. I’m waiting for the final result before I close out the test-author pass and hand back the updated coverage notes.
+
+The new AC-2 guards passed with the existing compatibility-phase prompt wording. I’m doing a quick read-back of the touched sections so the final summary matches the exact coverage that landed.
+
+Scope considered
+
+- Phase-local test work for `registry-contract-foundation`, focused on the auditor’s AC-2 coverage gap around prompt regressions.
+- I kept the change surface to the existing prompt-related tests and the active phase-local test artifacts.
+
+What I analyzed
+
+- The auditor finding in [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/feedback.md), especially the missing negative assertions for legacy prompt placeholders.
+- The current prompt coverage in [tests/test_routing_registry.py](/home/marcelo/code/AutoSac/tests/test_routing_registry.py) and [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py), plus the strategy notes in [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/test_strategy.md).
+
+What I changed
+
+- Extended the existing router, selector, and specialist prompt tests in [tests/test_routing_registry.py](/home/marcelo/code/AutoSac/tests/test_routing_registry.py) with negative assertions that rendered prompts do not contain `TARGET_TICKET_CLASS`, `ROUTER_TICKET_CLASS`, or ticket-class routing phrasing.
+- Added the same regression guard to the worker-path prompt test in [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py) while keeping the intentional compatibility-phase `ticket_class` schema note explicitly allowed.
+- Updated [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/test_strategy.md) to record the exact negative-assertion scope and appended a concise follow-up entry to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/feedback.md).
+
+Key findings / decisions
+
+- The new AC-2 guards are precise: they ban the legacy placeholder tokens and ticket-class routing phrasing without banning every literal `ticket_class`, because the compatibility-phase specialist prompt still intentionally includes that schema-alignment note.
+- Validation passed: `.venv/bin/pytest -q tests/test_routing_registry.py tests/test_ai_worker.py tests/test_hardening_validation.py tests/test_foundation_persistence.py` with `84 passed in 6.01s`.
+- This pass is intended to resolve `TST-001` without expanding into out-of-phase runtime selector or persistence coverage.
+
+Open issues / next step
+
+- No additional phase-local test additions are pending from the current auditor feedback.
+- The next step is auditor re-review to close `TST-001` if the new AC-2 regression guards are sufficient.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=test | phase=verifier | cycle=2 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/test_verifier.md
+session_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=test | phase=verifier | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+I’m reviewing the producer’s AC-2 prompt-regression additions and the active audit artifacts first. Then I’ll close out the phase-local audit only if the blocker is actually resolved and the focused suite stays green.
+
+The new negative assertions are in the right places and they preserve the intentional compatibility note. I’m rerunning the focused phase slice once from the auditor side before I update the audit artifacts to complete.
+
+The focused suite is still running. I’m waiting for the final result, then I’ll update the criteria and close out the blocker if nothing new appears.
+
+The blocker is closed: the prompt tests now cover both the positive registry-driven content and the negative legacy-placeholder regression path, and the verifier rerun stayed green. I’m updating the audit artifacts to reflect a complete pass.
+
+The audit artifacts are updated. I’m reading back the final state once so the closeout matches the recorded criteria and the resolved blocker history.
+
+Scope considered
+
+- Phase-local audit of the updated registry-contract-foundation test coverage, with focus on the prior AC-2 prompt-regression blocker.
+- I limited writes to the active audit artifacts under [registry-contract-foundation](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation).
+
+What I analyzed
+
+- The producer’s added negative assertions in [tests/test_routing_registry.py](/home/marcelo/code/AutoSac/tests/test_routing_registry.py) and [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py).
+- The phase-local artifacts [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/criteria.md), [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/feedback.md), and [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/test_strategy.md).
+
+What I reviewed
+
+- Whether the new assertions actually close the prior silent-regression path for legacy prompt placeholders and ticket-class routing phrasing while preserving the intentional compatibility-phase `ticket_class` note.
+- Whether the focused suite remains deterministic and green after the added guards.
+
+Key findings / decisions
+
+- No blocking findings remain.
+- The prior `TST-001` blocker is resolved: router, selector, and specialist prompt tests now assert absence of legacy placeholder tokens and ticket-class routing phrasing, and the worker-path prompt test also covers the rendered specialist prompt surface.
+- Auditor rerun passed: `.venv/bin/pytest -q tests/test_routing_registry.py tests/test_ai_worker.py tests/test_hardening_validation.py tests/test_foundation_persistence.py` with `84 passed in 4.77s`.
+- I marked all criteria complete in [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/criteria.md) and appended the resolution follow-up in [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/feedback.md).
+
+Open issues / next step
+
+- No phase-local test audit blockers remain for `registry-contract-foundation`.
+- This test phase is ready to close.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>

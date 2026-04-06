@@ -637,3 +637,57 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=test | phase=verifier | cycle=2 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/test_verifier.md
+session_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=test | phase=verifier | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+I’m reviewing the producer’s AC-2 prompt-regression additions and the active audit artifacts first. Then I’ll close out the phase-local audit only if the blocker is actually resolved and the focused suite stays green.
+
+The new negative assertions are in the right places and they preserve the intentional compatibility note. I’m rerunning the focused phase slice once from the auditor side before I update the audit artifacts to complete.
+
+The focused suite is still running. I’m waiting for the final result, then I’ll update the criteria and close out the blocker if nothing new appears.
+
+The blocker is closed: the prompt tests now cover both the positive registry-driven content and the negative legacy-placeholder regression path, and the verifier rerun stayed green. I’m updating the audit artifacts to reflect a complete pass.
+
+The audit artifacts are updated. I’m reading back the final state once so the closeout matches the recorded criteria and the resolved blocker history.
+
+Scope considered
+
+- Phase-local audit of the updated registry-contract-foundation test coverage, with focus on the prior AC-2 prompt-regression blocker.
+- I limited writes to the active audit artifacts under [registry-contract-foundation](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation).
+
+What I analyzed
+
+- The producer’s added negative assertions in [tests/test_routing_registry.py](/home/marcelo/code/AutoSac/tests/test_routing_registry.py) and [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py).
+- The phase-local artifacts [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/criteria.md), [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/feedback.md), and [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/test_strategy.md).
+
+What I reviewed
+
+- Whether the new assertions actually close the prior silent-regression path for legacy prompt placeholders and ticket-class routing phrasing while preserving the intentional compatibility-phase `ticket_class` note.
+- Whether the focused suite remains deterministic and green after the added guards.
+
+Key findings / decisions
+
+- No blocking findings remain.
+- The prior `TST-001` blocker is resolved: router, selector, and specialist prompt tests now assert absence of legacy placeholder tokens and ticket-class routing phrasing, and the worker-path prompt test also covers the rendered specialist prompt surface.
+- Auditor rerun passed: `.venv/bin/pytest -q tests/test_routing_registry.py tests/test_ai_worker.py tests/test_hardening_validation.py tests/test_foundation_persistence.py` with `84 passed in 4.77s`.
+- I marked all criteria complete in [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/criteria.md) and appended the resolution follow-up in [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/registry-contract-foundation/feedback.md).
+
+Open issues / next step
+
+- No phase-local test audit blockers remain for `registry-contract-foundation`.
+- This test phase is ready to close.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
