@@ -969,3 +969,56 @@ Open issues / next step
 
 - No blocker in this test-phase scope.
 - Known phase-local gap remains the same: no full Alembic-on-Postgres integration test, and selector runtime / ops read-path cutover are intentionally deferred to later phases.
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=test | phase=verifier | cycle=1 | attempt=1 | thread_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/test_verifier.md
+session_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=test | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+---
+I’m auditing the test-phase output against the additive migration contract and the shared decisions. First I’m reading the current audit artifacts and the newly added test coverage so I can decide whether any regression risks remain before I update the criteria or feedback.
+
+The test set looks phase-complete: migration/backfill, selector persistence, helper rejection, and the actual worker dual-write path are all covered with deterministic local setup. I’m marking the audit artifacts complete and recording that there are no remaining audit findings.
+
+Scope considered
+
+- Phase-local audit of the additive migration foundation test output only.
+- I limited edits to the audit artifacts [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/additive-migration-foundation/criteria.md) and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/additive-migration-foundation/feedback.md).
+
+What I analyzed
+
+- The coverage map in [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/additive-migration-foundation/test_strategy.md).
+- The new persistence and runtime regression tests in [tests/test_foundation_persistence.py](/home/marcelo/code/AutoSac/tests/test_foundation_persistence.py) and [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py).
+- The shared decisions in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt).
+
+What I reviewed
+
+- Whether AC-1 through AC-3 are covered at the right level.
+- Whether the tests would catch likely regressions in additive backfill, selector-step persistence, helper rejection, and actual worker dual-write behavior.
+- Whether the tests are deterministic and avoid hidden behavior normalization.
+
+Key findings / decisions
+
+- No blocking or non-blocking audit findings remain.
+- The current test set covers:
+  - additive `route_target_id` backfill
+  - `selector` step persistence
+  - non-legacy target rejection during the dual-write window
+  - real worker success-path mutation of `route_target_id`, legacy `ticket_class`, and compatibility fields
+- I marked all audit criteria complete in [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/additive-migration-foundation/criteria.md) and recorded the clean audit result in [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/additive-migration-foundation/feedback.md).
+
+Open issues / next step
+
+- No open issue remains in this test-phase audit.
+- The phase can be treated as complete from the test-audit side.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
