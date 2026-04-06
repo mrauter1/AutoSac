@@ -189,3 +189,12 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_scope_resolved
+---
+phase_mode=single
+phase_ids=registry-contract-foundation,additive-migration-foundation,runtime-routing-ops-cutover,cleanup-verification
+explicit=True
+current_phase_index=0
