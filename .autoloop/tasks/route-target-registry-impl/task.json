@@ -1,0 +1,7 @@
+{
+  "task_id": "route-target-registry-impl",
+  "created_at": "2026-04-06T17:34:14.305602+00:00",
+  "request_text": "Implement the authoritative spec in /home/marcelo/code/AutoSac/Autosac_Route_Target_Registry_PRD_ARD.md exactly.\n  Treat that document as the implementation contract and use the current codebase as baseline.",
+  "request_updated_at": "2026-04-06T17:34:14.305630+00:00",
+  "phase_plan_path": ".autoloop/tasks/route-target-registry-impl/plan/phase_plan.yaml"
+}
