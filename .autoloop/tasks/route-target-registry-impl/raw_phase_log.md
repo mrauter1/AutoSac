@@ -397,3 +397,61 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=implement | phase=verifier | cycle=2 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/implement_verifier.md
+session_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d63e5-b1c5-7942-a40b-1d7f1d8cb09d
+---
+I’m re-checking the previously blocked prompt/manifest alignment first, then I’ll update the verifier artifacts to either clear or retain findings based on the current code and validation state.
+
+Reviewing the updated compatibility-phase specialist prompt alignment and the active verifier artifacts first. Then I’ll update the phase-local review files only if the blocking issue is actually closed.
+
+The renderer now carries the compatibility instruction centrally, and the live specialist prompt includes it. I’m checking the rest of the touched prompt/tests surface to confirm the blocking regression risk is actually closed before updating the reviewer artifacts.
+
+The compatibility instruction is present across the live specialist prompts and covered by targeted assertions. I’m rerunning the relevant test slice once from the verifier side before I finalize the artifact updates.
+
+The verifier test run is still in flight. I’m waiting for the result now, then I’ll update `criteria.md` and `feedback.md` in one pass if nothing new appears.
+
+The blocker is closed and the verifier-side test slice passed cleanly. I’m updating the phase-local review artifacts now to reflect a complete review with no remaining blocking findings.
+
+The reviewer artifacts are updated. I’m doing a quick read-back on those two files to make sure the final state is internally consistent before I close the verifier turn.
+
+Scope considered
+
+- Phase-local verifier review for `registry-contract-foundation`, focused on the producer’s cycle-2 fix for the prior compatibility-path blocker.
+- I limited writes to the active verifier artifacts: [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/criteria.md) and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/feedback.md).
+
+What I analyzed
+
+- The live compatibility specialist prompt path in [worker/prompt_renderer.py](/home/marcelo/code/AutoSac/worker/prompt_renderer.py) and the rendered specialist prompt template in [agent_specs/support/prompt.md](/home/marcelo/code/AutoSac/agent_specs/support/prompt.md), plus the equivalent placeholder reuse across the other live specialist prompts.
+- The updated coverage in [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py) and [tests/test_routing_registry.py](/home/marcelo/code/AutoSac/tests/test_routing_registry.py), and the producer notes in [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/implementation_notes.md).
+
+What I reviewed
+
+- Whether the prior `IMP-001` blocker is actually closed without changing the phase boundary that keeps runtime specialist execution on legacy `triage_result`.
+- Whether the compatibility guidance is centralized instead of duplicated, and whether the relevant regression slice still passes end to end.
+
+Key findings / decisions
+
+- No blocking findings remain.
+- The prior blocker is resolved: `worker.prompt_renderer.render_agent_prompt` now injects a centralized compatibility instruction requiring any still-required `ticket_class` to match the selected route target ID, and the live specialist prompts consume it via `{LEGACY_TICKET_CLASS_ALIGNMENT_RULE}`.
+- Verifier-side validation passed: `.venv/bin/pytest -q tests/test_routing_registry.py tests/test_ai_worker.py tests/test_hardening_validation.py tests/test_foundation_persistence.py` with `81 passed in 4.63s`.
+- I marked all criteria complete in [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/criteria.md) and appended the resolution follow-up in [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/implement/phases/registry-contract-foundation/feedback.md).
+
+Open issues / next step
+
+- No phase-local review blockers remain for this foundation phase.
+- The next phase can build on this registry/prompt compatibility base for the later runtime cutover work.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
