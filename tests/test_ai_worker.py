@@ -870,6 +870,76 @@ def test_apply_success_result_publishes_internal_note_before_public_action_and_s
     assert observed["manifest_runs"] == [run.id]
 
 
+def test_apply_success_result_dual_writes_route_target_and_legacy_ticket_fields(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000007",
+        title="Dual write",
+        status="ai_triage",
+        urgent=False,
+        last_processed_hash=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    publication_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash=publication_hash,
+        ended_at=None,
+        error_text=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        model_name=None,
+    )
+    fake_db = _FakeDb(run=run)
+    events: list[str] = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: events.append("internal"))
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: events.append(f"public:{kwargs['last_ai_action']}"),
+    )
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: events.append("draft"))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: events.append("route"))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: events.append("requeue"))
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    result = symbols["validate_triage_result"](_valid_payload(), settings)
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        result=result,
+        final_step_id=uuid.uuid4(),
+        final_agent_spec_id="support",
+        final_output_contract="triage_result",
+        final_output_json=result.model_dump(),
+        final_model_name="gpt-test",
+    )
+
+    assert events == ["internal", "public:auto_public_reply", "requeue"]
+    assert ticket.route_target_id == "support"
+    assert ticket.ticket_class == "support"
+    assert ticket.requester_language == "en"
+    assert ticket.ai_confidence == pytest.approx(0.93)
+    assert ticket.impact_level == "medium"
+    assert ticket.development_needed is False
+
+
 def test_apply_success_result_force_human_review_creates_draft(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)

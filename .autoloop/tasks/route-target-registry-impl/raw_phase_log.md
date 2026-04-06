@@ -912,3 +912,60 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=test | phase=producer | cycle=1 | attempt=1 | thread_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/test_producer.md
+session_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=test | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d63fb-65b0-7d33-be25-f550ed75b4ef
+---
+I’m treating this as a focused test-hardening pass for the additive migration phase. First I’m reading the test-phase artifacts and the current regression coverage so I can add only the missing behavior checks and then document the coverage map cleanly.
+
+The current coverage is good on migration/backfill and helper behavior, but it still relies on a spy for the worker success path. I’m adding one direct runtime assertion in `tests/test_ai_worker.py` so the test phase also proves `_apply_success_result()` actually writes `route_target_id` and the legacy shadow fields on the ticket object, not just that it calls the helper.
+
+I found the exact insertion point. I’m patching the worker test now with one non-spy assertion that the success path mutates the ticket with `route_target_id`, `ticket_class`, and the compatibility fields, then I’ll update the test-phase artifacts to reflect the new coverage map.
+
+The new worker assertion is in place. I’m running the focused suite now so I can update the test-phase artifacts with actual passing results and a behavior-to-test map instead of assumptions.
+
+The focused suite is green with the added runtime dual-write assertion. I’m updating the test-phase strategy, feedback, and the test-turn decisions block now so later turns can see exactly which phase behaviors are covered and which gaps remain intentionally out of scope.
+
+Scope considered
+
+- Phase-local test hardening for additive migration foundation only: migration/backfill persistence, compatibility dual-write, and selector-step persistence.
+- I updated repository tests plus the test-phase artifacts [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/additive-migration-foundation/test_strategy.md), [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/additive-migration-foundation/feedback.md), and the current test-turn block in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt).
+
+What I analyzed
+
+- Existing additive-phase coverage in [tests/test_foundation_persistence.py](/home/marcelo/code/AutoSac/tests/test_foundation_persistence.py) and [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py).
+- The compatibility write path in [shared/ticketing.py](/home/marcelo/code/AutoSac/shared/ticketing.py) and the ticket mutation path in [worker/triage.py](/home/marcelo/code/AutoSac/worker/triage.py).
+
+What I changed
+
+- Added a direct worker success-path regression test in [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py) that lets `_apply_success_result()` use the real compatibility helper and asserts the ticket is dual-written with `route_target_id`, `ticket_class`, `requester_language`, and the compatibility-only confidence fields.
+- Updated [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/additive-migration-foundation/test_strategy.md) with an explicit behavior-to-test map, preserved invariants, edge cases, stabilization notes, and known gaps.
+- Appended a concise test-additions summary to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/additive-migration-foundation/feedback.md).
+- Appended one test-turn decision to [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt) documenting the sqlite-backed persistence approach plus the direct worker assertion.
+
+Key findings / decisions
+
+- The suite now covers:
+  - migration source and sqlite-backed persistence backfill for `route_target_id`
+  - selector-step persistence
+  - helper-level non-legacy rejection without partial mutation
+  - actual worker success-path dual-write behavior
+- Validation passed:
+  - `python -m py_compile tests/test_ai_worker.py tests/test_foundation_persistence.py`
+  - `.venv/bin/pytest -q tests/test_foundation_persistence.py tests/test_ai_worker.py tests/test_routing_registry.py`
+  - Result: `77 passed`
+
+Open issues / next step
+
+- No blocker in this test-phase scope.
+- Known phase-local gap remains the same: no full Alembic-on-Postgres integration test, and selector runtime / ops read-path cutover are intentionally deferred to later phases.
