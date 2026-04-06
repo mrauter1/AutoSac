@@ -1,0 +1,4 @@
+version: 1
+task_id: route-target-registry-impl
+request_snapshot_ref: /home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/runs/run-20260406T173414Z-02e24904/request.md
+phases: []
