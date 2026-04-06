@@ -982,6 +982,7 @@ def test_apply_success_result_direct_ai_manual_only_does_not_create_draft_when_p
     assert observed["route"] == ("ai_triage", "manual_only")
     assert run.status == "human_review"
     assert run.final_output_contract == "specialist_result"
+    assert run.final_output_json["public_reply_markdown"] == "Draft this reply for review."
 
 
 def test_apply_success_result_human_assist_manual_only_does_not_create_draft_when_policy_disables_drafts(monkeypatch, tmp_path):
@@ -1055,6 +1056,8 @@ def test_apply_success_result_human_assist_manual_only_does_not_create_draft_whe
 
     assert observed["route"] == ("waiting_on_dev_ti", "manual_only")
     assert run.status == "human_review"
+    assert run.final_output_contract == "specialist_result"
+    assert run.final_output_json["public_reply_markdown"] == "Draft this update for the requester."
 
 
 def test_apply_success_result_supersedes_stale_run_without_publication(monkeypatch, tmp_path):

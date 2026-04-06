@@ -1258,3 +1258,57 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=test | phase=producer | cycle=1 | attempt=1 | thread_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/test_producer.md
+session_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=test | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d6405-61a4-7b60-a12f-92c99ba0daba
+---
+Reviewing the phase’s runtime and ops regression coverage now from the test-author side. I’m checking what the implementation and verifier already covered, then I’ll add only the missing high-risk assertions and update the test strategy artifacts.
+
+There’s one high-value invariant still not explicitly pinned down in the repo tests: the worker should suppress `manual_only` side effects without mutating the terminal structured output payload it persists. I’m tightening the two new downgrade tests around that, then I’ll update the phase strategy and feedback artifacts.
+
+I’ve tightened the downgrade tests to assert the persisted terminal payload stays intact even when `manual_only` suppresses external side effects. Next I’m recording the explicit behavior-to-test map and a concise test-author feedback entry for the auditor.
+
+The repo tests and phase artifacts are updated. I’m running the targeted suite again now so the strategy and feedback files point at a fresh validation pass, not just the earlier implementation run.
+
+Scope considered
+
+- Active phase `runtime-routing-ops-cutover`, limited to high-risk regression coverage for deterministic publication downgrades and rerun/failure manifest metadata.
+- Test-phase artifacts only in [.autoloop/tasks/route-target-registry-impl/test/phases/runtime-routing-ops-cutover/test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/runtime-routing-ops-cutover/test_strategy.md) and [.autoloop/tasks/route-target-registry-impl/test/phases/runtime-routing-ops-cutover/feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/runtime-routing-ops-cutover/feedback.md).
+
+What I analyzed
+
+- Existing implementation notes and shared decisions for the phase, especially the `manual_only` side-effect rule and rerun-manifest route-target precedence.
+- Current worker regression coverage in [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py#L914) and the broader phase suites in `tests/test_routing_registry.py`, `tests/test_ops_workflow.py`, and `tests/test_foundation_persistence.py`.
+
+What I changed
+
+- Tightened [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py#L914) so both `manual_only` downgrade tests now assert two things together: no draft/public side effects occur, and the persisted `final_output_json["public_reply_markdown"]` still preserves the original specialist reply text.
+- Updated [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/runtime-routing-ops-cutover/test_strategy.md#L10) with an explicit behavior-to-test coverage map, preserved invariants, edge/failure paths, flake controls, and known gaps.
+- Appended a concise summary to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/test/phases/runtime-routing-ops-cutover/feedback.md#L10) and recorded the non-obvious test invariant under the current-turn header in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt#L24).
+
+Key findings / decisions
+
+- The high-risk regression to pin in tests was not just “no draft on `manual_only`”, but also “do not mutate the terminal structured payload while suppressing the side effect.”
+- Validation passed:
+  `python -m py_compile tests/test_ai_worker.py`
+  `.venv/bin/pytest -q tests/test_ai_worker.py tests/test_routing_registry.py tests/test_ops_workflow.py tests/test_foundation_persistence.py`
+  Result: `108 passed in 2.15s`
+
+Open issues / next step
+
+- No known test-author blocker remains for this phase slice.
+- Next step is test-auditor review against the updated repo tests and phase-local test artifacts.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
