@@ -105,3 +105,78 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=plan | phase=producer | cycle=2 | attempt=1 | thread_id=019d63dc-5d79-7db3-b4da-0fb84071cab9
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/plan_producer.md
+session_id=019d63dc-5d79-7db3-b4da-0fb84071cab9
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=plan | phase=producer | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d63dc-5d79-7db3-b4da-0fb84071cab9
+---
+I’m addressing the verifier’s two blocking findings directly: first by removing the unsafe `unknown`/`manual_review` overlap from the final-state taxonomy plan, and second by making the dual-write compatibility window explicit so new route-target IDs do not hit the legacy `ticket_class` constraint.
+
+I have a safe way to close both findings without changing user intent: keep the legacy class-aligned targets only for the compatibility window, prevent any non-legacy route-target ID from being emitted while `ticket_class` dual-write is still constrained, then flip to the final-state taxonomy by enabling `manual_review` and disabling `unknown` for new runs after the read/write cutover.
+
+The revised plan now distinguishes compatibility-state from final-state taxonomy and makes the constrained dual-write rule explicit. I’m reading the updated artifacts once more to ensure the producer fix is internally consistent before I hand it back to the verifier.
+
+Updated [plan.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/plan.md), [phase_plan.yaml](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/phase_plan.yaml), [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/feedback.md), and the current turn block in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt). I did not modify [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/criteria.md).
+
+The revision resolves the verifier’s two blocking issues by making the taxonomy stateful across the migration: during dual-write, only route targets with a valid `ticket_class` shadow stay enabled for new runs, so `manual_review` remains registry-defined but disabled; after `route_target_id` becomes the active read path and legacy writes stop, `manual_review` becomes the human-assist target and `unknown` is retired from new-run routing but kept loadable for historical display. The plan and machine-readable phases now both spell out that compatibility rule, the cutover point, and the final no-overlap taxonomy state.
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=plan | phase=verifier | cycle=2 | attempt=1 | thread_id=019d63dc-5d79-7db3-b4da-0fb84071cab9
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/plan_verifier.md
+session_id=019d63dc-5d79-7db3-b4da-0fb84071cab9
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=plan | phase=verifier | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d63dc-5d79-7db3-b4da-0fb84071cab9
+---
+I’m re-checking the revised planning artifacts against the same verifier concerns, with focus on whether the compatibility-window taxonomy and dual-write rules now close the earlier safety and migration gaps.
+
+The revised plan now closes the two earlier gaps: it prevents constrained dual-write failures and removes the final-state overlap between `unknown` and `manual_review`. I’m marking the criteria accordingly and appending a closure note so the feedback history shows why this verifier pass is complete.
+
+The verifier-owned files are updated. I’m doing one last read to confirm the checklist is fully checked and the feedback history now records both the original blockers and their closure in this pass.
+
+Scope considered
+
+- Re-verified the active planning artifacts against the authoritative request, raw log, spec, and shared decisions.
+- Focused on the revised areas that previously caused blocking findings: taxonomy overlap and dual-write compatibility.
+
+What I analyzed
+
+- The updated [plan.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/plan.md) sections covering initial registry state, compatibility boundaries, milestones, rollout, regression controls, and risk register.
+- The updated [phase_plan.yaml](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/phase_plan.yaml) phase boundaries, dependencies, acceptance criteria, and rollback notes.
+- The continuity between the revised plan and [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt).
+
+What I reviewed
+
+- Whether the plan now prevents `unknown`/`manual_review` overlap in the final enabled taxonomy.
+- Whether the dual-write phase now has an explicit safe rule for non-legacy route-target IDs while the old `ticket_class` constraint still exists.
+- Whether criteria and feedback history accurately reflect closure of the earlier blocking issues.
+
+Key findings / decisions
+
+- Updated [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/criteria.md) so all verification checkboxes are now checked.
+- Appended a non-blocking closure note to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/feedback.md) confirming that the prior blocking findings are addressed.
+- The revised plan now explicitly separates compatibility-phase versus final-state enablement, keeps `manual_review` disabled during constrained dual-write, and retires `unknown` from new-run routing after the `route_target_id` cutover while preserving it for historical display.
+- No remaining blocking findings were identified in this verifier pass.
+
+Open issues / next step
+
+- No blocking issues remain in the planning artifacts.
+- The plan pair is ready to advance from verification.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
