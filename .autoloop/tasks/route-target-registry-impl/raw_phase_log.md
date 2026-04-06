@@ -114,3 +114,26 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=session_turn | pair=plan | phase=producer | cycle=2 | attempt=1 | thread_id=019d63dc-5d79-7db3-b4da-0fb84071cab9
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/AutoSac/.venv/lib/python3.10/site-packages/autoloop/templates/plan_producer.md
+session_id=019d63dc-5d79-7db3-b4da-0fb84071cab9
+
+
+---
+run_id=run-20260406T173439Z-51f2b380 | entry=phase_output | pair=plan | phase=producer | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d63dc-5d79-7db3-b4da-0fb84071cab9
+---
+I’m addressing the verifier’s two blocking findings directly: first by removing the unsafe `unknown`/`manual_review` overlap from the final-state taxonomy plan, and second by making the dual-write compatibility window explicit so new route-target IDs do not hit the legacy `ticket_class` constraint.
+
+I have a safe way to close both findings without changing user intent: keep the legacy class-aligned targets only for the compatibility window, prevent any non-legacy route-target ID from being emitted while `ticket_class` dual-write is still constrained, then flip to the final-state taxonomy by enabling `manual_review` and disabling `unknown` for new runs after the read/write cutover.
+
+The revised plan now distinguishes compatibility-state from final-state taxonomy and makes the constrained dual-write rule explicit. I’m reading the updated artifacts once more to ensure the producer fix is internally consistent before I hand it back to the verifier.
+
+Updated [plan.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/plan.md), [phase_plan.yaml](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/phase_plan.yaml), [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/feedback.md), and the current turn block in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/decisions.txt). I did not modify [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/route-target-registry-impl/plan/criteria.md).
+
+The revision resolves the verifier’s two blocking issues by making the taxonomy stateful across the migration: during dual-write, only route targets with a valid `ticket_class` shadow stay enabled for new runs, so `manual_review` remains registry-defined but disabled; after `route_target_id` becomes the active read path and legacy writes stop, `manual_review` becomes the human-assist target and `unknown` is retired from new-run routing but kept loadable for historical display. The plan and machine-readable phases now both spell out that compatibility rule, the cutover point, and the final no-overlap taxonomy state.

@@ -7,7 +7,7 @@ phases:
     objective: Introduce the registry, selector spec support, registry validation, prompt-rendering scaffolding, and taxonomy-agnostic workspace/bootstrap checks without changing runtime persistence behavior yet.
     status: planned
     in_scope:
-      - Add agent_specs/registry.json with the baseline route-target and specialist registrations.
+      - Add agent_specs/registry.json with compatibility-phase route-target enablement and final-state route-target registrations.
       - Add agent_specs/specialist-selector and allow selector spec manifests to load.
       - Implement shared/routing_registry.py typed loading and validation.
       - Replace runtime output-contract definitions and prompt placeholders for router, selector, and specialist execution.
@@ -30,6 +30,7 @@ phases:
       - Updated worker/output_contracts.py, prompt templates, prompt renderer, workspace contract/bootstrap, and startup checks
     risks:
       - Current underscore ticket taxonomy and hyphenated spec IDs can drift if the registry introduces an unnecessary alias layer.
+      - Compatibility-phase and final-state enablement can blur together if historical-only targets are not called out explicitly.
       - Bootstrap/check changes can make /readyz fail until registry validation is wired correctly.
     rollback:
       - Revert registry/selector/bootstrap changes before runtime cutover if startup validation blocks the existing worker path.
@@ -42,6 +43,7 @@ phases:
       - Add the additive Alembic migration for tickets.route_target_id and ai_run_steps selector step kind.
       - Backfill route_target_id from ticket_class and introduce temporary dual-write.
       - Update shared/models.py and shared/ticketing.py so runtime code can write route_target_id safely during the compatibility phase.
+      - Keep non-legacy route targets disabled for new runs while the legacy ticket_class constraint still governs writes.
       - Add migration/persistence coverage for route_target_id backfill and selector step persistence.
     out_of_scope:
       - Runtime selector execution and publication policy refactor.
@@ -55,7 +57,7 @@ phases:
       - id: AC-2
         text: selector is accepted as a persisted ai_run_steps step_kind and route-target storage has no DB taxonomy constraint.
       - id: AC-3
-        text: Migration and persistence tests cover backfill, dual-write, and selector step persistence before runtime cutover work begins.
+        text: Migration and persistence tests cover backfill, dual-write, selector step persistence, and the rule that non-legacy route targets stay disabled during the constrained compatibility window.
     deliverables:
       - Additive/backfill migration(s) and model updates for route_target_id plus selector step kind
       - Compatibility-safe ticketing write helper updates
@@ -63,6 +65,7 @@ phases:
     risks:
       - Backfill and dual-write can drift if route_target_id values are introduced without preserving the existing ticket_class semantics.
       - Migration order can block runtime cutover if selector persistence and route_target_id writes are not proven first.
+      - Enabling manual_review before legacy writes stop would violate the existing ticket_class constraint or mislabel legacy read paths.
     rollback:
       - Roll back to the previous code path while leaving additive schema changes in place if migration validation fails.
       - Keep ticket_class as the active read path until route_target_id backfill and dual-write are stable.
@@ -76,6 +79,7 @@ phases:
       - Refactor worker/triage.py, worker/step_runner.py, worker/artifacts.py, and shared/ticketing.py for route-target outcomes and manifest metadata.
       - Ensure human_assist plus specialist_selection.mode=none synthesizes human_handoff_result with terminal structured output.
       - Switch ops filters, labels, templates, and ticket detail presentation to route_target_id and registry metadata.
+      - After route_target_id becomes the active read path and ticket_class writes stop, enable manual_review for new runs and set unknown historical-only for new-run routing.
       - Add an ops-only adapter for legacy triage_result versus new contracts and unknown-ID fallback display.
     out_of_scope:
       - Final ticket_class column/constraint removal.
@@ -88,7 +92,7 @@ phases:
       - id: AC-2
         text: Accepted succeeded and human_review runs always persist final_output_contract and final_output_json, including synthesized human_handoff_result.
       - id: AC-3
-        text: Ops filter options come from ops_visible registry targets, route_target_id is the active read path, and historical tickets/runs remain viewable through a bounded presentation adapter without new worker fallback paths.
+        text: Ops filter options come from ops_visible registry targets, route_target_id is the active read path, historical tickets/runs remain viewable through a bounded presentation adapter without new worker fallback paths, and the final enabled taxonomy no longer overlaps unknown with manual_review semantics.
     deliverables:
       - Refactored worker pipeline/triage flow with selector execution, publication policy, and manifest updates
       - Ops route/template changes and ai_run presentation adapter
@@ -97,6 +101,7 @@ phases:
       - Publication-policy regressions could widen auto-publish behavior if downgrade rules are incomplete.
       - Human handoff synthesis can violate the accepted-run invariant if terminal payload persistence is missed on non-specialist routes.
       - Ops detail can regress if templates continue reading raw legacy fields directly.
+      - Final-state taxonomy can still drift if unknown is not retired from new-run routing when manual_review is enabled.
     rollback:
       - Revert runtime/UI cutover changes while leaving additive schema changes in place if route-target execution or presentation fails.
       - Keep ticket_class populated during the compatibility window until route_target_id reads and ops rendering are proven stable.
