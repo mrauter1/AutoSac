@@ -135,6 +135,23 @@ def test_create_pending_ai_run_returns_run_on_success():
     assert session.flush_calls == 1
 
 
+def test_create_pending_ai_run_persists_forced_override_fields():
+    _, AIRun, _, create_pending_ai_run, _ = _load_ticketing_dependencies()
+    session = _FakeSession()
+
+    run = create_pending_ai_run(
+        session,
+        ticket_id=uuid.uuid4(),
+        triggered_by="manual_rerun",
+        forced_route_target_id="software_architect",
+        forced_specialist_id="software-architect",
+    )
+
+    assert isinstance(run, AIRun)
+    assert run.forced_route_target_id == "software_architect"
+    assert run.forced_specialist_id == "software-architect"
+
+
 def test_create_pending_ai_run_returns_none_for_active_run_conflict():
     IntegrityError, _, _, create_pending_ai_run, _ = _load_ticketing_dependencies()
     conflict = IntegrityError(
@@ -276,6 +293,27 @@ def test_route_target_cleanup_migration_drops_legacy_ticket_class_storage():
 
     assert 'batch_op.drop_constraint(op.f("ck_tickets_tickets_ticket_class"), type_="check")' in migration_source
     assert 'batch_op.drop_column("ticket_class")' in migration_source
+
+
+def test_manual_rerun_override_migration_adds_forced_override_columns():
+    migration_source = Path(
+        "shared/migrations/versions/20260406_0007_manual_rerun_specialist_overrides.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'op.add_column("tickets", sa.Column("requeue_forced_route_target_id", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("tickets", sa.Column("requeue_forced_specialist_id", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("ai_runs", sa.Column("forced_route_target_id", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("ai_runs", sa.Column("forced_specialist_id", sa.Text(), nullable=True))' in migration_source
+
+
+def test_deferred_requeue_requester_migration_adds_requesting_user_fk():
+    migration_source = Path(
+        "shared/migrations/versions/20260407_0008_deferred_requeue_requester.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'sa.Column("requeue_requested_by_user_id"' in migration_source
+    assert 'op.create_foreign_key(' in migration_source
+    assert '"fk_tickets_requeue_requested_by_user_id_users"' in migration_source
 
 
 def test_route_target_compatibility_persistence_backfills_and_allows_selector_steps(tmp_path):
@@ -493,12 +531,19 @@ def test_models_expose_route_target_storage_without_db_taxonomy_constraints_or_t
         if isinstance(constraint, CheckConstraint) and "route_target_id" in str(constraint.sqltext)
     ]
     assert route_target_constraints == []
+    assert "requeue_requested_by_user_id" in Ticket.__table__.c
+    assert "requeue_forced_route_target_id" in Ticket.__table__.c
+    assert "requeue_forced_specialist_id" in Ticket.__table__.c
     legacy_ticket_class_constraints = [
         str(constraint.sqltext)
         for constraint in Ticket.__table__.constraints
         if isinstance(constraint, CheckConstraint) and "ticket_class" in str(constraint.sqltext)
     ]
     assert legacy_ticket_class_constraints == []
+    from shared.models import AIRun
+
+    assert "forced_route_target_id" in AIRun.__table__.c
+    assert "forced_specialist_id" in AIRun.__table__.c
 
 
 def test_apply_ai_route_target_sets_route_target_and_requester_language():
@@ -726,7 +771,7 @@ def test_create_admin_script_reports_matching_admin_as_success(monkeypatch, caps
 
     create_admin.main()
 
-    assert observed["defaults"] == ("db", "stage1-v3")
+    assert observed["defaults"] == ("db", "stage1-v4")
     assert capsys.readouterr().out.strip() == "Admin user admin@example.com already matched the requested bootstrap state"
 
 
@@ -761,7 +806,7 @@ def test_bootstrap_workspace_script_seeds_system_state_defaults(monkeypatch, cap
     monkeypatch.setattr(
         bootstrap_script,
         "workspace_contract_snapshot",
-        lambda resolved_settings: {"bootstrap_version": "stage1-v3", "workspace_dir": str(resolved_settings.triage_workspace_dir)},
+        lambda resolved_settings: {"bootstrap_version": "stage1-v4", "workspace_dir": str(resolved_settings.triage_workspace_dir)},
     )
 
     bootstrap_script.main()
@@ -770,10 +815,10 @@ def test_bootstrap_workspace_script_seeds_system_state_defaults(monkeypatch, cap
         ("ensure_uploads_dir", settings),
         ("bootstrap_workspace", settings),
         ("session_scope", settings),
-        ("ensure_system_state_defaults", "db", "stage1-v3"),
+        ("ensure_system_state_defaults", "db", "stage1-v4"),
     ]
     assert json.loads(capsys.readouterr().out) == {
-        "bootstrap_version": "stage1-v3",
+        "bootstrap_version": "stage1-v4",
         "workspace_dir": str(settings.triage_workspace_dir),
     }
 

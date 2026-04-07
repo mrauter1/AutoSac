@@ -16,6 +16,7 @@ def _load_symbols():
         add_ops_internal_note,
         add_ops_public_reply,
         assign_ticket_for_ops,
+        process_deferred_requeue,
         publish_ai_draft_for_ops,
         reject_ai_draft_for_ops,
         request_manual_rerun,
@@ -32,6 +33,7 @@ def _load_symbols():
         "add_ops_internal_note": add_ops_internal_note,
         "add_ops_public_reply": add_ops_public_reply,
         "assign_ticket_for_ops": assign_ticket_for_ops,
+        "process_deferred_requeue": process_deferred_requeue,
         "publish_ai_draft_for_ops": publish_ai_draft_for_ops,
         "reject_ai_draft_for_ops": reject_ai_draft_for_ops,
         "request_manual_rerun": request_manual_rerun,
@@ -297,8 +299,40 @@ def test_request_manual_rerun_requeues_when_run_is_active(monkeypatch):
     assert run is None
     assert ticket.requeue_requested is True
     assert ticket.requeue_trigger == "manual_rerun"
+    assert ticket.requeue_requested_by_user_id == actor.id
     assert ticket.status == "waiting_on_dev_ti"
     assert history == []
+
+
+def test_request_manual_rerun_requeues_with_forced_specialist_override(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=70,
+        reference="T-000070",
+        title="Architect review",
+        created_by_user_id=uuid.uuid4(),
+        status="waiting_on_dev_ti",
+        urgent=False,
+    )
+    monkeypatch.setattr("shared.ticketing.has_active_ai_run", lambda db, ticket_id: True)
+
+    run = symbols["request_manual_rerun"](
+        fake_db,
+        ticket=ticket,
+        actor=actor,
+        forced_route_target_id="software_architect",
+        forced_specialist_id="software-architect",
+    )
+
+    assert run is None
+    assert ticket.requeue_requested is True
+    assert ticket.requeue_trigger == "manual_rerun"
+    assert ticket.requeue_requested_by_user_id == actor.id
+    assert ticket.requeue_forced_route_target_id == "software_architect"
+    assert ticket.requeue_forced_specialist_id == "software-architect"
 
 
 def test_request_manual_rerun_creates_pending_run_and_moves_ticket_to_ai_triage(monkeypatch):
@@ -325,6 +359,85 @@ def test_request_manual_rerun_creates_pending_run_and_moves_ticket_to_ai_triage(
     assert ticket.status == "ai_triage"
     assert history[0].from_status == "waiting_on_dev_ti"
     assert history[0].to_status == "ai_triage"
+
+
+def test_request_manual_rerun_passes_forced_specialist_override_to_new_run(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=72,
+        reference="T-000072",
+        title="Forced rerun",
+        created_by_user_id=uuid.uuid4(),
+        status="waiting_on_dev_ti",
+        urgent=False,
+        requeue_forced_route_target_id="support",
+        requeue_forced_specialist_id="support",
+    )
+    observed = {}
+    expected_run = object()
+    monkeypatch.setattr("shared.ticketing.has_active_ai_run", lambda db, ticket_id: False)
+
+    def fake_create_pending_ai_run(*args, **kwargs):
+        observed.update(kwargs)
+        return expected_run
+
+    monkeypatch.setattr("shared.ticketing.create_pending_ai_run", fake_create_pending_ai_run)
+
+    run = symbols["request_manual_rerun"](
+        fake_db,
+        ticket=ticket,
+        actor=actor,
+        forced_route_target_id="software_architect",
+        forced_specialist_id="software-architect",
+    )
+
+    assert run is expected_run
+    assert observed["requested_by_user_id"] == actor.id
+    assert observed["forced_route_target_id"] == "software_architect"
+    assert observed["forced_specialist_id"] == "software-architect"
+    assert ticket.requeue_requested_by_user_id is None
+    assert ticket.requeue_forced_route_target_id is None
+    assert ticket.requeue_forced_specialist_id is None
+
+
+def test_process_deferred_requeue_transfers_forced_specialist_override(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    requester_id = uuid.uuid4()
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=73,
+        reference="T-000073",
+        title="Deferred forced rerun",
+        created_by_user_id=uuid.uuid4(),
+        status="ai_triage",
+        urgent=False,
+        requeue_requested=True,
+        requeue_trigger="manual_rerun",
+        requeue_requested_by_user_id=requester_id,
+        requeue_forced_route_target_id="software_architect",
+        requeue_forced_specialist_id="software-architect",
+    )
+    observed = {}
+    expected_run = object()
+
+    monkeypatch.setattr("shared.ticketing.has_active_ai_run", lambda db, ticket_id: False)
+    monkeypatch.setattr("shared.ticketing.create_pending_ai_run", lambda *args, **kwargs: observed.update(kwargs) or expected_run)
+
+    run = symbols["process_deferred_requeue"](fake_db, ticket=ticket)
+
+    assert run is expected_run
+    assert observed["requested_by_user_id"] == requester_id
+    assert observed["forced_route_target_id"] == "software_architect"
+    assert observed["forced_specialist_id"] == "software-architect"
+    assert ticket.requeue_requested is False
+    assert ticket.requeue_trigger is None
+    assert ticket.requeue_requested_by_user_id is None
+    assert ticket.requeue_forced_route_target_id is None
+    assert ticket.requeue_forced_specialist_id is None
 
 
 def test_publish_ai_draft_for_ops_creates_ai_message_and_status_change():
@@ -923,6 +1036,14 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
             "ai_summary_internal": "",
             "creator": None,
             "assignee": None,
+            "rerun_specialist_options": [
+                {
+                    "route_target_id": "software_architect",
+                    "route_target_label": "Software Architect",
+                    "specialist_id": "software-architect",
+                    "specialist_display_name": "Software Architect",
+                }
+            ],
         },
     )
     monkeypatch.setattr(
@@ -941,6 +1062,9 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
     assert response.status_code == 200
     assert observed["view_updates"] == 1
     assert db.commit_calls == 1
+    assert 'name="forced_route_target_id"' in response.text
+    assert "Use normal routing" in response.text
+    assert "Software Architect" in response.text
 
 
 def test_ops_set_ticket_status_ai_triage_triggers_manual_rerun(monkeypatch):
@@ -974,6 +1098,71 @@ def test_ops_set_ticket_status_ai_triage_triggers_manual_rerun(monkeypatch):
     assert response.headers["location"] == f"/ops/tickets/{ticket.reference}"
     assert observed["next_status"] == "ai_triage"
     assert db.commit_calls == 1
+
+
+def test_ops_rerun_ai_allows_forced_specialist_route_target(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000012A", id=uuid.uuid4())
+    observed = {}
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "request_manual_rerun",
+        lambda db, ticket, actor, forced_route_target_id=None, forced_specialist_id=None: observed.update(
+            {
+                "forced_route_target_id": forced_route_target_id,
+                "forced_specialist_id": forced_specialist_id,
+            }
+        ),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            f"/ops/tickets/{ticket.reference}/rerun-ai",
+            data={"csrf_token": "csrf-token", "forced_route_target_id": "software_architect"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/ops/tickets/{ticket.reference}"
+    assert observed == {
+        "forced_route_target_id": "software_architect",
+        "forced_specialist_id": "software-architect",
+    }
+    assert db.commit_calls == 1
+
+
+def test_ops_rerun_ai_rejects_invalid_forced_route_target(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000012B", id=uuid.uuid4())
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            f"/ops/tickets/{ticket.reference}/rerun-ai",
+            data={"csrf_token": "csrf-token", "forced_route_target_id": "manual_review"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
 
 
 def test_ops_detail_route_separates_analysis_artifacts_from_latest_run(monkeypatch):
@@ -1309,6 +1498,8 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert '"/ops/tickets/{reference}/assign"' in source
     assert '"/ops/tickets/{reference}/set-status"' in source
     assert '"/ops/tickets/{reference}/rerun-ai"' in source
+    assert "Route AI to specialist" in detail_template
+    assert 'name="forced_route_target_id"' in detail_template
     assert "add_ops_public_reply" in source
     assert "add_ops_internal_note" in source
     assert "assign_ticket_for_ops" in source

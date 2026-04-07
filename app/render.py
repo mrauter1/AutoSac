@@ -4,7 +4,6 @@ import bleach
 from markdown_it import MarkdownIt
 
 _MARKDOWN = MarkdownIt("commonmark", {"breaks": True, "html": False})
-
 _ALLOWED_TAGS = list(bleach.sanitizer.ALLOWED_TAGS) + [
     "p",
     "pre",

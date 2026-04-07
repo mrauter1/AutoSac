@@ -14,7 +14,6 @@ from shared.config import Settings
 
 def _load_ticketing_symbols():
     pytest.importorskip("sqlalchemy")
-    pytest.importorskip("argon2")
     from shared.models import AIRun, SessionRecord, Ticket, TicketAttachment, TicketMessage, TicketStatusHistory, TicketView, User
     from shared.ticketing import add_requester_reply, create_requester_ticket, resolve_ticket_for_requester
 
@@ -129,9 +128,7 @@ def _make_settings(tmp_path: Path) -> Settings:
 def _load_web_stack():
     pytest.importorskip("fastapi")
     pytest.importorskip("sqlalchemy")
-    pytest.importorskip("argon2")
     from fastapi.testclient import TestClient
-
     from app.main import create_app
     from app import routes_auth, routes_ops, routes_requester
     from shared.db import db_session_dependency

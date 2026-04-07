@@ -10,6 +10,7 @@ from shared.agent_specs import PIPELINE_VERSION
 from shared.config import Settings
 from shared.db import session_scope
 from shared.models import AIRun, Ticket
+from shared.permissions import ADMIN_ROLE, DEV_TI_ROLE
 from shared.security import utc_now
 from shared.ticketing import (
     apply_ai_route_target,
@@ -35,6 +36,8 @@ class PreparedRunContext:
     ticket_id: uuid.UUID
     input_hash: str
     context: LoadedTicketContext
+    forced_route_target_id: str | None
+    forced_specialist_id: str | None
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,10 @@ class ResolvedRunOutcome:
     internal_note_markdown: str
     next_status: str
     last_ai_action: str
+
+
+def _is_internal_requester(context: LoadedTicketContext) -> bool:
+    return context.requester_role in {DEV_TI_ROLE, ADMIN_ROLE}
 
 
 def build_requester_visible_fingerprint(context: LoadedTicketContext) -> str:
@@ -116,6 +123,8 @@ def _prepare_run(settings: Settings, *, run_id) -> PreparedRunContext | None:
             ticket_id=context.ticket.id,
             input_hash=input_hash,
             context=context,
+            forced_route_target_id=getattr(run, "forced_route_target_id", None),
+            forced_specialist_id=getattr(run, "forced_specialist_id", None),
         )
 
 
@@ -228,6 +237,43 @@ def _resolve_specialist_outcome(
     )
 
 
+def _extract_public_reply_markdown(payload: dict[str, object]) -> str:
+    public_reply = payload.get("public_reply_markdown")
+    if isinstance(public_reply, str):
+        return public_reply.strip()
+    return ""
+
+
+def _override_internal_requester_outcome(
+    context: LoadedTicketContext,
+    *,
+    outcome: ResolvedRunOutcome,
+    final_output_json: dict[str, object],
+) -> ResolvedRunOutcome:
+    if not _is_internal_requester(context) or outcome.run_status != "human_review":
+        return outcome
+
+    public_reply_markdown = _extract_public_reply_markdown(final_output_json)
+    if public_reply_markdown:
+        return ResolvedRunOutcome(
+            run_status="succeeded",
+            effective_publication_mode="auto_publish",
+            public_reply_markdown=public_reply_markdown,
+            internal_note_markdown=outcome.internal_note_markdown,
+            next_status="waiting_on_user",
+            last_ai_action="auto_public_reply",
+        )
+
+    return ResolvedRunOutcome(
+        run_status="succeeded",
+        effective_publication_mode="manual_only",
+        public_reply_markdown="",
+        internal_note_markdown=outcome.internal_note_markdown,
+        next_status="ai_triage",
+        last_ai_action="manual_only",
+    )
+
+
 def _apply_success_result(
     settings: Settings,
     *,
@@ -273,6 +319,12 @@ def _apply_success_result(
                 final_agent_spec_id = pipeline_result.specialist_step.prepared.spec.id
                 final_model_name = pipeline_result.specialist_step.prepared.model_name
                 requester_language = specialist_result.requester_language
+
+            outcome = _override_internal_requester_outcome(
+                context,
+                outcome=outcome,
+                final_output_json=final_output_json,
+            )
 
             apply_ai_route_target(
                 context.ticket,
@@ -394,6 +446,8 @@ def process_ai_run(settings: Settings, *, run_id) -> None:
             run_id=prepared.run_id,
             ticket_id=prepared.ticket_id,
             context=prepared.context,
+            forced_route_target_id=getattr(prepared, "forced_route_target_id", None),
+            forced_specialist_id=getattr(prepared, "forced_specialist_id", None),
         )
         _apply_success_result(
             settings,

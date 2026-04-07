@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "router_spec_id": "router",
   "selector_spec_id": "specialist-selector",
   "route_targets": [
@@ -109,6 +109,48 @@
       }
     },
     {
+      "id": "business_analyst",
+      "label": "Business Analyst",
+      "kind": "direct_ai",
+      "enabled": true,
+      "ops_visible": true,
+      "router_description": "Requests to frame a vague change, gather or refine requirements, test viability, challenge weak assumptions, and produce a clearer plan for the development team.",
+      "handler": {
+        "specialist_selection": {
+          "mode": "fixed",
+          "specialist_id": "business-analyst"
+        }
+      },
+      "publish_policy": {
+        "allow_auto_publish": false,
+        "min_response_confidence_for_auto_publish": "very_high",
+        "max_risk_level_for_auto_publish": "none",
+        "allow_draft_for_human": true,
+        "allow_manual_only": true
+      }
+    },
+    {
+      "id": "software_architect",
+      "label": "Software Architect",
+      "kind": "direct_ai",
+      "enabled": true,
+      "ops_visible": true,
+      "router_description": "Requests for repository-grounded architecture assessment, technical design review, migration strategy, implementation planning, and conservative evaluation of proposed changes.",
+      "handler": {
+        "specialist_selection": {
+          "mode": "fixed",
+          "specialist_id": "software-architect"
+        }
+      },
+      "publish_policy": {
+        "allow_auto_publish": false,
+        "min_response_confidence_for_auto_publish": "very_high",
+        "max_risk_level_for_auto_publish": "none",
+        "allow_draft_for_human": true,
+        "allow_manual_only": true
+      }
+    },
+    {
       "id": "unknown",
       "label": "Unknown",
       "kind": "direct_ai",
@@ -184,6 +226,20 @@
       "id": "feature",
       "display_name": "Feature Specialist",
       "spec_id": "feature",
+      "enabled": true,
+      "can_assist_human": true
+    },
+    {
+      "id": "business-analyst",
+      "display_name": "Business Analyst Specialist",
+      "spec_id": "business-analyst",
+      "enabled": true,
+      "can_assist_human": true
+    },
+    {
+      "id": "software-architect",
+      "display_name": "Software Architect Specialist",
+      "spec_id": "software-architect",
       "enabled": true,
       "can_assist_human": true
     },

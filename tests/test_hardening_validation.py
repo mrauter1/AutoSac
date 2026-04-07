@@ -9,8 +9,9 @@ import sys
 
 import pytest
 
-from shared.agent_specs import required_workspace_skill_paths
+from shared.agent_specs import load_all_agent_specs
 from shared.config import Settings
+from shared.contracts import WORKSPACE_AGENTS_CONTENT
 
 
 def _make_settings(tmp_path: Path) -> Settings:
@@ -49,6 +50,14 @@ def _load_web_stack():
     }
 
 
+def _seed_workspace_contract(settings: Settings) -> None:
+    settings.workspace_agents_path.write_text(WORKSPACE_AGENTS_CONTENT, encoding="utf-8")
+    for spec in load_all_agent_specs():
+        path = settings.workspace_skill_file_path(spec.skill_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(spec.skill_text, encoding="utf-8")
+
+
 def test_render_markdown_to_html_sanitizes_untrusted_content():
     pytest.importorskip("markdown_it")
     pytest.importorskip("bleach")
@@ -73,13 +82,40 @@ def test_verify_workspace_contract_paths_requires_agents_and_skill_files(tmp_pat
     with pytest.raises(FileNotFoundError):
         verify_workspace_contract_paths(settings)
 
-    settings.workspace_agents_path.write_text("agents", encoding="utf-8")
-    for relative_path in required_workspace_skill_paths():
-        path = settings.triage_workspace_dir / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("skill", encoding="utf-8")
+    _seed_workspace_contract(settings)
 
     verify_workspace_contract_paths(settings)
+
+
+def test_verify_workspace_contract_paths_rejects_stale_agents_file(tmp_path):
+    from shared.workspace import verify_workspace_contract_paths
+
+    settings = _make_settings(tmp_path)
+    settings.triage_workspace_dir.mkdir(parents=True)
+    settings.runs_dir.mkdir(parents=True)
+    settings.repo_mount_dir.mkdir(parents=True)
+    settings.manuals_mount_dir.mkdir(parents=True)
+    _seed_workspace_contract(settings)
+    settings.workspace_agents_path.write_text("stale agents", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Workspace AGENTS.md content is stale"):
+        verify_workspace_contract_paths(settings)
+
+
+def test_verify_workspace_contract_paths_rejects_stale_skill_file(tmp_path):
+    from shared.workspace import verify_workspace_contract_paths
+
+    settings = _make_settings(tmp_path)
+    settings.triage_workspace_dir.mkdir(parents=True)
+    settings.runs_dir.mkdir(parents=True)
+    settings.repo_mount_dir.mkdir(parents=True)
+    settings.manuals_mount_dir.mkdir(parents=True)
+    _seed_workspace_contract(settings)
+    first_spec = next(iter(load_all_agent_specs()))
+    settings.workspace_skill_file_path(first_spec.skill_id).write_text("stale skill", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match=f"Workspace workspace skill {first_spec.skill_id} content is stale"):
+        verify_workspace_contract_paths(settings)
 
 
 def test_readyz_returns_ready_when_database_and_workspace_checks_pass(monkeypatch, tmp_path):
@@ -379,7 +415,7 @@ def test_bootstrap_web_and_worker_scripts_validate_end_to_end(tmp_path):
     _create_runtime_schema(db_path)
 
     bootstrap = _run_script(["scripts/bootstrap_workspace.py"], env=env)
-    assert '"bootstrap_version": "stage1-v3"' in bootstrap.stdout
+    assert '"bootstrap_version": "stage1-v4"' in bootstrap.stdout
     with sqlite3.connect(db_path) as connection:
         rows = dict(connection.execute("SELECT key, value_json FROM system_state").fetchall())
     assert "bootstrap_version" in rows

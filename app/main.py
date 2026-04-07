@@ -15,6 +15,7 @@ from app.ui import STATIC_DIR
 from shared.config import get_settings
 from shared.db import ping_database
 from shared.logging import log_web_event
+from shared.run_history import assert_ai_run_history_ready
 from shared.workspace import verify_workspace_contract_paths
 
 
@@ -62,6 +63,7 @@ def create_app() -> FastAPI:
             settings.validate_contracts()
             ping_database(settings)
             verify_workspace_contract_paths(settings)
+            assert_ai_run_history_ready(settings)
         except Exception as exc:
             log_web_event("readiness_failed", level="error", error=str(exc))
             return JSONResponse({"status": "not_ready", "error": str(exc)}, status_code=503)

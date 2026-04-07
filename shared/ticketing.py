@@ -104,12 +104,16 @@ def create_pending_ai_run(
     ticket_id: uuid.UUID,
     triggered_by: str,
     requested_by_user_id: uuid.UUID | None = None,
+    forced_route_target_id: str | None = None,
+    forced_specialist_id: str | None = None,
 ) -> AIRun | None:
     run = AIRun(
         ticket_id=ticket_id,
         status="pending",
         triggered_by=triggered_by,
         requested_by_user_id=requested_by_user_id,
+        forced_route_target_id=forced_route_target_id,
+        forced_specialist_id=forced_specialist_id,
     )
     try:
         with db.begin_nested():
@@ -122,9 +126,19 @@ def create_pending_ai_run(
     return run
 
 
-def request_requeue(ticket: Ticket, trigger: str) -> None:
+def request_requeue(
+    ticket: Ticket,
+    trigger: str,
+    *,
+    requested_by_user_id: uuid.UUID | None = None,
+    forced_route_target_id: str | None = None,
+    forced_specialist_id: str | None = None,
+) -> None:
     ticket.requeue_requested = True
     ticket.requeue_trigger = trigger
+    ticket.requeue_requested_by_user_id = requested_by_user_id
+    ticket.requeue_forced_route_target_id = forced_route_target_id
+    ticket.requeue_forced_specialist_id = forced_specialist_id
     touch_ticket(ticket)
 
 
@@ -148,8 +162,12 @@ def ensure_system_state_defaults(db: Session, bootstrap_version: str) -> None:
     now = utc_now()
     if "worker_heartbeat" not in existing_keys:
         db.add(SystemState(key="worker_heartbeat", value_json={"status": "unknown"}, updated_at=now))
-    if "bootstrap_version" not in existing_keys:
+    bootstrap_state = db.get(SystemState, "bootstrap_version") if "bootstrap_version" in existing_keys else None
+    if bootstrap_state is None:
         db.add(SystemState(key="bootstrap_version", value_json={"version": bootstrap_version}, updated_at=now))
+    elif bootstrap_state.value_json != {"version": bootstrap_version}:
+        bootstrap_state.value_json = {"version": bootstrap_version}
+        bootstrap_state.updated_at = now
 
 
 def normalize_message_text(markdown_text: str) -> str:
@@ -220,7 +238,7 @@ def enqueue_or_requeue_ai_run(
         requested_by_user_id=requested_by_user_id,
     )
     if run is None:
-        request_requeue(ticket, trigger)
+        request_requeue(ticket, trigger, requested_by_user_id=requested_by_user_id)
     return run
 
 
@@ -559,11 +577,17 @@ def process_deferred_requeue(db: Session, *, ticket: Ticket) -> AIRun | None:
         db,
         ticket_id=ticket.id,
         triggered_by=ticket.requeue_trigger,
+        requested_by_user_id=ticket.requeue_requested_by_user_id,
+        forced_route_target_id=ticket.requeue_forced_route_target_id,
+        forced_specialist_id=ticket.requeue_forced_specialist_id,
     )
     if run is None:
         return None
     ticket.requeue_requested = False
     ticket.requeue_trigger = None
+    ticket.requeue_requested_by_user_id = None
+    ticket.requeue_forced_route_target_id = None
+    ticket.requeue_forced_specialist_id = None
     touch_ticket(ticket)
     return run
 
@@ -691,10 +715,18 @@ def request_manual_rerun(
     *,
     ticket: Ticket,
     actor: User,
+    forced_route_target_id: str | None = None,
+    forced_specialist_id: str | None = None,
 ) -> AIRun | None:
     requested_at = utc_now()
     if has_active_ai_run(db, ticket.id):
-        request_requeue(ticket, "manual_rerun")
+        request_requeue(
+            ticket,
+            "manual_rerun",
+            requested_by_user_id=actor.id,
+            forced_route_target_id=forced_route_target_id,
+            forced_specialist_id=forced_specialist_id,
+        )
         upsert_ticket_view(db, user_id=actor.id, ticket_id=ticket.id, viewed_at=requested_at)
         return None
     run = create_pending_ai_run(
@@ -702,11 +734,24 @@ def request_manual_rerun(
         ticket_id=ticket.id,
         triggered_by="manual_rerun",
         requested_by_user_id=actor.id,
+        forced_route_target_id=forced_route_target_id,
+        forced_specialist_id=forced_specialist_id,
     )
     if run is None:
-        request_requeue(ticket, "manual_rerun")
+        request_requeue(
+            ticket,
+            "manual_rerun",
+            requested_by_user_id=actor.id,
+            forced_route_target_id=forced_route_target_id,
+            forced_specialist_id=forced_specialist_id,
+        )
         upsert_ticket_view(db, user_id=actor.id, ticket_id=ticket.id, viewed_at=requested_at)
         return None
+    ticket.requeue_requested = False
+    ticket.requeue_trigger = None
+    ticket.requeue_requested_by_user_id = None
+    ticket.requeue_forced_route_target_id = None
+    ticket.requeue_forced_specialist_id = None
     if ticket.status != "ai_triage":
         record_status_change(
             db,

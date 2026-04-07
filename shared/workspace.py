@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 
-from shared.agent_specs import load_all_agent_specs, required_workspace_skill_paths
+from shared.agent_specs import load_all_agent_specs
 from shared.config import Settings
 from shared.contracts import (
     WORKSPACE_AGENTS_CONTENT,
@@ -16,6 +16,16 @@ from shared.routing_registry import load_routing_registry
 def _write_exact_file(path: Path, contents: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(contents, encoding="utf-8")
+
+
+def _verify_exact_file(path: Path, expected_contents: str, *, label: str) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"Required {label} file does not exist: {path}")
+    if not path.is_file():
+        raise FileNotFoundError(f"Required {label} path is not a file: {path}")
+    actual_contents = path.read_text(encoding="utf-8")
+    if actual_contents != expected_contents:
+        raise RuntimeError(f"Workspace {label} content is stale: {path}. Rerun python scripts/bootstrap_workspace.py")
 
 
 def _ensure_git_repo(workspace_dir: Path) -> None:
@@ -47,6 +57,7 @@ def verify_workspace_mounts(settings: Settings) -> None:
 
 def verify_workspace_contract_paths(settings: Settings) -> None:
     load_routing_registry()
+    specs = tuple(load_all_agent_specs())
     verify_workspace_mounts(settings)
     for label, path in (
         ("workspace", settings.triage_workspace_dir),
@@ -58,28 +69,23 @@ def verify_workspace_contract_paths(settings: Settings) -> None:
             raise NotADirectoryError(f"Required {label} directory is not a directory: {path}")
         path.stat()
 
-    for label, path in (("AGENTS.md", settings.workspace_agents_path),):
-        if not path.exists():
-            raise FileNotFoundError(f"Required {label} file does not exist: {path}")
-        if not path.is_file():
-            raise FileNotFoundError(f"Required {label} path is not a file: {path}")
-        path.stat()
-    for relative_path in required_workspace_skill_paths():
-        path = settings.triage_workspace_dir / relative_path
-        if not path.exists():
-            raise FileNotFoundError(f"Required workspace skill file does not exist: {path}")
-        if not path.is_file():
-            raise FileNotFoundError(f"Required workspace skill path is not a file: {path}")
-        path.stat()
+    _verify_exact_file(settings.workspace_agents_path, WORKSPACE_AGENTS_CONTENT, label="AGENTS.md")
+    for spec in specs:
+        _verify_exact_file(
+            settings.workspace_skill_file_path(spec.skill_id),
+            spec.skill_text,
+            label=f"workspace skill {spec.skill_id}",
+        )
 
 
 def bootstrap_workspace(settings: Settings) -> None:
     load_routing_registry()
+    specs = tuple(load_all_agent_specs())
     settings.triage_workspace_dir.mkdir(parents=True, exist_ok=True)
     settings.runs_dir.mkdir(parents=True, exist_ok=True)
     verify_workspace_mounts(settings)
     _write_exact_file(settings.triage_workspace_dir / WORKSPACE_AGENTS_RELATIVE_PATH, WORKSPACE_AGENTS_CONTENT)
-    for spec in load_all_agent_specs():
+    for spec in specs:
         _write_exact_file(settings.workspace_skill_file_path(spec.skill_id), spec.skill_text)
     _ensure_git_repo(settings.triage_workspace_dir)
 
@@ -89,6 +95,7 @@ def ensure_uploads_dir(settings: Settings) -> None:
 
 
 def workspace_contract_snapshot(settings: Settings) -> dict[str, str]:
+    specs = tuple(load_all_agent_specs())
     return {
         "bootstrap_version": WORKSPACE_BOOTSTRAP_VERSION,
         "workspace_dir": str(settings.triage_workspace_dir),
@@ -96,5 +103,5 @@ def workspace_contract_snapshot(settings: Settings) -> dict[str, str]:
         "manuals_mount_dir": str(settings.manuals_mount_dir),
         "agents_path": str(settings.triage_workspace_dir / WORKSPACE_AGENTS_RELATIVE_PATH),
         "skills_dir": str(settings.workspace_skills_dir),
-        "skill_ids": ",".join(spec.skill_id for spec in load_all_agent_specs()),
+        "skill_ids": ",".join(spec.skill_id for spec in specs),
     }

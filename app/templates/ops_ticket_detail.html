@@ -271,8 +271,22 @@
         </div>
       </details>
       {% endif %}
-      <form method="post" action="/ops/tickets/{{ ticket.reference }}/rerun-ai">
+      <form method="post" action="/ops/tickets/{{ ticket.reference }}/rerun-ai" class="stack stack--tight">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="field">
+          <span>Route AI to specialist</span>
+          <select name="forced_route_target_id">
+            <option value="">Use normal routing</option>
+            {% for option in rerun_specialist_options %}
+            <option value="{{ option.route_target_id }}">
+              {{ option.route_target_label }}
+              {% if option.specialist_display_name != option.route_target_label %}
+              · {{ option.specialist_display_name }}
+              {% endif %}
+            </option>
+            {% endfor %}
+          </select>
+        </label>
         <button type="submit" class="button">Rerun AI</button>
       </form>
     </section>

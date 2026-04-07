@@ -84,6 +84,14 @@ class SpecialistRegistration:
 
 
 @dataclass(frozen=True)
+class ManualRerunSpecialistOption:
+    route_target_id: str
+    route_target_label: str
+    specialist_id: str
+    specialist_display_name: str
+
+
+@dataclass(frozen=True)
 class RoutingRegistry:
     version: int
     router_spec_id: str
@@ -119,11 +127,75 @@ class RoutingRegistry:
             raise RoutingRegistryError(f"Unknown specialist: {specialist_id}")
         return specialist
 
+    def require_enabled_specialist(self, specialist_id: str) -> SpecialistRegistration:
+        specialist = self.require_specialist(specialist_id)
+        if not specialist.enabled:
+            raise RoutingRegistryError(f"Specialist {specialist_id} is disabled for new runs")
+        return specialist
+
     def enabled_route_targets(self) -> tuple[RouteTarget, ...]:
         return tuple(route_target for route_target in self.route_targets if route_target.enabled)
 
     def ops_visible_route_targets(self) -> tuple[RouteTarget, ...]:
         return tuple(route_target for route_target in self.route_targets if route_target.ops_visible)
+
+    def manual_rerun_specialist_options(self) -> tuple[ManualRerunSpecialistOption, ...]:
+        options: list[ManualRerunSpecialistOption] = []
+        for route_target in self.route_targets:
+            if not route_target.enabled or route_target.kind != "direct_ai":
+                continue
+            selection = route_target.handler.specialist_selection
+            if selection.mode != "fixed" or not selection.specialist_id:
+                continue
+            specialist = self.require_enabled_specialist(selection.specialist_id)
+            options.append(
+                ManualRerunSpecialistOption(
+                    route_target_id=route_target.id,
+                    route_target_label=route_target.label,
+                    specialist_id=specialist.id,
+                    specialist_display_name=specialist.display_name,
+                )
+            )
+        return tuple(options)
+
+    def require_manual_rerun_specialist_option(self, route_target_id: str) -> ManualRerunSpecialistOption:
+        route_target = self.require_enabled_route_target(route_target_id)
+        if route_target.kind != "direct_ai":
+            raise RoutingRegistryError(f"Route target {route_target_id} does not support forced direct-AI specialist reruns")
+        selection = route_target.handler.specialist_selection
+        if selection.mode != "fixed" or not selection.specialist_id:
+            raise RoutingRegistryError(f"Route target {route_target_id} does not support fixed specialist reruns")
+        specialist = self.require_enabled_specialist(selection.specialist_id)
+        return ManualRerunSpecialistOption(
+            route_target_id=route_target.id,
+            route_target_label=route_target.label,
+            specialist_id=specialist.id,
+            specialist_display_name=specialist.display_name,
+        )
+
+    def resolve_forced_manual_rerun_choice(
+        self,
+        *,
+        route_target_id: str,
+        specialist_id: str,
+    ) -> ManualRerunSpecialistOption:
+        route_target = self.require_route_target(route_target_id)
+        if route_target.kind != "direct_ai":
+            raise RoutingRegistryError(f"Route target {route_target_id} does not support forced direct-AI specialist reruns")
+        selection = route_target.handler.specialist_selection
+        if selection.mode != "fixed" or not selection.specialist_id:
+            raise RoutingRegistryError(f"Route target {route_target_id} does not support fixed specialist reruns")
+        if selection.specialist_id != specialist_id:
+            raise RoutingRegistryError(
+                f"Forced specialist {specialist_id} is incompatible with route target {route_target_id}"
+            )
+        specialist = self.require_specialist(specialist_id)
+        return ManualRerunSpecialistOption(
+            route_target_id=route_target.id,
+            route_target_label=route_target.label,
+            specialist_id=specialist.id,
+            specialist_display_name=specialist.display_name,
+        )
 
     def candidate_specialists_for_target(
         self,

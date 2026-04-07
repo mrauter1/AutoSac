@@ -7,7 +7,8 @@ import uuid
 
 import pytest
 
-from shared.agent_specs import load_agent_spec, required_workspace_skill_paths
+from shared import agent_specs as agent_specs_module
+from shared.agent_specs import load_agent_spec
 from shared.config import Settings
 from shared.routing_registry import RoutingRegistryError, load_routing_registry
 from worker.output_contracts import OutputContractError, RouterResult, validate_contract_output
@@ -89,8 +90,76 @@ def test_load_routing_registry_reads_current_registry() -> None:
     assert registry.selector_spec is not None
     assert registry.selector_spec.id == "specialist-selector"
     assert registry.require_enabled_route_target("support").label == "Support"
+    assert registry.require_enabled_route_target("business_analyst").label == "Business Analyst"
+    assert registry.require_enabled_route_target("software_architect").label == "Software Architect"
     assert registry.require_enabled_route_target("manual_review").kind == "human_assist"
+    assert registry.require_specialist("business-analyst").spec.id == "business-analyst"
+    assert registry.require_specialist("software-architect").spec.id == "software-architect"
     assert registry.require_route_target("unknown").enabled is False
+
+
+def test_load_all_agent_specs_ignores_shared_fragment_dirs() -> None:
+    spec_ids = {spec.id for spec in agent_specs_module.load_all_agent_specs()}
+
+    assert "_shared" not in spec_ids
+
+
+def test_load_specialist_shared_policy_template_requires_expected_placeholders(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "specialist_shared_policy.md"
+    template_path.write_text("Role: {REQUESTER_ROLE}", encoding="utf-8")
+    monkeypatch.setattr(agent_specs_module, "SPECIALIST_SHARED_POLICY_TEMPLATE_PATH", template_path)
+    agent_specs_module.load_specialist_shared_policy_template.cache_clear()
+
+    with pytest.raises(
+        agent_specs_module.AgentSpecError,
+        match="missing required placeholders: REQUESTER_CAN_VIEW_INTERNAL_MESSAGES",
+    ):
+        agent_specs_module.load_specialist_shared_policy_template()
+
+    agent_specs_module.load_specialist_shared_policy_template.cache_clear()
+
+
+def test_load_specialist_shared_policy_template_rejects_unsupported_placeholders(monkeypatch, tmp_path: Path) -> None:
+    template_path = tmp_path / "specialist_shared_policy.md"
+    template_path.write_text(
+        "Role: {REQUESTER_ROLE}\nVisibility: {REQUESTER_CAN_VIEW_INTERNAL_MESSAGES}\nBad: {STATUS}",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_specs_module, "SPECIALIST_SHARED_POLICY_TEMPLATE_PATH", template_path)
+    agent_specs_module.load_specialist_shared_policy_template.cache_clear()
+
+    with pytest.raises(agent_specs_module.AgentSpecError, match="unsupported placeholders: STATUS"):
+        agent_specs_module.load_specialist_shared_policy_template()
+
+    agent_specs_module.load_specialist_shared_policy_template.cache_clear()
+
+
+def test_validate_spec_dir_requires_specialist_shared_policy_placeholder(tmp_path: Path) -> None:
+    spec_dir = tmp_path / "bad-specialist"
+    spec_dir.mkdir()
+    (spec_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "id": "bad-specialist",
+                "version": "1",
+                "kind": "specialist",
+                "description": "Broken specialist",
+                "skill_id": "triage-bad-specialist",
+                "output_contract": "specialist_result",
+                "model_override": None,
+                "timeout_seconds_override": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (spec_dir / "prompt.md").write_text("Prompt without shared policy", encoding="utf-8")
+    (spec_dir / "skill.md").write_text("skill", encoding="utf-8")
+
+    with pytest.raises(
+        agent_specs_module.AgentSpecError,
+        match=r"must include \{SPECIALIST_SHARED_POLICY\} exactly once",
+    ):
+        agent_specs_module._validate_spec_dir(spec_dir)
 
 
 def test_load_routing_registry_rejects_duplicate_route_target_ids(tmp_path: Path) -> None:
@@ -191,7 +260,44 @@ def test_load_routing_registry_resolves_human_assist_auto_candidates(tmp_path: P
         "data-ops",
         "bug",
         "feature",
+        "business-analyst",
+        "software-architect",
     ]
+
+
+def test_load_routing_registry_exposes_manual_rerun_specialist_options() -> None:
+    registry = load_routing_registry(REGISTRY_PATH)
+
+    options = registry.manual_rerun_specialist_options()
+    option_ids = [option.route_target_id for option in options]
+
+    assert "support" in option_ids
+    assert "business_analyst" in option_ids
+    assert "software_architect" in option_ids
+    assert "manual_review" not in option_ids
+    assert "unknown" not in option_ids
+
+
+def test_load_routing_registry_resolves_persisted_forced_manual_rerun_choice_even_if_disabled(tmp_path: Path) -> None:
+    payload = _registry_payload()
+    for route_target in payload["route_targets"]:
+        if route_target["id"] == "software_architect":
+            route_target["enabled"] = False
+            break
+    for specialist in payload["specialists"]:
+        if specialist["id"] == "software-architect":
+            specialist["enabled"] = False
+            break
+
+    registry = load_routing_registry(_write_registry(tmp_path, payload))
+
+    choice = registry.resolve_forced_manual_rerun_choice(
+        route_target_id="software_architect",
+        specialist_id="software-architect",
+    )
+
+    assert choice.route_target_id == "software_architect"
+    assert choice.specialist_id == "software-architect"
 
 
 def test_validate_contract_output_rejects_disabled_router_target() -> None:
@@ -287,6 +393,8 @@ def test_render_router_prompt_includes_generated_route_target_catalog() -> None:
     assert "Enabled route targets:" in prompt
     assert "- id: support" in prompt
     assert "- id: access_config" in prompt
+    assert "- id: business_analyst" in prompt
+    assert "- id: software_architect" in prompt
     assert "- id: manual_review" in prompt
     assert "unknown" not in prompt
     assert "TARGET_TICKET_CLASS" not in prompt
@@ -330,10 +438,37 @@ def test_render_specialist_prompt_includes_route_target_context() -> None:
     assert "Route target label: Support" in prompt
     assert "Route target kind: direct_ai" in prompt
     assert "Route target description:" in prompt
+    assert "Perform every Stage 1-safe probe you can before concluding." in prompt
+    assert "When the exact fix or root cause cannot be confirmed" in prompt
+    assert "Make it warm, respectful, empathetic, and concise." in prompt
+    assert "Put clarifying questions in public_reply_markdown" in prompt
+    assert "When asking clarifying questions, combine them with the best current understanding" in prompt
+    assert "Reserve manual_only for cases where requester-facing guidance would be materially unsafe" in prompt
     assert "TARGET_TICKET_CLASS" not in prompt
     assert "ROUTER_TICKET_CLASS" not in prompt
     assert "ticket class" not in prompt.lower()
     assert "classified the ticket as" not in prompt
+
+
+def test_render_software_architect_prompt_includes_expected_assessment_structure() -> None:
+    prompt = render_agent_prompt(
+        load_agent_spec("software-architect"),
+        context=_make_context(),
+        router_result=RouterResult.model_validate(
+            {
+                "route_target_id": "software_architect",
+                "routing_rationale": "The requester needs a repository-grounded architecture assessment.",
+            }
+        ),
+        target_route_target_id="software_architect",
+    )
+
+    assert "Analyze this internal ticket as the Stage 1 software architect specialist." in prompt
+    assert "Mode, Current state, Assumptions, Analysis, Recommendation, Regression / side-effect risks, Plan, Verification, Open issues." in prompt
+    assert "Never emit route_target_id or any reclassification field." in prompt
+    assert "Route target ID: software_architect" in prompt
+    assert "Perform every Stage 1-safe probe you can before concluding." in prompt
+    assert "Make it warm, respectful, empathetic, and concise." in prompt
 
 
 def test_render_agent_prompt_raises_for_unknown_placeholder() -> None:
@@ -357,8 +492,8 @@ def test_verify_workspace_contract_paths_propagates_registry_failure(monkeypatch
     settings.repo_mount_dir.mkdir(parents=True)
     settings.manuals_mount_dir.mkdir(parents=True)
     settings.workspace_agents_path.write_text("agents", encoding="utf-8")
-    for relative_path in required_workspace_skill_paths():
-        skill_path = settings.triage_workspace_dir / relative_path
+    for spec in agent_specs_module.load_all_agent_specs():
+        skill_path = settings.workspace_skill_file_path(spec.skill_id)
         skill_path.parent.mkdir(parents=True, exist_ok=True)
         skill_path.write_text("skill", encoding="utf-8")
 

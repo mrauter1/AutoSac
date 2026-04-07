@@ -215,6 +215,18 @@ def _build_registry(*route_targets):
     def require_specialist(specialist_id: str):
         return specialists[specialist_id]
 
+    def require_enabled_specialist(specialist_id: str):
+        return specialists[specialist_id]
+
+    def resolve_forced_manual_rerun_choice(*, route_target_id: str, specialist_id: str):
+        route_target = route_targets_by_id[route_target_id]
+        return SimpleNamespace(
+            route_target_id=route_target.id,
+            route_target_label=route_target.label,
+            specialist_id=specialist_id,
+            specialist_display_name=specialists[specialist_id].id,
+        )
+
     def candidate_specialists_for_target(route_target_id: str):
         selection = route_targets_by_id[route_target_id].handler.specialist_selection
         return tuple(specialists[specialist_id] for specialist_id in selection.candidate_specialist_ids)
@@ -224,6 +236,9 @@ def _build_registry(*route_targets):
         selector_spec=selector_spec,
         require_enabled_route_target=require_enabled_route_target,
         require_specialist=require_specialist,
+        require_enabled_specialist=require_enabled_specialist,
+        require_route_target=require_enabled_route_target,
+        resolve_forced_manual_rerun_choice=resolve_forced_manual_rerun_choice,
         candidate_specialists_for_target=candidate_specialists_for_target,
     )
 
@@ -392,6 +407,44 @@ def test_execute_step_passes_prompt_via_stdin(monkeypatch, tmp_path):
     assert result.output_payload["publish_mode_recommendation"] == "auto_publish"
 
 
+def test_execute_step_writes_selected_specialist_registration_id_to_step_manifest(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    context = _make_context()
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
+        context=context,
+        router_result=router_result,
+        target_route_target_id="support",
+        selected_specialist_id="support-primary",
+    )
+    prepared.paths.final_output_path.write_text(json.dumps(_specialist_payload()), encoding="utf-8")
+    observed = {"metadata": []}
+
+    monkeypatch.setattr("worker.step_runner._create_running_step_row", lambda settings, prepared: uuid.uuid4())
+    monkeypatch.setattr("worker.step_runner._update_step_row", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "worker.step_runner.write_step_manifest",
+        lambda *args, **kwargs: observed["metadata"].append(kwargs["metadata"]),
+    )
+
+    def fake_run(command, **kwargs):
+        return SimpleNamespace(returncode=0, stdout='{"event":"ok"}\n', stderr="")
+
+    monkeypatch.setattr("worker.step_runner.subprocess.run", fake_run)
+
+    symbols["execute_step"](settings, prepared=prepared)
+
+    assert observed["metadata"][-1]["selected_specialist_id"] == "support-primary"
+
+
 @pytest.mark.parametrize(
     ("route_target", "outputs", "expected_selector", "expected_specialist", "expected_selected_id"),
     [
@@ -535,6 +588,82 @@ def test_execute_triage_pipeline_supports_registry_modes(
     assert len(observed["manifest_updates"]) == len(observed["prepared"])
 
 
+def test_execute_triage_pipeline_supports_forced_specialist_reruns(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    context = _make_context()
+    route_target = _build_route_target(route_target_id="software_architect", kind="direct_ai", mode="fixed", specialist_id="software-architect")
+    registry = _build_registry(route_target)
+    specialist = SimpleNamespace(
+        id="software-architect",
+        display_name="Software Architect",
+        spec=SimpleNamespace(id="software-architect-spec", version="2", output_contract="specialist_result"),
+        enabled=True,
+    )
+    registry.require_specialist = lambda specialist_id: specialist
+    registry.resolve_forced_manual_rerun_choice = lambda *, route_target_id, specialist_id: SimpleNamespace(
+        route_target_id=route_target_id,
+        route_target_label="Software Architect",
+        specialist_id=specialist_id,
+        specialist_display_name="Software Architect",
+    )
+    observed = {"synthetic_router": [], "prepared": [], "manifest_updates": []}
+
+    def fake_record_synthetic_step_success(*args, **kwargs):
+        observed["synthetic_router"].append(kwargs)
+        return SimpleNamespace(
+            step_id=uuid.uuid4(),
+            prepared=SimpleNamespace(spec=kwargs["spec"], model_name=None),
+            output_payload=kwargs["output_payload"],
+        )
+
+    def fake_prepare_step_run(*args, **kwargs):
+        observed["prepared"].append(kwargs)
+        return SimpleNamespace(
+            run_id=kwargs["run_id"],
+            ticket_id=kwargs["ticket_id"],
+            step_index=kwargs["step_index"],
+            step_kind=kwargs["step_kind"],
+            spec=kwargs["spec"],
+            model_name=None,
+            candidate_specialist_ids=kwargs.get("candidate_specialist_ids"),
+            paths=SimpleNamespace(run_dir=tmp_path / "run", as_payload=lambda: {}),
+        )
+
+    def fake_execute_step(_settings, *, prepared):
+        return SimpleNamespace(
+            step_id=uuid.uuid4(),
+            prepared=prepared,
+            output_payload=_specialist_payload(summary_internal="Architect assessment complete."),
+        )
+
+    monkeypatch.setattr("worker.pipeline.load_routing_registry", lambda: registry)
+    monkeypatch.setattr("worker.pipeline.record_synthetic_step_success", fake_record_synthetic_step_success)
+    monkeypatch.setattr("worker.pipeline.prepare_step_run", fake_prepare_step_run)
+    monkeypatch.setattr("worker.pipeline.execute_step", fake_execute_step)
+    monkeypatch.setattr(
+        "worker.pipeline.write_run_manifest_snapshot",
+        lambda settings, run_id: observed["manifest_updates"].append(run_id),
+    )
+
+    result = symbols["execute_triage_pipeline"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        context=context,
+        forced_route_target_id="software_architect",
+        forced_specialist_id="software-architect",
+    )
+
+    assert result.route_target.id == "software_architect"
+    assert result.selector_step is None
+    assert result.selected_specialist.id == "software-architect"
+    assert observed["synthetic_router"][0]["output_payload"]["route_target_id"] == "software_architect"
+    assert observed["synthetic_router"][0]["selected_specialist_id"] == "software-architect"
+    assert observed["prepared"][0]["selected_specialist_id"] == "software-architect"
+    assert len(observed["manifest_updates"]) == 2
+
+
 def test_prepare_run_skips_when_last_processed_hash_matches(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
@@ -588,6 +717,55 @@ def test_prepare_run_skips_when_last_processed_hash_matches(monkeypatch, tmp_pat
     assert run.pipeline_version == "agent-pipeline-v1"
     assert run.ended_at is not None
     assert observed["requeue"] == 1
+
+
+def test_prepare_run_preserves_forced_specialist_override(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000003A",
+        title="Architect review",
+        status="ai_triage",
+        urgent=False,
+        last_processed_hash=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+        requester_language=None,
+    )
+    context = _make_context(ticket=ticket)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        triggered_by="manual_rerun",
+        input_hash=None,
+        model_name=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        error_text=None,
+        ended_at=None,
+        forced_route_target_id="software_architect",
+        forced_specialist_id="software-architect",
+    )
+    fake_db = _FakeDb(run=run)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+
+    prepared = symbols["_prepare_run"](settings, run_id=run.id)
+
+    assert prepared is not None
+    assert prepared.forced_route_target_id == "software_architect"
+    assert prepared.forced_specialist_id == "software-architect"
 
 
 def _pipeline_result(
@@ -698,6 +876,158 @@ def test_apply_success_result_auto_publish_sets_route_target_and_final_fields(mo
     assert run.final_agent_spec_id == "support"
     assert run.final_output_contract == "specialist_result"
     assert run.final_output_json["publish_mode_recommendation"] == "auto_publish"
+
+
+def test_apply_success_result_internal_requester_manual_only_with_public_reply_auto_publishes(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000004A",
+        title="Internal requester needs technical direction",
+        status="ai_triage",
+        urgent=False,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(
+        ticket=ticket,
+        requester_role="dev_ti",
+        requester_can_view_internal_messages=True,
+    )
+    publication_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash=publication_hash,
+        ended_at=None,
+        error_text=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        model_name=None,
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {"internal": 0, "public": None}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_internal_note",
+        lambda *args, **kwargs: observed.__setitem__("internal", observed["internal"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: observed.__setitem__(
+            "public",
+            (kwargs["next_status"], kwargs["last_ai_action"], kwargs["body_markdown"]),
+        ),
+    )
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not create draft")))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not route manual-only")))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
+        specialist_payload=_specialist_payload(
+            publish_mode_recommendation="manual_only",
+            public_reply_markdown="Share this directly with the internal requester.",
+            internal_note_markdown="Context for ops.",
+        ),
+    )
+    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+
+    assert observed["internal"] == 1
+    assert observed["public"] == ("waiting_on_user", "auto_public_reply", "Share this directly with the internal requester.")
+    assert run.status == "succeeded"
+    assert run.final_output_contract == "specialist_result"
+    assert run.final_output_json["publish_mode_recommendation"] == "manual_only"
+
+
+def test_apply_success_result_internal_requester_manual_only_without_public_reply_stays_in_ai_triage(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000004B",
+        title="Internal requester needs internal-only guidance",
+        status="ai_triage",
+        urgent=False,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(
+        ticket=ticket,
+        requester_role="admin",
+        requester_can_view_internal_messages=True,
+    )
+    publication_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash=publication_hash,
+        ended_at=None,
+        error_text=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        model_name=None,
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {"internal": 0, "route": None}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_internal_note",
+        lambda *args, **kwargs: observed.__setitem__("internal", observed["internal"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.route_ticket_after_ai",
+        lambda *args, **kwargs: observed.__setitem__("route", (kwargs["next_status"], kwargs["last_ai_action"])),
+    )
+    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not publish")))
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not create draft")))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
+        specialist_payload=_specialist_payload(
+            publish_mode_recommendation="manual_only",
+            public_reply_markdown="",
+            internal_note_markdown="Keep this guidance internal only.",
+        ),
+    )
+    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+
+    assert observed["internal"] == 1
+    assert observed["route"] == ("ai_triage", "manual_only")
+    assert run.status == "succeeded"
+    assert run.final_output_contract == "specialist_result"
 
 
 def test_apply_success_result_draft_for_human_keeps_direct_ai_ticket_in_ai_triage(monkeypatch, tmp_path):
@@ -904,6 +1234,163 @@ def test_apply_success_result_human_assist_never_auto_publishes(monkeypatch, tmp
 
     assert observed == {"next_status": "waiting_on_dev_ti", "last_ai_action": "draft_public_reply"}
     assert run.status == "human_review"
+
+
+def test_apply_success_result_internal_requester_human_assist_with_public_reply_auto_publishes(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000007A",
+        title="Internal requester needs human-assist specialist output",
+        status="ai_triage",
+        urgent=False,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(
+        ticket=ticket,
+        requester_role="dev_ti",
+        requester_can_view_internal_messages=True,
+    )
+    publication_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash=publication_hash,
+        ended_at=None,
+        error_text=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        model_name=None,
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {"internal": 0, "public": None}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_internal_note",
+        lambda *args, **kwargs: observed.__setitem__("internal", observed["internal"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: observed.__setitem__("public", (kwargs["next_status"], kwargs["last_ai_action"])),
+    )
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not draft")))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not route to human queue")))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(
+            route_target_id="manual_review",
+            kind="human_assist",
+            mode="fixed",
+            specialist_id="bug",
+            human_queue_status="waiting_on_dev_ti",
+        ),
+        specialist_payload=_specialist_payload(
+            publish_mode_recommendation="draft_for_human",
+            public_reply_markdown="Share this architecture assessment with the internal requester.",
+        ),
+        specialist_spec_id="bug",
+    )
+    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+
+    assert observed["internal"] == 1
+    assert observed["public"] == ("waiting_on_user", "auto_public_reply")
+    assert run.status == "succeeded"
+    assert run.final_output_contract == "specialist_result"
+
+
+def test_apply_success_result_internal_requester_human_assist_none_succeeds_without_human_review(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000007B",
+        title="Internal requester needs handoff-only result",
+        status="ai_triage",
+        urgent=False,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(
+        ticket=ticket,
+        requester_role="admin",
+        requester_can_view_internal_messages=True,
+    )
+    publication_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash=publication_hash,
+        ended_at=None,
+        error_text=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        model_name=None,
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {"internal": 0, "route": None}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_internal_note",
+        lambda *args, **kwargs: observed.__setitem__("internal", observed["internal"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.route_ticket_after_ai",
+        lambda *args, **kwargs: observed.__setitem__("route", (kwargs["next_status"], kwargs["last_ai_action"])),
+    )
+    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not publish")))
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not create draft")))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(
+            route_target_id="manual_review",
+            kind="human_assist",
+            mode="none",
+            human_queue_status="waiting_on_dev_ti",
+        ),
+        specialist_payload=None,
+    )
+    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+
+    assert observed["internal"] == 1
+    assert observed["route"] == ("ai_triage", "manual_only")
+    assert run.status == "succeeded"
+    assert run.final_agent_spec_id is None
+    assert run.final_output_contract == "human_handoff_result"
+    assert run.final_output_json["route_target_id"] == "manual_review"
 
 
 def test_apply_success_result_direct_ai_manual_only_does_not_create_draft_when_policy_disables_drafts(monkeypatch, tmp_path):
@@ -1379,6 +1866,114 @@ def test_write_run_manifest_snapshot_prefers_router_output_over_stale_ticket_rou
     assert metadata["route_target_kind"] == "human_assist"
 
 
+def test_write_run_manifest_snapshot_uses_fixed_specialist_registration_id(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=uuid.uuid4(),
+        pipeline_version="agent-pipeline-v1",
+        status="succeeded",
+        final_step_id=uuid.uuid4(),
+        final_agent_spec_id="support-spec",
+        final_output_contract="specialist_result",
+        final_output_json=_specialist_payload(),
+        forced_route_target_id="support",
+        forced_specialist_id="support-primary",
+        error_text=None,
+        ended_at=SimpleNamespace(isoformat=lambda: "2026-04-06T01:10:00+00:00"),
+    )
+    ticket = SimpleNamespace(id=run.ticket_id, route_target_id="support", last_ai_action="auto_public_reply")
+    steps = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            step_index=1,
+            step_kind="router",
+            agent_spec_id="router",
+            agent_spec_version="1",
+            output_contract="router_result",
+            status="succeeded",
+            model_name="gpt-router",
+            prompt_path="/tmp/router-prompt.txt",
+            schema_path="/tmp/router-schema.json",
+            final_output_path="/tmp/router-final.json",
+            stdout_jsonl_path="/tmp/router-stdout.jsonl",
+            stderr_path="/tmp/router-stderr.txt",
+            output_json=_route_payload(route_target_id="support", routing_rationale="Standard support request."),
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            step_index=2,
+            step_kind="specialist",
+            agent_spec_id="support-spec",
+            agent_spec_version="2",
+            output_contract="specialist_result",
+            status="succeeded",
+            model_name="gpt-support",
+            prompt_path="/tmp/support-prompt.txt",
+            schema_path="/tmp/support-schema.json",
+            final_output_path="/tmp/support-final.json",
+            stdout_jsonl_path="/tmp/support-stdout.jsonl",
+            stderr_path="/tmp/support-stderr.txt",
+            output_json=_specialist_payload(),
+        ),
+    ]
+    observed = {}
+    route_target = SimpleNamespace(
+        id="support",
+        label="Support",
+        kind="direct_ai",
+        handler=SimpleNamespace(
+            specialist_selection=SimpleNamespace(
+                mode="fixed",
+                specialist_id="support-primary",
+            )
+        ),
+    )
+    registry = SimpleNamespace(require_route_target=lambda route_target_id: route_target)
+
+    class _FakeScalarResult:
+        def __init__(self, items):
+            self._items = items
+
+        def scalars(self):
+            return self
+
+        def __iter__(self):
+            return iter(self._items)
+
+    class _FakeManifestDb:
+        def get(self, model, key):
+            name = getattr(model, "__name__", "")
+            if name == "AIRun" and key == run.id:
+                return run
+            if name == "Ticket" and key == ticket.id:
+                return ticket
+            return None
+
+        def execute(self, statement):
+            return _FakeScalarResult(steps)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield _FakeManifestDb()
+
+    monkeypatch.setattr("worker.step_runner.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.step_runner.load_routing_registry", lambda: registry)
+    monkeypatch.setattr("worker.step_runner.build_run_dir", lambda settings, ticket_id, run_id: tmp_path / "run")
+    monkeypatch.setattr(
+        "worker.step_runner.write_run_manifest",
+        lambda run_dir, **kwargs: observed.update({"run_dir": run_dir, **kwargs}),
+    )
+
+    symbols["write_run_manifest_snapshot"](settings, run_id=run.id)
+
+    metadata = observed["metadata"]
+    assert metadata["selected_specialist_id"] == "support-primary"
+    assert metadata["forced_route_target_id"] == "support"
+    assert metadata["forced_specialist_id"] == "support-primary"
+
+
 def test_heartbeat_loop_emits_while_stop_event_controls_exit(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
@@ -1415,5 +2010,30 @@ def test_emit_worker_heartbeat_initializes_system_state_defaults(monkeypatch, tm
     bootstrap_state = fake_db.objects[("SystemState", "bootstrap_version")]
     heartbeat_state = fake_db.objects[("SystemState", "worker_heartbeat")]
     assert fake_db.flush_calls == 1
-    assert bootstrap_state.value_json == {"version": "stage1-v3"}
+    assert bootstrap_state.value_json == {"version": "stage1-v4"}
     assert heartbeat_state.value_json["status"] == "alive"
+
+
+def test_emit_worker_heartbeat_updates_stale_bootstrap_version(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+    from worker.main import emit_worker_heartbeat
+
+    settings = _make_settings(tmp_path)
+    fake_db = _FakeWorkerStateDb()
+    fake_db.objects[("SystemState", "bootstrap_version")] = SimpleNamespace(
+        key="bootstrap_version",
+        value_json={"version": "stage1-v1"},
+        updated_at=None,
+    )
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.main.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.main.log_worker_event", lambda *args, **kwargs: None)
+
+    emit_worker_heartbeat(settings)
+
+    bootstrap_state = fake_db.objects[("SystemState", "bootstrap_version")]
+    assert bootstrap_state.value_json == {"version": "stage1-v4"}

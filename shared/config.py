@@ -14,6 +14,7 @@ from shared.contracts import (
     DEFAULT_TRIAGE_WORKSPACE_DIR,
     DEFAULT_UPLOADS_DIR,
 )
+from shared.agent_specs import WORKSPACE_SKILLS_RELATIVE_DIR
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -86,8 +87,11 @@ class Settings:
         return self.triage_workspace_dir / "runs"
 
     @property
-    def workspace_skill_path(self) -> Path:
-        return self.triage_workspace_dir / ".agents/skills/stage1-triage/SKILL.md"
+    def workspace_skills_dir(self) -> Path:
+        return self.triage_workspace_dir / WORKSPACE_SKILLS_RELATIVE_DIR
+
+    def workspace_skill_file_path(self, skill_id: str) -> Path:
+        return self.workspace_skills_dir / skill_id / "SKILL.md"
 
     @property
     def workspace_agents_path(self) -> Path:

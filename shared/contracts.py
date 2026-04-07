@@ -5,7 +5,6 @@ from pathlib import Path
 SESSION_COOKIE_NAME = "triage_session"
 PREAUTH_LOGIN_COOKIE_NAME = "triage_preauth_login"
 CSRF_FORM_FIELD = "csrf_token"
-WORKSPACE_BOOTSTRAP_VERSION = "stage1-v3"
 
 APP_ROUTES = (
     "/login",
@@ -46,6 +45,8 @@ DEFAULT_RUNS_DIR = DEFAULT_TRIAGE_WORKSPACE_DIR / "runs"
 
 WORKSPACE_AGENTS_RELATIVE_PATH = Path("AGENTS.md")
 
+WORKSPACE_BOOTSTRAP_VERSION = "stage1-v4"
+
 WORKSPACE_AGENTS_CONTENT = """This repository is the Stage 1 custom triage workspace.
 
 You are operating inside the Stage 1 ticket-analysis environment.
@@ -66,5 +67,7 @@ Hard rules:
 13. Treat screenshots as evidence but do not claim certainty beyond what is visible.
 14. Never propose edits, patches, commits, branches, migrations, or database changes in Stage 1.
 15. Internal messages may inform internal analysis but must not be disclosed publicly unless the same information is already present in public ticket content.
-16. When human review is needed, provide enough internal context for the next operator to continue safely.
+16. Perform every Stage 1-safe probe you can before concluding. Do not tell the internal team to run a repo/manual/ticket-evidence probe that you could have done yourself.
+17. Separate verified facts, strong hypotheses, and unknowns. Never present an unverified guess as confirmed.
+18. When the exact fix or root cause cannot be confirmed, provide enough internal context and concrete next steps for the next operator to continue safely.
 """

@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from shared.config import get_settings
 from shared.db import ping_database
+from shared.run_history import assert_ai_run_history_ready
 from shared.workspace import verify_workspace_contract_paths
 from worker.main import main
 
@@ -19,6 +20,7 @@ def smoke_check() -> None:
     settings = get_settings()
     ping_database(settings)
     verify_workspace_contract_paths(settings)
+    assert_ai_run_history_ready(settings)
     print(
         json.dumps(
             {
@@ -35,8 +37,18 @@ def cli() -> None:
     parser.add_argument("--check", action="store_true", help="Run a deterministic smoke check and exit.")
     args = parser.parse_args()
     if args.check:
-        smoke_check()
+        try:
+            smoke_check()
+        except Exception as exc:
+            raise SystemExit(str(exc)) from exc
         return
+    try:
+        settings = get_settings()
+        ping_database(settings)
+        verify_workspace_contract_paths(settings)
+        assert_ai_run_history_ready(settings)
+    except Exception as exc:
+        raise SystemExit(str(exc)) from exc
     main()
 
 

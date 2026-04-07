@@ -17,7 +17,7 @@ from app.ui import build_template_context, is_htmx_request, ops_author_label, op
 from shared.db import db_session_dependency
 from shared.models import AIDraft, AIRun, AIRunStep, Ticket, TicketAttachment, TicketMessage, TicketView, User
 from shared.permissions import is_ops_user
-from shared.routing_registry import load_routing_registry
+from shared.routing_registry import RoutingRegistryError, load_routing_registry
 from shared.user_admin import create_user
 from shared.ticketing import (
     add_ops_internal_note,
@@ -194,6 +194,19 @@ def _ops_route_target_options() -> list[dict[str, str]]:
     ]
 
 
+def _ops_manual_rerun_specialist_options() -> list[dict[str, str]]:
+    registry = load_routing_registry()
+    return [
+        {
+            "route_target_id": option.route_target_id,
+            "route_target_label": option.route_target_label,
+            "specialist_id": option.specialist_id,
+            "specialist_display_name": option.specialist_display_name,
+        }
+        for option in registry.manual_rerun_specialist_options()
+    ]
+
+
 def _read_filters(request: Request) -> dict[str, object]:
     query = request.query_params
     return {
@@ -339,6 +352,7 @@ def _ticket_detail_context(db: Session, *, ticket: Ticket, current_user: User) -
         "ai_relevant_paths": analysis_view["relevant_paths"],
         "ai_summary_short": analysis_view["summary_short"],
         "ai_summary_internal": analysis_view["summary_internal"],
+        "rerun_specialist_options": _ops_manual_rerun_specialist_options(),
     }
 
 
@@ -597,11 +611,29 @@ def ops_rerun_ai(
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
     csrf_token: str = Form(...),
+    forced_route_target_id: str = Form(default=""),
     db: Session = Depends(db_session_dependency),
 ):
     validate_csrf_token(auth_session, csrf_token)
     ticket = _load_ops_ticket_or_404(db, reference=reference)
-    request_manual_rerun(db, ticket=ticket, actor=current_user)
+    route_target_value = forced_route_target_id.strip()
+    forced_specialist_id = None
+    if route_target_value:
+        try:
+            option = load_routing_registry().require_manual_rerun_specialist_option(route_target_value)
+        except RoutingRegistryError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        route_target_value = option.route_target_id
+        forced_specialist_id = option.specialist_id
+    else:
+        route_target_value = None
+    request_manual_rerun(
+        db,
+        ticket=ticket,
+        actor=current_user,
+        forced_route_target_id=route_target_value,
+        forced_specialist_id=forced_specialist_id,
+    )
     db.commit()
     return RedirectResponse(f"/ops/tickets/{ticket.reference}", status_code=status.HTTP_303_SEE_OTHER)
 

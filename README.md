@@ -5,7 +5,7 @@ AutoSac Stage 1 is an internal ticket triage app built around server-rendered Fa
 - Requesters create tickets, reply, and resolve their own requests.
 - Dev/TI and admins work the queue from `/ops` and `/ops/board`.
 - The worker classifies tickets, asks clarifying questions, drafts replies, or routes work to Dev/TI.
-- Each AI run keeps `prompt.txt`, `schema.json`, `stdout.jsonl`, `stderr.txt`, and `final.json`; `final.json` is the canonical output contract.
+- Each AI run now records step-level artifacts under `runs/<ticket>/<run>/`, including router and specialist step folders with `prompt.txt`, `schema.json`, `stdout.jsonl`, `stderr.txt`, and `final.json`; the run also persists the final structured output in the database.
 
 ## Runtime Shape
 
@@ -71,6 +71,12 @@ Unauthenticated browser navigation to protected HTML pages redirects to `/login`
    alembic upgrade head
    ```
 
+7. Backfill historical AI runs into the step-based structure:
+
+   ```bash
+   python scripts/backfill_ai_run_steps.py
+   ```
+
 ## Deterministic Bootstrap Flow
 
 Run these steps in order on a new environment:
@@ -81,7 +87,7 @@ Run these steps in order on a new environment:
    python scripts/bootstrap_workspace.py
    ```
 
-   The script creates the workspace contract files, initializes the workspace git repository if needed, and prints a JSON snapshot that includes `"bootstrap_version": "stage1-v1"`.
+   The script creates the workspace contract files, syncs all required AI skills, initializes the workspace git repository if needed, and prints a JSON snapshot that includes `"bootstrap_version": "stage1-v2"`.
 
 2. Create the initial admin account:
 
@@ -141,8 +147,8 @@ python scripts/run_worker.py --check
 
 Expected checks:
 
-- `python scripts/run_web.py --check` verifies `/healthz` and `/readyz`.
-- `python scripts/run_worker.py --check` verifies database connectivity, workspace contract paths, and the configured worker poll interval.
+- `python scripts/run_web.py --check` verifies `/healthz`, `/readyz`, and that AI run history has been fully backfilled into the structured pipeline shape.
+- `python scripts/run_worker.py --check` verifies database connectivity, workspace contract paths, worker configuration, and that AI run history has been fully backfilled.
 
 Useful endpoints:
 
@@ -155,6 +161,7 @@ Useful endpoints:
 - `APP_BASE_URL=https://...` automatically enables secure cookies.
 - Leave `CODEX_API_KEY` empty to rely on existing Codex CLI login in local environments.
 - `scripts/setup_postgres_local.sh` is intended for local localhost PostgreSQL only; it is not part of the cloud deployment path.
+- After `alembic upgrade head`, run `python scripts/backfill_ai_run_steps.py` before relying on `/readyz` or the service smoke checks.
 - `/ops` and `/ops/board` filter refreshes do not mark tickets as viewed; ticket detail pages still do.
 - The web and worker processes expect the same database and workspace configuration.
 
