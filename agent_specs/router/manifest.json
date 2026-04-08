@@ -1,0 +1,10 @@
+{
+  "id": "router",
+  "version": "1",
+  "kind": "router",
+  "description": "Classify the ticket into the most appropriate Stage 1 triage specialist.",
+  "skill_id": "triage-router",
+  "output_contract": "router_result",
+  "model_override": null,
+  "timeout_seconds_override": null
+}

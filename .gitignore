@@ -1,5 +1,7 @@
 .env
 # Local/generated artifacts
+.codex
+.venv/
 AutoSac/tmp-smoke.db
 **/__pycache__/
 *.pyc

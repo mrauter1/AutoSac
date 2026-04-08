@@ -1,0 +1,10 @@
+{
+  "id": "unknown",
+  "version": "2",
+  "kind": "specialist",
+  "description": "Fallback specialist for ambiguous or mixed-signal Stage 1 tickets.",
+  "skill_id": "triage-unknown",
+  "output_contract": "specialist_result",
+  "model_override": null,
+  "timeout_seconds_override": null
+}
