@@ -106,6 +106,8 @@ def create_pending_ai_run(
     requested_by_user_id: uuid.UUID | None = None,
     forced_route_target_id: str | None = None,
     forced_specialist_id: str | None = None,
+    recovered_from_run_id: uuid.UUID | None = None,
+    recovery_attempt_count: int = 0,
 ) -> AIRun | None:
     run = AIRun(
         ticket_id=ticket_id,
@@ -114,6 +116,8 @@ def create_pending_ai_run(
         requested_by_user_id=requested_by_user_id,
         forced_route_target_id=forced_route_target_id,
         forced_specialist_id=forced_specialist_id,
+        recovered_from_run_id=recovered_from_run_id,
+        recovery_attempt_count=recovery_attempt_count,
     )
     try:
         with db.begin_nested():
@@ -140,6 +144,15 @@ def request_requeue(
     ticket.requeue_forced_route_target_id = forced_route_target_id
     ticket.requeue_forced_specialist_id = forced_specialist_id
     touch_ticket(ticket)
+
+
+def clear_requeue_request(ticket: Ticket, *, touched_at=None) -> None:
+    ticket.requeue_requested = False
+    ticket.requeue_trigger = None
+    ticket.requeue_requested_by_user_id = None
+    ticket.requeue_forced_route_target_id = None
+    ticket.requeue_forced_specialist_id = None
+    touch_ticket(ticket, touched_at)
 
 
 def supersede_pending_drafts(db: Session, ticket_id: uuid.UUID, keep_draft_id: uuid.UUID | None = None) -> int:
@@ -583,12 +596,7 @@ def process_deferred_requeue(db: Session, *, ticket: Ticket) -> AIRun | None:
     )
     if run is None:
         return None
-    ticket.requeue_requested = False
-    ticket.requeue_trigger = None
-    ticket.requeue_requested_by_user_id = None
-    ticket.requeue_forced_route_target_id = None
-    ticket.requeue_forced_specialist_id = None
-    touch_ticket(ticket)
+    clear_requeue_request(ticket)
     return run
 
 
@@ -747,11 +755,7 @@ def request_manual_rerun(
         )
         upsert_ticket_view(db, user_id=actor.id, ticket_id=ticket.id, viewed_at=requested_at)
         return None
-    ticket.requeue_requested = False
-    ticket.requeue_trigger = None
-    ticket.requeue_requested_by_user_id = None
-    ticket.requeue_forced_route_target_id = None
-    ticket.requeue_forced_specialist_id = None
+    clear_requeue_request(ticket, touched_at=requested_at)
     if ticket.status != "ai_triage":
         record_status_change(
             db,

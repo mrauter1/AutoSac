@@ -9,6 +9,7 @@ import uuid
 from shared.agent_specs import PIPELINE_VERSION
 from shared.config import Settings
 from shared.db import session_scope
+from shared.logging import log_worker_event
 from shared.models import AIRun, Ticket
 from shared.permissions import ADMIN_ROLE, DEV_TI_ROLE
 from shared.security import utc_now
@@ -26,6 +27,7 @@ from shared.ticketing import (
 from worker.output_contracts import HumanHandoffResult, SpecialistResult
 from worker.pipeline import PipelineExecutionResult, execute_triage_pipeline
 from worker.publication_policy import PublicationDecision, PublicationPolicyError, resolve_effective_publication_mode
+from worker.run_ownership import RunOwnershipLost, load_owned_running_run
 from worker.step_runner import StepRunError, write_run_manifest_snapshot
 from worker.ticket_loader import LoadedTicketContext, load_ticket_context
 
@@ -34,6 +36,7 @@ from worker.ticket_loader import LoadedTicketContext, load_ticket_context
 class PreparedRunContext:
     run_id: uuid.UUID
     ticket_id: uuid.UUID
+    worker_instance_id: str
     input_hash: str
     context: LoadedTicketContext
     forced_route_target_id: str | None
@@ -75,10 +78,14 @@ def build_requester_visible_fingerprint(context: LoadedTicketContext) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def _prepare_run(settings: Settings, *, run_id) -> PreparedRunContext | None:
+def _prepare_run(settings: Settings, *, run_id, worker_instance_id: str) -> PreparedRunContext | None:
     with session_scope(settings) as db:
-        run = db.get(AIRun, run_id)
-        if run is None or run.status != "running":
+        run = load_owned_running_run(
+            db,
+            run_id=run_id,
+            worker_instance_id=worker_instance_id,
+        )
+        if run is None:
             return None
 
         context = load_ticket_context(db, run.ticket_id)
@@ -121,6 +128,7 @@ def _prepare_run(settings: Settings, *, run_id) -> PreparedRunContext | None:
         return PreparedRunContext(
             run_id=run.id,
             ticket_id=context.ticket.id,
+            worker_instance_id=worker_instance_id,
             input_hash=input_hash,
             context=context,
             forced_route_target_id=getattr(run, "forced_route_target_id", None),
@@ -278,13 +286,20 @@ def _apply_success_result(
     settings: Settings,
     *,
     run_id,
+    worker_instance_id: str,
     pipeline_result: PipelineExecutionResult,
 ) -> None:
     should_write_manifest = False
     with session_scope(settings) as db:
-        run = db.get(AIRun, run_id)
+        run = load_owned_running_run(
+            db,
+            run_id=run_id,
+            worker_instance_id=worker_instance_id,
+        )
         if run is None:
-            return
+            raise RunOwnershipLost(
+                f"Run {run_id} is no longer running for worker {worker_instance_id} during finalization."
+            )
         context = load_ticket_context(db, run.ticket_id)
         publication_hash = build_requester_visible_fingerprint(context)
 
@@ -397,12 +412,18 @@ def _failure_note_body(error_text: str) -> str:
     )
 
 
-def _mark_failed(settings: Settings, *, run_id, error_text: str) -> None:
+def _mark_failed(settings: Settings, *, run_id, worker_instance_id: str, error_text: str) -> None:
     should_write_manifest = False
     with session_scope(settings) as db:
-        run = db.get(AIRun, run_id)
+        run = load_owned_running_run(
+            db,
+            run_id=run_id,
+            worker_instance_id=worker_instance_id,
+        )
         if run is None:
-            return
+            raise RunOwnershipLost(
+                f"Run {run_id} is no longer running for worker {worker_instance_id} during failure handling."
+            )
         ticket = db.get(Ticket, run.ticket_id)
         failed_at = utc_now()
         if getattr(run, "pipeline_version", None) is None:
@@ -433,10 +454,20 @@ def _mark_failed(settings: Settings, *, run_id, error_text: str) -> None:
         write_run_manifest_snapshot(settings, run_id=run_id)
 
 
-def process_ai_run(settings: Settings, *, run_id) -> None:
+def _log_run_ownership_lost(*, run_id, worker_instance_id: str, error_text: str) -> None:
+    log_worker_event(
+        "run_ownership_lost",
+        level="warning",
+        run_id=str(run_id),
+        worker_instance_id=worker_instance_id,
+        error=error_text,
+    )
+
+
+def process_ai_run(settings: Settings, *, run_id, worker_instance_id: str) -> None:
     terminal_run_id = run_id
     try:
-        prepared = _prepare_run(settings, run_id=run_id)
+        prepared = _prepare_run(settings, run_id=run_id, worker_instance_id=worker_instance_id)
         if prepared is None:
             return
         terminal_run_id = prepared.run_id
@@ -445,6 +476,7 @@ def process_ai_run(settings: Settings, *, run_id) -> None:
             settings,
             run_id=prepared.run_id,
             ticket_id=prepared.ticket_id,
+            worker_instance_id=prepared.worker_instance_id,
             context=prepared.context,
             forced_route_target_id=getattr(prepared, "forced_route_target_id", None),
             forced_specialist_id=getattr(prepared, "forced_specialist_id", None),
@@ -452,9 +484,40 @@ def process_ai_run(settings: Settings, *, run_id) -> None:
         _apply_success_result(
             settings,
             run_id=prepared.run_id,
+            worker_instance_id=prepared.worker_instance_id,
             pipeline_result=pipeline_result,
         )
+    except RunOwnershipLost as exc:
+        _log_run_ownership_lost(
+            run_id=terminal_run_id,
+            worker_instance_id=worker_instance_id,
+            error_text=str(exc),
+        )
     except (StepRunError, PublicationPolicyError) as exc:
-        _mark_failed(settings, run_id=terminal_run_id, error_text=str(exc))
+        try:
+            _mark_failed(
+                settings,
+                run_id=terminal_run_id,
+                worker_instance_id=worker_instance_id,
+                error_text=str(exc),
+            )
+        except RunOwnershipLost as ownership_exc:
+            _log_run_ownership_lost(
+                run_id=terminal_run_id,
+                worker_instance_id=worker_instance_id,
+                error_text=str(ownership_exc),
+            )
     except Exception as exc:
-        _mark_failed(settings, run_id=terminal_run_id, error_text=f"Unexpected worker error: {exc}")
+        try:
+            _mark_failed(
+                settings,
+                run_id=terminal_run_id,
+                worker_instance_id=worker_instance_id,
+                error_text=f"Unexpected worker error: {exc}",
+            )
+        except RunOwnershipLost as ownership_exc:
+            _log_run_ownership_lost(
+                run_id=terminal_run_id,
+                worker_instance_id=worker_instance_id,
+                error_text=str(ownership_exc),
+            )

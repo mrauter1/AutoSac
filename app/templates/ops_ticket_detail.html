@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}{{ ticket.reference }} | Ops | Stage 1 AI Triage{% endblock %}
+{% block title %}{{ ticket.reference }} | {{ t("ops.detail.short_title") }} | {{ t("brand.name") }}{% endblock %}
 
 {% block body %}
 <section class="page-header page-header--stack">
@@ -11,20 +11,20 @@
     <span class="status-pill">{{ route_target_display.label }}</span>
     {% endif %}
     {% if route_target_display.kind %}
-    <span class="status-pill">{{ route_target_display.kind.replace("_", " ").title() }}</span>
+    <span class="status-pill">{{ route_target_kind_label(route_target_display.kind) }}</span>
     {% endif %}
     {% if ticket.urgent %}
-    <span class="urgent-pill">Urgent</span>
+    <span class="urgent-pill">{{ t("common.urgent") }}</span>
     {% endif %}
     {% if pending_draft %}
-    <span class="updated-pill">Draft pending approval</span>
+    <span class="updated-pill">{{ t("ops.detail.draft_pending_approval") }}</span>
     {% endif %}
   </div>
   <h1>{{ ticket.title }}</h1>
   <p class="muted">
-    Requester: {{ creator.display_name if creator else "Unknown" }}
-    · Assigned: {{ assignee.display_name if assignee else "Unassigned" }}
-    · Updated {{ ticket.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}
+    {{ t("ops.detail.requester", value=creator.display_name if creator else unknown_label) }}
+    · {{ t("ops.detail.assigned", value=assignee.display_name if assignee else unassigned_label) }}
+    · {{ t("ops.detail.updated", value=format_datetime_utc(ticket.updated_at)) }}
   </p>
 </section>
 
@@ -32,7 +32,7 @@
   <div class="stack">
     <section class="panel stack">
       <div class="thread-header">
-        <h2>Activity</h2>
+        <h2>{{ t("ops.detail.activity") }}</h2>
       </div>
       {% for item in activity_timeline %}
       {% if item.kind == "status_change" %}
@@ -40,7 +40,7 @@
         <div class="timeline-status__meta">
           <span class="lane-pill lane-pill--status">{{ item.lane_label }}</span>
           <strong>{{ item.actor_label }}</strong>
-          <span>{{ item.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+          <span>{{ format_datetime_utc(item.created_at) }}</span>
         </div>
         <p class="timeline-status__text">{{ item.summary }}</p>
       </article>
@@ -49,7 +49,7 @@
         <div class="message-card__meta">
           <span class="lane-pill lane-pill--{{ item.lane }}">{{ item.lane_label }}</span>
           <strong>{{ item.author_label }}</strong>
-          <span>{{ item.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+          <span>{{ format_datetime_utc(item.created_at) }}</span>
         </div>
         <div class="message-card__body">{{ item.body_html | safe }}</div>
         {% if item.attachments %}
@@ -57,7 +57,7 @@
           {% for attachment in item.attachments %}
           <li>
             <a href="/attachments/{{ attachment.id }}">{{ attachment.original_filename }}</a>
-            <span class="muted">{{ attachment.mime_type }} · {{ attachment.size_bytes }} bytes</span>
+            <span class="muted">{{ attachment.mime_type }} · {{ t("common.bytes", count=attachment.size_bytes) }}</span>
           </li>
           {% endfor %}
         </ul>
@@ -65,131 +65,155 @@
       </article>
       {% endif %}
       {% else %}
-      <p class="muted">No activity yet.</p>
+      <p class="muted">{{ t("ops.detail.no_activity") }}</p>
       {% endfor %}
     </section>
   </div>
 
   <div class="stack">
     <section class="panel stack stack--tight analysis-panel">
-      <h2>AI analysis</h2>
+      <h2>{{ t("ops.detail.ai_analysis") }}</h2>
       <dl class="meta-list meta-list--compact">
         <div>
-          <dt>Route target</dt>
+          <dt>{{ t("field.route_target") }}</dt>
           <dd>{{ route_target_display.label }}</dd>
         </div>
         <div>
-          <dt>Target kind</dt>
-          <dd>{{ route_target_display.kind.replace("_", " ").title() if route_target_display.kind else "Unknown" }}</dd>
+          <dt>{{ t("ops.detail.target_kind") }}</dt>
+          <dd>{{ route_target_kind_label(route_target_display.kind) if route_target_display.kind else unknown_label }}</dd>
         </div>
         <div>
-          <dt>Latest run</dt>
-          <dd>{{ latest_run.status.replace("_", " ").title() if latest_run else "No runs yet" }}</dd>
+          <dt>{{ t("ops.detail.latest_run") }}</dt>
+          <dd>{{ ai_run_status_label(latest_run.status) if latest_run else t("ops.detail.no_runs_yet") }}</dd>
         </div>
+        {% if latest_run and latest_run.status == "running" and latest_run.started_at is defined and latest_run.started_at %}
+        <div>
+          <dt>{{ t("ops.detail.run_started_at") }}</dt>
+          <dd>{{ format_datetime_utc(latest_run.started_at) }}</dd>
+        </div>
+        {% endif %}
+        {% if latest_run and latest_run.status == "running" and latest_run.worker_pid is defined and latest_run.worker_pid is not none %}
+        <div>
+          <dt>{{ t("ops.detail.worker_pid") }}</dt>
+          <dd>{{ latest_run.worker_pid }}</dd>
+        </div>
+        {% endif %}
       </dl>
       {% if analysis_view.summary_short or analysis_view.summary_internal or analysis_view.handoff_reason %}
       <div class="stack stack--tight">
         {% if analysis_view.summary_short %}
         <div>
-          <strong>Summary</strong>
+          <strong>{{ t("ops.detail.summary") }}</strong>
           <p class="muted">{{ analysis_view.summary_short }}</p>
         </div>
         {% endif %}
         {% if analysis_view.summary_internal %}
         <div>
-          <strong>Internal summary</strong>
+          <strong>{{ t("ops.detail.internal_summary") }}</strong>
           <p class="muted">{{ analysis_view.summary_internal }}</p>
         </div>
         {% endif %}
         {% if analysis_view.handoff_reason %}
         <div>
-          <strong>Handoff reason</strong>
+          <strong>{{ t("ops.detail.handoff_reason") }}</strong>
           <p class="muted">{{ analysis_view.handoff_reason }}</p>
         </div>
         {% endif %}
       </div>
       {% endif %}
-      {% if latest_run and latest_run.error_text or ai_relevant_paths or latest_ai_note or latest_analysis_steps or latest_run_steps or analysis_view.response_confidence or analysis_view.risk_level or analysis_view.publish_mode_recommendation or analysis_view.risk_reason or analysis_view.assistant_used is not none or analysis_view.get("legacy_confidence") is not none or analysis_view.get("legacy_impact_level") or analysis_view.get("legacy_development_needed") is not none or ticket.requester_language or ticket.last_ai_action or ticket.requeue_requested %}
+      {% if latest_run and latest_run.error_text or latest_run and latest_run.status == "running" and latest_run.last_heartbeat_at is defined and latest_run.last_heartbeat_at or latest_run and (latest_run.status == "running" or latest_run.recovery_attempt_count is defined and latest_run.recovery_attempt_count) or ai_relevant_paths or latest_ai_note or latest_analysis_steps or latest_run_steps or analysis_view.response_confidence or analysis_view.risk_level or analysis_view.publish_mode_recommendation or analysis_view.risk_reason or analysis_view.assistant_used is not none or analysis_view.get("legacy_confidence") is not none or analysis_view.get("legacy_impact_level") or analysis_view.get("legacy_development_needed") is not none or ticket.requester_language or ticket.last_ai_action or ticket.requeue_requested %}
       <details class="analysis-disclosure">
-        <summary>More analysis</summary>
+        <summary>{{ t("ops.detail.more_analysis") }}</summary>
         <div class="analysis-disclosure__content stack stack--tight">
           <dl class="meta-list meta-list--compact">
             {% if analysis_view.response_confidence %}
             <div>
-              <dt>Response confidence</dt>
-              <dd>{{ analysis_view.response_confidence }}</dd>
+              <dt>{{ t("ops.detail.response_confidence") }}</dt>
+              <dd>{{ response_confidence_label(analysis_view.response_confidence) }}</dd>
             </div>
             {% endif %}
             {% if analysis_view.risk_level %}
             <div>
-              <dt>Risk level</dt>
-              <dd>{{ analysis_view.risk_level }}</dd>
+              <dt>{{ t("ops.detail.risk_level") }}</dt>
+              <dd>{{ risk_level_label(analysis_view.risk_level) }}</dd>
             </div>
             {% endif %}
             {% if analysis_view.publish_mode_recommendation %}
             <div>
-              <dt>Publish recommendation</dt>
-              <dd>{{ analysis_view.publish_mode_recommendation.replace("_", " ").title() }}</dd>
+              <dt>{{ t("ops.detail.publish_recommendation") }}</dt>
+              <dd>{{ publish_mode_recommendation_label(analysis_view.publish_mode_recommendation) }}</dd>
             </div>
             {% endif %}
             {% if analysis_view.get("legacy_confidence") is not none %}
             <div>
-              <dt>Legacy confidence</dt>
+              <dt>{{ t("ops.detail.legacy_confidence") }}</dt>
               <dd>{{ analysis_view.get("legacy_confidence") }}</dd>
             </div>
             {% endif %}
             {% if analysis_view.get("legacy_impact_level") %}
             <div>
-              <dt>Legacy impact</dt>
-              <dd>{{ analysis_view.get("legacy_impact_level") }}</dd>
+              <dt>{{ t("ops.detail.legacy_impact") }}</dt>
+              <dd>{{ impact_level_label(analysis_view.get("legacy_impact_level")) }}</dd>
             </div>
             {% endif %}
             {% if analysis_view.get("legacy_development_needed") is not none %}
             <div>
-              <dt>Legacy development needed</dt>
-              <dd>{{ "Yes" if analysis_view.get("legacy_development_needed") else "No" }}</dd>
+              <dt>{{ t("ops.detail.legacy_development_needed") }}</dt>
+              <dd>{{ bool_label(analysis_view.get("legacy_development_needed")) }}</dd>
             </div>
             {% endif %}
             <div>
-              <dt>Requester language</dt>
-              <dd>{{ ticket.requester_language or "Unknown" }}</dd>
+              <dt>{{ t("ops.detail.requester_language") }}</dt>
+              <dd>{{ ticket.requester_language or unknown_label }}</dd>
             </div>
             <div>
-              <dt>Last action</dt>
-              <dd>{{ ticket.last_ai_action or "None yet" }}</dd>
+              <dt>{{ t("ops.detail.last_action") }}</dt>
+              <dd>{{ ticket.last_ai_action or none_yet_label }}</dd>
             </div>
             <div>
-              <dt>Requeue requested</dt>
-              <dd>{{ "Yes" if ticket.requeue_requested else "No" }}</dd>
+              <dt>{{ t("ops.detail.requeue_requested") }}</dt>
+              <dd>{{ bool_label(ticket.requeue_requested) }}</dd>
             </div>
+            {% if latest_run and latest_run.last_heartbeat_at is defined and latest_run.last_heartbeat_at %}
+            <div>
+              <dt>{{ t("ops.detail.last_heartbeat") }}</dt>
+              <dd>{{ format_datetime_utc(latest_run.last_heartbeat_at) }}</dd>
+            </div>
+            {% endif %}
+            {% if latest_run and (latest_run.status == "running" or latest_run.recovery_attempt_count is defined and latest_run.recovery_attempt_count) %}
+            <div>
+              <dt>{{ t("ops.detail.recovery_attempts") }}</dt>
+              <dd>{{ latest_run.recovery_attempt_count if latest_run.recovery_attempt_count is defined else 0 }}</dd>
+            </div>
+            {% endif %}
             {% if analysis_view.assistant_used is not none %}
             <div>
-              <dt>Assistant used</dt>
-              <dd>{{ "Yes" if analysis_view.assistant_used else "No" }}</dd>
+              <dt>{{ t("ops.detail.assistant_used") }}</dt>
+              <dd>{{ bool_label(analysis_view.assistant_used) }}</dd>
             </div>
             {% endif %}
             {% if analysis_view.assistant_specialist_id %}
             <div>
-              <dt>Assistant specialist</dt>
+              <dt>{{ t("ops.detail.assistant_specialist") }}</dt>
               <dd>{{ analysis_view.assistant_specialist_id }}</dd>
             </div>
             {% endif %}
           </dl>
           {% if latest_run and latest_run.error_text %}
           <div>
-            <strong>{% if latest_run.status == "failed" %}Run error{% else %}Run warning{% endif %}</strong>
+            <strong>{% if latest_run.status == "failed" %}{{ t("ops.detail.run_error") }}{% else %}{{ t("ops.detail.run_warning") }}{% endif %}</strong>
             <p class="muted">{{ latest_run.error_text }}</p>
           </div>
           {% endif %}
           {% if analysis_view.risk_reason %}
           <div>
-            <strong>Risk rationale</strong>
+            <strong>{{ t("ops.detail.risk_rationale") }}</strong>
             <p class="muted">{{ analysis_view.risk_reason }}</p>
           </div>
           {% endif %}
           {% if ai_relevant_paths %}
           <div>
-            <strong>Relevant repo/docs paths</strong>
+            <strong>{{ t("ops.detail.relevant_paths") }}</strong>
             <ul class="attachment-list">
               {% for item in ai_relevant_paths %}
               <li><code>{{ item.path }}</code> <span class="muted">{{ item.reason }}</span></li>
@@ -199,20 +223,20 @@
           {% endif %}
           {% if latest_ai_note %}
           <div>
-            <strong>Latest AI note</strong>
+            <strong>{{ t("ops.detail.latest_ai_note") }}</strong>
             <div class="message-card__body">{{ latest_ai_note_html | safe }}</div>
           </div>
           {% endif %}
           {% if latest_analysis_steps %}
           <div>
-            <strong>Analysis steps</strong>
+            <strong>{{ t("ops.detail.analysis_steps") }}</strong>
             {% for step in latest_analysis_steps %}
             <div class="stack stack--tight">
               <p class="muted">
-                Step {{ step.step_index }}
-                · {{ step.step_kind.replace("_", " ").title() }}
+                {{ t("common.step") }} {{ step.step_index }}
+                · {{ ai_run_step_kind_label(step.step_kind) }}
                 · {{ step.agent_spec_id.replace("-", " ").replace("_", " ").title() }}
-                · {{ step.status.replace("_", " ").title() }}
+                · {{ ai_run_status_label(step.status) }}
               </p>
               <ul class="attachment-list">
                 {% if step.prompt_path %}<li><code>{{ step.prompt_path }}</code></li>{% endif %}
@@ -227,14 +251,14 @@
           {% endif %}
           {% if latest_run and latest_analysis_run and latest_run.id != latest_analysis_run.id and latest_run_steps %}
           <div>
-            <strong>Latest run steps</strong>
+            <strong>{{ t("ops.detail.latest_run_steps") }}</strong>
             {% for step in latest_run_steps %}
             <div class="stack stack--tight">
               <p class="muted">
-                Step {{ step.step_index }}
-                · {{ step.step_kind.replace("_", " ").title() }}
+                {{ t("common.step") }} {{ step.step_index }}
+                · {{ ai_run_step_kind_label(step.step_kind) }}
                 · {{ step.agent_spec_id.replace("-", " ").replace("_", " ").title() }}
-                · {{ step.status.replace("_", " ").title() }}
+                · {{ ai_run_status_label(step.status) }}
               </p>
               <ul class="attachment-list">
                 {% if step.prompt_path %}<li><code>{{ step.prompt_path }}</code></li>{% endif %}
@@ -248,14 +272,14 @@
           </div>
           {% elif latest_run and not latest_analysis_run and latest_run_steps %}
           <div>
-            <strong>Latest run steps</strong>
+            <strong>{{ t("ops.detail.latest_run_steps") }}</strong>
             {% for step in latest_run_steps %}
             <div class="stack stack--tight">
               <p class="muted">
-                Step {{ step.step_index }}
-                · {{ step.step_kind.replace("_", " ").title() }}
+                {{ t("common.step") }} {{ step.step_index }}
+                · {{ ai_run_step_kind_label(step.step_kind) }}
                 · {{ step.agent_spec_id.replace("-", " ").replace("_", " ").title() }}
-                · {{ step.status.replace("_", " ").title() }}
+                · {{ ai_run_status_label(step.status) }}
               </p>
               <ul class="attachment-list">
                 {% if step.prompt_path %}<li><code>{{ step.prompt_path }}</code></li>{% endif %}
@@ -274,9 +298,9 @@
       <form method="post" action="/ops/tickets/{{ ticket.reference }}/rerun-ai" class="stack stack--tight">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label class="field">
-          <span>Route AI to specialist</span>
+          <span>{{ t("field.route_ai_to_specialist") }}</span>
           <select name="forced_route_target_id">
-            <option value="">Use normal routing</option>
+            <option value="">{{ t("button.use_normal_routing") }}</option>
             {% for option in rerun_specialist_options %}
             <option value="{{ option.route_target_id }}">
               {{ option.route_target_label }}
@@ -287,95 +311,95 @@
             {% endfor %}
           </select>
         </label>
-        <button type="submit" class="button">Rerun AI</button>
+        <button type="submit" class="button">{{ t("button.rerun_ai") }}</button>
       </form>
     </section>
 
     {% if pending_draft %}
     <section class="panel stack">
-      <h2>Pending AI draft</h2>
+      <h2>{{ t("ops.detail.pending_ai_draft") }}</h2>
       <div class="message-card__body">{{ pending_draft_html | safe }}</div>
       <form method="post" action="/ops/drafts/{{ pending_draft.id }}/approve-publish" class="stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label class="field">
-          <span>Next status</span>
+          <span>{{ t("field.next_status") }}</span>
           <select name="next_status">
             {% for value in draft_reply_status_options %}
             <option value="{{ value }}" {% if value == "waiting_on_user" %}selected{% endif %}>{{ ops_status_label(value) }}</option>
             {% endfor %}
           </select>
         </label>
-        <button type="submit" class="button">Approve and publish</button>
+        <button type="submit" class="button">{{ t("button.approve_and_publish") }}</button>
       </form>
       <form method="post" action="/ops/drafts/{{ pending_draft.id }}/reject">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="button button--ghost">Reject draft</button>
+        <button type="submit" class="button button--ghost">{{ t("button.reject_draft") }}</button>
       </form>
     </section>
     {% endif %}
 
     <section class="panel stack">
-      <h2>Assignment</h2>
+      <h2>{{ t("ops.detail.assignment") }}</h2>
       <form method="post" action="/ops/tickets/{{ ticket.reference }}/assign" class="stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label class="field">
-          <span>Assigned to</span>
+          <span>{{ t("field.assigned_to") }}</span>
           <select name="assigned_to_user_id">
-            <option value="">Unassigned</option>
+            <option value="">{{ t("common.unassigned") }}</option>
             {% for user in ops_users %}
             <option value="{{ user.id }}" {% if assignee and user.id == assignee.id %}selected{% endif %}>{{ user.display_name }}</option>
             {% endfor %}
           </select>
         </label>
-        <button type="submit" class="button">Save assignment</button>
+        <button type="submit" class="button">{{ t("button.save_assignment") }}</button>
       </form>
     </section>
 
     <section class="panel stack">
-      <h2>Status</h2>
+      <h2>{{ t("field.status") }}</h2>
       <form method="post" action="/ops/tickets/{{ ticket.reference }}/set-status" class="stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label class="field">
-          <span>Status</span>
+          <span>{{ t("field.status") }}</span>
           <select name="next_status">
             {% for value in status_options %}
             <option value="{{ value }}" {% if value == ticket.status %}selected{% endif %}>{{ ops_status_label(value) }}</option>
             {% endfor %}
           </select>
         </label>
-        <button type="submit" class="button">Update status</button>
+        <button type="submit" class="button">{{ t("button.update_status") }}</button>
       </form>
     </section>
 
     <section class="panel stack">
-      <h2>Public reply</h2>
+      <h2>{{ t("ops.detail.public_reply") }}</h2>
       <form method="post" action="/ops/tickets/{{ ticket.reference }}/reply-public" class="stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label class="field">
-          <span>Reply</span>
+          <span>{{ t("field.reply") }}</span>
           <textarea name="body" rows="6" required></textarea>
         </label>
         <label class="field">
-          <span>Next status</span>
+          <span>{{ t("field.next_status") }}</span>
           <select name="next_status">
             {% for value in public_reply_status_options %}
             <option value="{{ value }}" {% if value == default_public_reply_status %}selected{% endif %}>{{ ops_status_label(value) }}</option>
             {% endfor %}
           </select>
         </label>
-        <button type="submit" class="button">Send public reply</button>
+        <button type="submit" class="button">{{ t("button.send_public_reply") }}</button>
       </form>
     </section>
 
     <section class="panel stack">
-      <h2>Internal note</h2>
+      <h2>{{ t("ops.detail.internal_note") }}</h2>
       <form method="post" action="/ops/tickets/{{ ticket.reference }}/note-internal" class="stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label class="field">
-          <span>Note</span>
+          <span>{{ t("field.note") }}</span>
           <textarea name="body" rows="6" required></textarea>
         </label>
-        <button type="submit" class="button">Add internal note</button>
+        <button type="submit" class="button">{{ t("button.add_internal_note") }}</button>
       </form>
     </section>
   </div>

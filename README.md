@@ -13,6 +13,7 @@ AutoSac Stage 1 is an internal ticket triage app built around server-rendered Fa
 - Auth: opaque server-side session cookie plus a separate short-lived preauth login cookie for `/login` CSRF.
 - Database: PostgreSQL in normal operation, managed through Alembic migrations.
 - Worker: polls pending AI runs, seeds missing `system_state` defaults, then processes Codex runs from the mounted workspace.
+- Worker liveness: each running AI run records `started_at`, worker PID, a per-process worker instance id, and a per-run heartbeat timestamp so stale `running` rows can be recovered safely.
 - HTMX: vendored locally at `/static/htmx.min.js`; `/ops` and `/ops/board` return full HTML for normal navigation and fragment responses for HTMX filter refreshes.
 
 Unauthenticated browser navigation to protected HTML pages redirects to `/login` with a sanitized relative `next` value. Authenticated users with the wrong role still receive `403`.
@@ -159,13 +160,17 @@ Useful endpoints:
 
 - `.env.example` lists every supported runtime knob and the shipped defaults.
 - `APP_BASE_URL=https://...` automatically enables secure cookies.
+- `UI_DEFAULT_LOCALE=pt-BR` makes Portuguese the server-side fallback when there is no saved language cookie and no matching browser language.
 - Leave `CODEX_API_KEY` empty to rely on existing Codex CLI login in local environments.
 - `scripts/setup_postgres_local.sh` is intended for local localhost PostgreSQL only; it is not part of the cloud deployment path.
+- `WORKER_HEARTBEAT_SECONDS`, `AI_RUN_STALE_TIMEOUT_SECONDS`, and `AI_RUN_MAX_RECOVERY_ATTEMPTS` control stale-run detection and automatic recovery.
 - After `alembic upgrade head`, run `python scripts/backfill_ai_run_steps.py` before relying on `/readyz` or the service smoke checks.
 - `/ops` and `/ops/board` filter refreshes do not mark tickets as viewed; ticket detail pages still do.
 - The web and worker processes expect the same database and workspace configuration.
 
 ## Deployment
+
+For a step-by-step Ubuntu internal server setup with boot-time systemd services, see `docs/ubuntu_internal_server_setup.md`.
 
 For a phone-friendly cloud deployment walkthrough and one-click Render blueprint setup, see `docs_deployment.md` and `render.yaml`.
 

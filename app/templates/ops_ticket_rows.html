@@ -11,26 +11,26 @@
       <span class="status-pill">{{ row.route_target_display.label }}</span>
       {% endif %}
       {% if ticket.urgent %}
-      <span class="urgent-pill">Urgent</span>
+      <span class="urgent-pill">{{ t("common.urgent") }}</span>
       {% endif %}
       {% if row.updated_for_user %}
-      <span class="updated-pill">Updated</span>
+      <span class="updated-pill">{{ t("common.updated") }}</span>
       {% endif %}
       {% if row.pending_draft %}
-      <span class="updated-pill">Needs approval</span>
+      <span class="updated-pill">{{ t("ops.rows.needs_approval") }}</span>
       {% endif %}
     </div>
     <h2>{{ ticket.title }}</h2>
-    <p class="muted">Requester: {{ row.creator.display_name if row.creator else "Unknown" }}</p>
-    <p class="muted">Assigned: {{ row.assignee.display_name if row.assignee else "Unassigned" }}</p>
-    <p class="ticket-card__time">Last updated {{ ticket.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</p>
+    <p class="muted">{{ t("ops.rows.requester", value=row.creator.display_name if row.creator else unknown_label) }}</p>
+    <p class="muted">{{ t("ops.rows.assigned", value=row.assignee.display_name if row.assignee else unassigned_label) }}</p>
+    <p class="ticket-card__time">{{ t("ops.rows.last_updated", value=format_datetime_utc(ticket.updated_at)) }}</p>
   </a>
   {% endfor %}
 </section>
 {% else %}
 <section class="panel">
-  <h2>No matching tickets</h2>
-  <p class="muted">Adjust the filters to expand the queue.</p>
+  <h2>{{ t("ops.rows.empty_heading") }}</h2>
+  <p class="muted">{{ t("ops.rows.empty_body") }}</p>
 </section>
 {% endif %}
 </div>

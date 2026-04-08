@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import subprocess
@@ -43,11 +44,13 @@ def _load_worker_symbols():
     pytest.importorskip("pydantic")
 
     from shared.agent_specs import load_agent_spec
-    from worker.main import heartbeat_loop
+    from worker.main import ActiveRunTracker, WorkerIdentity, emit_worker_heartbeat, heartbeat_loop
+    from worker.queue import claim_oldest_pending_run, recover_stale_runs
     from worker.output_contracts import HumanHandoffResult, RouterResult, SpecialistResult, SpecialistSelectorResult
     from worker.pipeline import execute_triage_pipeline
     from worker.prompt_renderer import render_agent_prompt
     from worker.publication_policy import resolve_effective_publication_mode
+    from worker.run_ownership import RunOwnershipLost
     from worker.step_runner import StepRunError, build_codex_command, execute_step, prepare_step_run, write_run_manifest_snapshot
     from worker.triage import (
         _apply_success_result,
@@ -61,8 +64,11 @@ def _load_worker_symbols():
         "_apply_success_result": _apply_success_result,
         "_mark_failed": _mark_failed,
         "_prepare_run": _prepare_run,
+        "ActiveRunTracker": ActiveRunTracker,
         "build_codex_command": build_codex_command,
         "build_requester_visible_fingerprint": build_requester_visible_fingerprint,
+        "claim_oldest_pending_run": claim_oldest_pending_run,
+        "emit_worker_heartbeat": emit_worker_heartbeat,
         "execute_step": execute_step,
         "execute_triage_pipeline": execute_triage_pipeline,
         "heartbeat_loop": heartbeat_loop,
@@ -70,12 +76,15 @@ def _load_worker_symbols():
         "load_agent_spec": load_agent_spec,
         "process_ai_run": process_ai_run,
         "prepare_step_run": prepare_step_run,
+        "recover_stale_runs": recover_stale_runs,
         "render_agent_prompt": render_agent_prompt,
         "resolve_effective_publication_mode": resolve_effective_publication_mode,
         "RouterResult": RouterResult,
+        "RunOwnershipLost": RunOwnershipLost,
         "SpecialistResult": SpecialistResult,
         "SpecialistSelectorResult": SpecialistSelectorResult,
         "StepRunError": StepRunError,
+        "WorkerIdentity": WorkerIdentity,
         "write_run_manifest_snapshot": write_run_manifest_snapshot,
     }
 
@@ -248,6 +257,20 @@ class _FakeDb:
         self.run = run
         self.ticket = ticket
 
+    def execute(self, statement):
+        entity = statement.column_descriptions[0].get("entity") if getattr(statement, "column_descriptions", None) else None
+        if getattr(entity, "__name__", "") != "AIRun" or self.run is None:
+            return _FakeWorkerStateResult([])
+        for criterion in getattr(statement, "_where_criteria", ()):
+            left = getattr(criterion, "left", None)
+            right = getattr(criterion, "right", None)
+            key = getattr(left, "name", None)
+            if key is None or not hasattr(right, "value") or not hasattr(self.run, key):
+                continue
+            if getattr(self.run, key) != right.value:
+                return _FakeWorkerStateResult([])
+        return _FakeWorkerStateResult([self.run])
+
     def get(self, model, key):
         name = getattr(model, "__name__", "")
         if name == "AIRun" and self.run is not None and self.run.id == key:
@@ -263,6 +286,15 @@ class _FakeWorkerStateResult:
 
     def all(self):
         return self._rows
+
+    def scalar_one_or_none(self):
+        return self._rows[0] if self._rows else None
+
+    def scalars(self):
+        return self
+
+    def __iter__(self):
+        return iter(self._rows)
 
 
 class _FakeWorkerStateDb:
@@ -298,6 +330,52 @@ class _FakeWorkerStateDb:
         self.pending.clear()
 
 
+class _ClaimRunResult:
+    def __init__(self, run):
+        self._run = run
+
+    def scalar_one_or_none(self):
+        return self._run
+
+
+class _ClaimRunDb:
+    def __init__(self, run):
+        self.run = run
+
+    def execute(self, statement):
+        return _ClaimRunResult(self.run)
+
+
+class _QueueRecoveryDb:
+    def __init__(self, *, stale_runs, steps_by_run_id, tickets_by_id):
+        self.stale_runs = list(stale_runs)
+        self.steps_by_run_id = steps_by_run_id
+        self.tickets_by_id = tickets_by_id
+        self.executed = []
+
+    def execute(self, statement):
+        self.executed.append(statement)
+        entity = statement.column_descriptions[0].get("entity") if getattr(statement, "column_descriptions", None) else None
+        entity_name = getattr(entity, "__name__", "")
+        if entity_name == "AIRun":
+            return _FakeWorkerStateResult(self.stale_runs)
+        if entity_name == "AIRunStep":
+            run_id = None
+            for value in getattr(statement, "_where_criteria", ()):
+                right = getattr(value, "right", None)
+                if hasattr(right, "value"):
+                    run_id = right.value
+                    break
+            return _FakeWorkerStateResult(self.steps_by_run_id.get(run_id, []))
+        return _FakeWorkerStateResult([])
+
+    def get(self, model, key):
+        name = getattr(model, "__name__", "")
+        if name == "Ticket":
+            return self.tickets_by_id.get(key)
+        return None
+
+
 def test_requester_visible_fingerprint_excludes_internal_messages():
     symbols = _load_worker_symbols()
     ticket = SimpleNamespace(
@@ -329,6 +407,7 @@ def test_prepare_step_run_writes_prompt_and_schema(tmp_path):
         settings,
         run_id=uuid.uuid4(),
         ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
         step_index=2,
         step_kind="specialist",
         spec=spec,
@@ -354,6 +433,7 @@ def test_build_codex_command_omits_api_key_when_not_configured(monkeypatch, tmp_
         settings,
         run_id=uuid.uuid4(),
         ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
         step_index=2,
         step_kind="specialist",
         spec=spec,
@@ -378,6 +458,7 @@ def test_execute_step_passes_prompt_via_stdin(monkeypatch, tmp_path):
         settings,
         run_id=uuid.uuid4(),
         ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
         step_index=2,
         step_kind="specialist",
         spec=spec,
@@ -417,6 +498,7 @@ def test_execute_step_writes_selected_specialist_registration_id_to_step_manifes
         settings,
         run_id=uuid.uuid4(),
         ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
         step_index=2,
         step_kind="specialist",
         spec=spec,
@@ -443,6 +525,47 @@ def test_execute_step_writes_selected_specialist_registration_id_to_step_manifes
     symbols["execute_step"](settings, prepared=prepared)
 
     assert observed["metadata"][-1]["selected_specialist_id"] == "support-primary"
+
+
+def test_execute_step_raises_when_run_ownership_is_lost_before_step_completion(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    context = _make_context()
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
+        context=context,
+        router_result=router_result,
+        target_route_target_id="support",
+    )
+    prepared.paths.final_output_path.write_text(json.dumps(_specialist_payload()), encoding="utf-8")
+    observed = {"manifests": 0}
+
+    monkeypatch.setattr("worker.step_runner._create_running_step_row", lambda settings, prepared: uuid.uuid4())
+    monkeypatch.setattr(
+        "worker.step_runner._update_step_row",
+        lambda **kwargs: (_ for _ in ()).throw(symbols["RunOwnershipLost"]("lost")),
+    )
+    monkeypatch.setattr(
+        "worker.step_runner.write_step_manifest",
+        lambda *args, **kwargs: observed.__setitem__("manifests", observed["manifests"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.step_runner.subprocess.run",
+        lambda command, **kwargs: SimpleNamespace(returncode=0, stdout='{"event":"ok"}\n', stderr=""),
+    )
+
+    with pytest.raises(symbols["RunOwnershipLost"], match="lost"):
+        symbols["execute_step"](settings, prepared=prepared)
+
+    assert observed["manifests"] == 0
 
 
 @pytest.mark.parametrize(
@@ -578,6 +701,7 @@ def test_execute_triage_pipeline_supports_registry_modes(
         settings,
         run_id=uuid.uuid4(),
         ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
         context=context,
     )
 
@@ -650,6 +774,7 @@ def test_execute_triage_pipeline_supports_forced_specialist_reruns(monkeypatch, 
         settings,
         run_id=uuid.uuid4(),
         ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
         context=context,
         forced_route_target_id="software_architect",
         forced_specialist_id="software-architect",
@@ -710,7 +835,7 @@ def test_prepare_run_skips_when_last_processed_hash_matches(monkeypatch, tmp_pat
         lambda db, ticket: observed.__setitem__("requeue", observed["requeue"] + 1),
     )
 
-    prepared = symbols["_prepare_run"](settings, run_id=run.id)
+    prepared = symbols["_prepare_run"](settings, run_id=run.id, worker_instance_id="worker-test")
 
     assert prepared is None
     assert run.status == "skipped"
@@ -761,7 +886,7 @@ def test_prepare_run_preserves_forced_specialist_override(monkeypatch, tmp_path)
     monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
     monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
 
-    prepared = symbols["_prepare_run"](settings, run_id=run.id)
+    prepared = symbols["_prepare_run"](settings, run_id=run.id, worker_instance_id="worker-test")
 
     assert prepared is not None
     assert prepared.forced_route_target_id == "software_architect"
@@ -863,7 +988,12 @@ def test_apply_success_result_auto_publish_sets_route_target_and_final_fields(mo
         route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
         specialist_payload=_specialist_payload(),
     )
-    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
 
     assert events == ["internal", "public:auto_public_reply", "requeue"]
     assert ticket.route_target_id == "support"
@@ -947,7 +1077,12 @@ def test_apply_success_result_internal_requester_manual_only_with_public_reply_a
             internal_note_markdown="Context for ops.",
         ),
     )
-    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
 
     assert observed["internal"] == 1
     assert observed["public"] == ("waiting_on_user", "auto_public_reply", "Share this directly with the internal requester.")
@@ -1022,7 +1157,12 @@ def test_apply_success_result_internal_requester_manual_only_without_public_repl
             internal_note_markdown="Keep this guidance internal only.",
         ),
     )
-    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
 
     assert observed["internal"] == 1
     assert observed["route"] == ("ai_triage", "manual_only")
@@ -1089,7 +1229,12 @@ def test_apply_success_result_draft_for_human_keeps_direct_ai_ticket_in_ai_triag
             internal_note_markdown="",
         ),
     )
-    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
 
     assert observed == {"next_status": "ai_triage", "last_ai_action": "draft_public_reply"}
     assert run.status == "human_review"
@@ -1156,7 +1301,12 @@ def test_apply_success_result_human_assist_none_synthesizes_terminal_handoff(mon
         ),
         specialist_payload=None,
     )
-    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
 
     assert observed["route"] == ("waiting_on_dev_ti", "manual_only")
     assert run.status == "human_review"
@@ -1230,7 +1380,12 @@ def test_apply_success_result_human_assist_never_auto_publishes(monkeypatch, tmp
         ),
         specialist_spec_id="bug",
     )
-    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
 
     assert observed == {"next_status": "waiting_on_dev_ti", "last_ai_action": "draft_public_reply"}
     assert run.status == "human_review"
@@ -1308,7 +1463,12 @@ def test_apply_success_result_internal_requester_human_assist_with_public_reply_
         ),
         specialist_spec_id="bug",
     )
-    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
 
     assert observed["internal"] == 1
     assert observed["public"] == ("waiting_on_user", "auto_public_reply")
@@ -1383,7 +1543,12 @@ def test_apply_success_result_internal_requester_human_assist_none_succeeds_with
         ),
         specialist_payload=None,
     )
-    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
 
     assert observed["internal"] == 1
     assert observed["route"] == ("ai_triage", "manual_only")
@@ -1458,7 +1623,12 @@ def test_apply_success_result_direct_ai_manual_only_does_not_create_draft_when_p
             internal_note_markdown="",
         ),
     )
-    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
 
     assert observed["route"] == ("ai_triage", "manual_only")
     assert run.status == "human_review"
@@ -1532,7 +1702,12 @@ def test_apply_success_result_human_assist_manual_only_does_not_create_draft_whe
         ),
         specialist_spec_id="bug",
     )
-    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
 
     assert observed["route"] == ("waiting_on_dev_ti", "manual_only")
     assert run.status == "human_review"
@@ -1592,17 +1767,81 @@ def test_apply_success_result_supersedes_stale_run_without_publication(monkeypat
         route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
         specialist_payload=_specialist_payload(),
     )
-    symbols["_apply_success_result"](settings, run_id=run.id, pipeline_result=pipeline_result)
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
 
     assert run.status == "superseded"
     assert run.ended_at is not None
     assert observed == {"internal": 0, "public": 0, "requeue": 1}
 
 
+def test_apply_success_result_raises_when_run_is_no_longer_owned(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=uuid.uuid4(),
+        status="failed",
+        worker_instance_id="worker-test",
+        input_hash="old-hash",
+        ended_at=datetime.now(timezone.utc),
+        error_text="recovered",
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {"internal": 0, "public": 0, "draft": 0, "route": 0}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_internal_note",
+        lambda *args, **kwargs: observed.__setitem__("internal", observed["internal"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: observed.__setitem__("public", observed["public"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.create_ai_draft",
+        lambda *args, **kwargs: observed.__setitem__("draft", observed["draft"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.route_ticket_after_ai",
+        lambda *args, **kwargs: observed.__setitem__("route", observed["route"] + 1),
+    )
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
+        specialist_payload=_specialist_payload(),
+    )
+
+    with pytest.raises(symbols["RunOwnershipLost"], match="finalization"):
+        symbols["_apply_success_result"](
+            settings,
+            run_id=run.id,
+            worker_instance_id="worker-test",
+            pipeline_result=pipeline_result,
+        )
+
+    assert observed == {"internal": 0, "public": 0, "draft": 0, "route": 0}
+    assert run.status == "failed"
+
+
 def test_process_ai_run_marks_failed_when_publication_step_raises(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
-    prepared = SimpleNamespace(run_id=uuid.uuid4(), ticket_id=uuid.uuid4(), context=SimpleNamespace())
+    prepared = SimpleNamespace(
+        run_id=uuid.uuid4(),
+        ticket_id=uuid.uuid4(),
+        worker_instance_id="worker-test",
+        context=SimpleNamespace(),
+    )
     pipeline_result = SimpleNamespace()
     observed = {}
 
@@ -1615,12 +1854,15 @@ def test_process_ai_run_marks_failed_when_publication_step_raises(monkeypatch, t
     )
     monkeypatch.setattr(
         "worker.triage._mark_failed",
-        lambda settings, run_id, error_text: observed.update({"run_id": run_id, "error_text": error_text}),
+        lambda settings, run_id, worker_instance_id, error_text: observed.update(
+            {"run_id": run_id, "worker_instance_id": worker_instance_id, "error_text": error_text}
+        ),
     )
 
-    symbols["process_ai_run"](settings, run_id=prepared.run_id)
+    symbols["process_ai_run"](settings, run_id=prepared.run_id, worker_instance_id="worker-test")
 
     assert observed["run_id"] == prepared.run_id
+    assert observed["worker_instance_id"] == "worker-test"
     assert observed["error_text"] == "Unexpected worker error: publish failed"
 
 
@@ -1666,7 +1908,7 @@ def test_mark_failed_publishes_internal_failure_note_and_routes_ticket(monkeypat
     )
     monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
 
-    symbols["_mark_failed"](settings, run_id=run.id, error_text="boom")
+    symbols["_mark_failed"](settings, run_id=run.id, worker_instance_id="worker-test", error_text="boom")
 
     assert run.status == "failed"
     assert run.pipeline_version == "agent-pipeline-v1"
@@ -1674,6 +1916,52 @@ def test_mark_failed_publishes_internal_failure_note_and_routes_ticket(monkeypat
     assert run.ended_at is not None
     assert ticket.status == "waiting_on_dev_ti"
     assert observed == {"failure_note": 1, "status_changes": 1, "requeue": 1}
+
+
+def test_mark_failed_raises_when_run_is_no_longer_owned(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000010A",
+        title="Recovered failure",
+        status="ai_triage",
+        urgent=False,
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="failed",
+        worker_instance_id="worker-test",
+        ended_at=datetime.now(timezone.utc),
+        error_text="recovered",
+    )
+    fake_db = _FakeDb(run=run, ticket=ticket)
+    observed = {"failure_note": 0, "status_changes": 0, "requeue": 0}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_failure_note",
+        lambda *args, **kwargs: observed.__setitem__("failure_note", observed["failure_note"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.record_status_change",
+        lambda *args, **kwargs: observed.__setitem__("status_changes", observed["status_changes"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.process_deferred_requeue",
+        lambda *args, **kwargs: observed.__setitem__("requeue", observed["requeue"] + 1),
+    )
+
+    with pytest.raises(symbols["RunOwnershipLost"], match="failure handling"):
+        symbols["_mark_failed"](settings, run_id=run.id, worker_instance_id="worker-test", error_text="boom")
+
+    assert observed == {"failure_note": 0, "status_changes": 0, "requeue": 0}
+    assert ticket.status == "ai_triage"
 
 
 def test_write_run_manifest_snapshot_serializes_route_target_metadata(monkeypatch, tmp_path):
@@ -1880,6 +2168,12 @@ def test_write_run_manifest_snapshot_uses_fixed_specialist_registration_id(monke
         final_output_json=_specialist_payload(),
         forced_route_target_id="support",
         forced_specialist_id="support-primary",
+        worker_pid=9876,
+        worker_instance_id="worker-test",
+        started_at=SimpleNamespace(isoformat=lambda: "2026-04-06T01:00:00+00:00"),
+        last_heartbeat_at=SimpleNamespace(isoformat=lambda: "2026-04-06T01:05:00+00:00"),
+        recovered_from_run_id=uuid.uuid4(),
+        recovery_attempt_count=2,
         error_text=None,
         ended_at=SimpleNamespace(isoformat=lambda: "2026-04-06T01:10:00+00:00"),
     )
@@ -1972,6 +2266,42 @@ def test_write_run_manifest_snapshot_uses_fixed_specialist_registration_id(monke
     assert metadata["selected_specialist_id"] == "support-primary"
     assert metadata["forced_route_target_id"] == "support"
     assert metadata["forced_specialist_id"] == "support-primary"
+    assert metadata["worker_pid"] == 9876
+    assert metadata["worker_instance_id"] == "worker-test"
+    assert metadata["started_at"] == "2026-04-06T01:00:00+00:00"
+    assert metadata["last_heartbeat_at"] == "2026-04-06T01:05:00+00:00"
+    assert metadata["recovered_from_run_id"] == str(run.recovered_from_run_id)
+    assert metadata["recovery_attempt_count"] == 2
+
+
+def test_claim_oldest_pending_run_sets_worker_ownership(tmp_path):
+    symbols = _load_worker_symbols()
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="pending",
+        worker_pid=None,
+        worker_instance_id=None,
+        started_at=None,
+        last_heartbeat_at=None,
+        ended_at=SimpleNamespace(),
+        error_text="boom",
+    )
+    db = _ClaimRunDb(run)
+
+    claimed = symbols["claim_oldest_pending_run"](
+        db,
+        worker_pid=4321,
+        worker_instance_id="worker-test",
+    )
+
+    assert claimed is run
+    assert run.status == "running"
+    assert run.worker_pid == 4321
+    assert run.worker_instance_id == "worker-test"
+    assert run.started_at is not None
+    assert run.last_heartbeat_at == run.started_at
+    assert run.ended_at is None
+    assert run.error_text is None
 
 
 def test_heartbeat_loop_emits_while_stop_event_controls_exit(monkeypatch, tmp_path):
@@ -1980,7 +2310,7 @@ def test_heartbeat_loop_emits_while_stop_event_controls_exit(monkeypatch, tmp_pa
     stop_event = threading.Event()
     observed = {"heartbeats": 0}
 
-    def fake_emit_worker_heartbeat(_settings):
+    def fake_emit_worker_heartbeat(_settings, **_kwargs):
         observed["heartbeats"] += 1
         stop_event.set()
 
@@ -1992,11 +2322,11 @@ def test_heartbeat_loop_emits_while_stop_event_controls_exit(monkeypatch, tmp_pa
 
 
 def test_emit_worker_heartbeat_initializes_system_state_defaults(monkeypatch, tmp_path):
-    pytest.importorskip("sqlalchemy")
-    from worker.main import emit_worker_heartbeat
-
+    symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
     fake_db = _FakeWorkerStateDb()
+    tracker = symbols["ActiveRunTracker"]()
+    worker_identity = symbols["WorkerIdentity"](worker_pid=2222, worker_instance_id="worker-test")
 
     @contextmanager
     def fake_session_scope(_settings):
@@ -2005,21 +2335,27 @@ def test_emit_worker_heartbeat_initializes_system_state_defaults(monkeypatch, tm
     monkeypatch.setattr("worker.main.session_scope", fake_session_scope)
     monkeypatch.setattr("worker.main.log_worker_event", lambda *args, **kwargs: None)
 
-    emit_worker_heartbeat(settings)
+    symbols["emit_worker_heartbeat"](
+        settings,
+        worker_identity=worker_identity,
+        active_run_tracker=tracker,
+    )
 
     bootstrap_state = fake_db.objects[("SystemState", "bootstrap_version")]
     heartbeat_state = fake_db.objects[("SystemState", "worker_heartbeat")]
     assert fake_db.flush_calls == 1
     assert bootstrap_state.value_json == {"version": "stage1-v4"}
     assert heartbeat_state.value_json["status"] == "alive"
+    assert heartbeat_state.value_json["worker_pid"] == 2222
+    assert heartbeat_state.value_json["worker_instance_id"] == "worker-test"
 
 
 def test_emit_worker_heartbeat_updates_stale_bootstrap_version(monkeypatch, tmp_path):
-    pytest.importorskip("sqlalchemy")
-    from worker.main import emit_worker_heartbeat
-
+    symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
     fake_db = _FakeWorkerStateDb()
+    tracker = symbols["ActiveRunTracker"]()
+    worker_identity = symbols["WorkerIdentity"](worker_pid=3333, worker_instance_id="worker-test")
     fake_db.objects[("SystemState", "bootstrap_version")] = SimpleNamespace(
         key="bootstrap_version",
         value_json={"version": "stage1-v1"},
@@ -2033,7 +2369,235 @@ def test_emit_worker_heartbeat_updates_stale_bootstrap_version(monkeypatch, tmp_
     monkeypatch.setattr("worker.main.session_scope", fake_session_scope)
     monkeypatch.setattr("worker.main.log_worker_event", lambda *args, **kwargs: None)
 
-    emit_worker_heartbeat(settings)
+    symbols["emit_worker_heartbeat"](
+        settings,
+        worker_identity=worker_identity,
+        active_run_tracker=tracker,
+    )
 
     bootstrap_state = fake_db.objects[("SystemState", "bootstrap_version")]
     assert bootstrap_state.value_json == {"version": "stage1-v4"}
+
+
+def test_emit_worker_heartbeat_updates_active_run_last_heartbeat(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="running",
+        worker_instance_id="worker-owned",
+        last_heartbeat_at=None,
+    )
+    fake_db = _FakeWorkerStateDb()
+    fake_db.objects[("AIRun", run.id)] = run
+    tracker = symbols["ActiveRunTracker"]()
+    tracker.set_run_id(run.id)
+    worker_identity = symbols["WorkerIdentity"](worker_pid=4444, worker_instance_id="worker-owned")
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.main.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.main.log_worker_event", lambda *args, **kwargs: None)
+
+    symbols["emit_worker_heartbeat"](
+        settings,
+        worker_identity=worker_identity,
+        active_run_tracker=tracker,
+    )
+
+    assert run.last_heartbeat_at is not None
+
+
+def test_recover_stale_runs_creates_replacement_run_and_fails_running_steps(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="ai_triage",
+        requeue_requested=False,
+        requeue_trigger=None,
+        requeue_requested_by_user_id=None,
+        requeue_forced_route_target_id=None,
+        requeue_forced_specialist_id=None,
+        updated_at=None,
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=11),
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        last_heartbeat_at=None,
+        ended_at=None,
+        error_text=None,
+        triggered_by="new_ticket",
+        requested_by_user_id=None,
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+        recovery_attempt_count=0,
+    )
+    step = SimpleNamespace(
+        ai_run_id=run.id,
+        step_index=1,
+        status="running",
+        error_text=None,
+        ended_at=None,
+    )
+    replacement_run = SimpleNamespace(id=uuid.uuid4())
+    fake_db = _QueueRecoveryDb(
+        stale_runs=[run],
+        steps_by_run_id={run.id: [step]},
+        tickets_by_id={ticket.id: ticket},
+    )
+    observed = {"create_pending_kwargs": None, "manifest_run_ids": []}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.queue.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.queue.log_worker_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "worker.queue.create_pending_ai_run",
+        lambda *args, **kwargs: observed.__setitem__("create_pending_kwargs", kwargs) or replacement_run,
+    )
+    monkeypatch.setattr("worker.queue.process_deferred_requeue", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "worker.queue.write_run_manifest_snapshot",
+        lambda _settings, run_id: observed["manifest_run_ids"].append(run_id),
+    )
+
+    recovered_count = symbols["recover_stale_runs"](settings)
+
+    assert recovered_count == 1
+    assert run.status == "failed"
+    assert run.ended_at is not None
+    assert "stale" in run.error_text.lower()
+    assert step.status == "failed"
+    assert step.ended_at is not None
+    assert observed["create_pending_kwargs"]["recovered_from_run_id"] == run.id
+    assert observed["create_pending_kwargs"]["recovery_attempt_count"] == 1
+    assert observed["manifest_run_ids"] == [run.id, replacement_run.id]
+
+
+def test_recover_stale_runs_honors_deferred_requeue(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="new",
+        requeue_requested=True,
+        requeue_trigger="manual_rerun",
+        requeue_requested_by_user_id=uuid.uuid4(),
+        requeue_forced_route_target_id="support",
+        requeue_forced_specialist_id="support",
+        updated_at=None,
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=11),
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        last_heartbeat_at=None,
+        ended_at=None,
+        error_text=None,
+        triggered_by="new_ticket",
+        requested_by_user_id=None,
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+        recovery_attempt_count=0,
+    )
+    replacement_run = SimpleNamespace(id=uuid.uuid4())
+    fake_db = _QueueRecoveryDb(
+        stale_runs=[run],
+        steps_by_run_id={run.id: []},
+        tickets_by_id={ticket.id: ticket},
+    )
+    observed = {"deferred_requeue_calls": 0}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.queue.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.queue.log_worker_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.queue.create_pending_ai_run", lambda *args, **kwargs: pytest.fail("unexpected direct requeue"))
+    monkeypatch.setattr(
+        "worker.queue.process_deferred_requeue",
+        lambda db, ticket: observed.__setitem__("deferred_requeue_calls", observed["deferred_requeue_calls"] + 1) or replacement_run,
+    )
+    monkeypatch.setattr("worker.queue.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    recovered_count = symbols["recover_stale_runs"](settings)
+
+    assert recovered_count == 1
+    assert run.status == "failed"
+    assert observed["deferred_requeue_calls"] == 1
+
+
+def test_recover_stale_runs_routes_ticket_when_retry_budget_is_exhausted(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="ai_triage",
+        requeue_requested=True,
+        requeue_trigger="manual_rerun",
+        requeue_requested_by_user_id=uuid.uuid4(),
+        requeue_forced_route_target_id="support",
+        requeue_forced_specialist_id="support",
+        updated_at=None,
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=11),
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        last_heartbeat_at=None,
+        ended_at=None,
+        error_text=None,
+        triggered_by="new_ticket",
+        requested_by_user_id=None,
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+        recovery_attempt_count=settings.ai_run_max_recovery_attempts,
+    )
+    fake_db = _QueueRecoveryDb(
+        stale_runs=[run],
+        steps_by_run_id={run.id: []},
+        tickets_by_id={ticket.id: ticket},
+    )
+    observed = {"failure_notes": [], "status_changes": []}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.queue.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.queue.log_worker_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.queue.process_deferred_requeue", lambda *args, **kwargs: pytest.fail("unexpected deferred requeue"))
+    monkeypatch.setattr("worker.queue.create_pending_ai_run", lambda *args, **kwargs: pytest.fail("unexpected replacement run"))
+    monkeypatch.setattr(
+        "worker.queue.publish_ai_failure_note",
+        lambda db, ticket, ai_run_id, body_markdown, created_at=None: observed["failure_notes"].append(body_markdown),
+    )
+    monkeypatch.setattr(
+        "worker.queue.record_status_change",
+        lambda db, ticket, to_status, changed_by_type, changed_at: observed["status_changes"].append((ticket.status, to_status, changed_by_type)) or setattr(ticket, "status", to_status),
+    )
+    monkeypatch.setattr("worker.queue.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    recovered_count = symbols["recover_stale_runs"](settings)
+
+    assert recovered_count == 1
+    assert run.status == "failed"
+    assert ticket.status == "waiting_on_dev_ti"
+    assert ticket.requeue_requested is False
+    assert ticket.requeue_trigger is None
+    assert observed["failure_notes"]
+    assert "exhausted" in observed["failure_notes"][0].lower()
+    assert observed["status_changes"] == [("ai_triage", "waiting_on_dev_ti", "system")]

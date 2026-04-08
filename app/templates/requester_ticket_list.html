@@ -1,14 +1,14 @@
 {% extends "base.html" %}
 
-{% block title %}My Tickets | Stage 1 AI Triage{% endblock %}
+{% block title %}{{ t("requester.list.heading") }} | {{ t("brand.name") }}{% endblock %}
 
 {% block body %}
 <section class="page-header">
   <div>
-    <p class="eyebrow">Requester view</p>
-    <h1>My tickets</h1>
+    <p class="eyebrow">{{ t("eyebrow.requester_view") }}</p>
+    <h1>{{ t("requester.list.heading") }}</h1>
   </div>
-  <a class="button" href="/app/tickets/new">Open a ticket</a>
+  <a class="button" href="/app/tickets/new">{{ t("button.open_ticket") }}</a>
 </section>
 
 {% if tickets %}
@@ -20,22 +20,22 @@
       <span class="ticket-ref">{{ ticket.reference }}</span>
       <span class="status-pill">{{ requester_status_label(ticket.status) }}</span>
       {% if ticket.urgent %}
-      <span class="urgent-pill">Urgent</span>
+      <span class="urgent-pill">{{ t("common.urgent") }}</span>
       {% endif %}
       {% if row.updated_for_user %}
-      <span class="updated-pill">Updated</span>
+      <span class="updated-pill">{{ t("common.updated") }}</span>
       {% endif %}
     </div>
     <h2>{{ ticket.title }}</h2>
-    <p class="ticket-card__time">Last updated {{ ticket.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</p>
+    <p class="ticket-card__time">{{ t("requester.list.last_updated", value=format_datetime_utc(ticket.updated_at)) }}</p>
   </a>
   {% endfor %}
 </section>
 {% else %}
 <section class="panel">
-  <h2>No tickets yet</h2>
-  <p class="muted">Start with a short description and optional screenshots.</p>
-  <a class="button" href="/app/tickets/new">Create your first ticket</a>
+  <h2>{{ t("requester.list.empty_heading") }}</h2>
+  <p class="muted">{{ t("requester.list.empty_body") }}</p>
+  <a class="button" href="/app/tickets/new">{{ t("button.create_first_ticket") }}</a>
 </section>
 {% endif %}
 {% endblock %}

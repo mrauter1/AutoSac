@@ -1,32 +1,32 @@
 {% extends "base.html" %}
 
-{% block title %}New Ticket | Stage 1 AI Triage{% endblock %}
+{% block title %}{{ t("base.nav.new_ticket") }} | {{ t("brand.name") }}{% endblock %}
 
 {% block body %}
 <section class="panel">
-  <p class="eyebrow">Requester view</p>
-  <h1>Open a ticket</h1>
-  <p class="muted">Describe the issue in your own words. Attachments are optional.</p>
+  <p class="eyebrow">{{ t("eyebrow.requester_view") }}</p>
+  <h1>{{ t("requester.new.heading") }}</h1>
+  <p class="muted">{{ t("requester.new.subtitle") }}</p>
   <form method="post" action="/app/tickets" enctype="multipart/form-data" class="stack">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label class="field">
-      <span>Short title</span>
+      <span>{{ t("field.short_title") }}</span>
       <input type="text" name="title" value="{{ form_title or '' }}" maxlength="120">
     </label>
     <label class="field">
-      <span>Description</span>
+      <span>{{ t("field.description") }}</span>
       <textarea name="description" rows="8" required>{{ form_description or '' }}</textarea>
     </label>
     <label class="field">
-      <span>Attachments</span>
+      <span>{{ t("field.attachments") }}</span>
       <input type="file" name="attachments" multiple>
-      <small>Up to 3 files, 5 MiB each.</small>
+      <small>{{ t("hint.attachments_limit") }}</small>
     </label>
     <label class="checkbox">
       <input type="checkbox" name="urgent" {% if form_urgent %}checked{% endif %}>
-      <span>Mark as urgent</span>
+      <span>{{ t("field.mark_urgent") }}</span>
     </label>
-    <button type="submit" class="button">Create ticket</button>
+    <button type="submit" class="button">{{ t("button.create_ticket") }}</button>
   </form>
 </section>
 {% endblock %}

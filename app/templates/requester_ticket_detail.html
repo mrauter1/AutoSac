@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}{{ ticket.reference }} | Stage 1 AI Triage{% endblock %}
+{% block title %}{{ ticket.reference }} | {{ t("brand.name") }}{% endblock %}
 
 {% block body %}
 <section class="page-header page-header--stack">
@@ -8,7 +8,7 @@
     <span class="ticket-ref">{{ ticket.reference }}</span>
     <span class="status-pill">{{ requester_status_label(ticket.status) }}</span>
     {% if ticket.urgent %}
-    <span class="urgent-pill">Urgent</span>
+    <span class="urgent-pill">{{ t("common.urgent") }}</span>
     {% endif %}
   </div>
   <h1>{{ ticket.title }}</h1>
@@ -20,7 +20,7 @@
   <article class="timeline-status">
     <div class="timeline-status__meta">
       <span class="lane-pill lane-pill--status">{{ item.lane_label }}</span>
-      <span>{{ item.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+      <span>{{ format_datetime_utc(item.created_at) }}</span>
     </div>
     <p class="timeline-status__text">{{ item.summary }}</p>
   </article>
@@ -28,7 +28,7 @@
   <article class="message-card">
     <div class="message-card__meta">
       <strong>{{ item.author_label }}</strong>
-      <span>{{ item.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+      <span>{{ format_datetime_utc(item.created_at) }}</span>
     </div>
     <div class="message-card__body">{{ item.body_html | safe }}</div>
     {% if item.attachments %}
@@ -36,7 +36,7 @@
       {% for attachment in item.attachments %}
       <li>
         <a href="/attachments/{{ attachment.id }}">{{ attachment.original_filename }}</a>
-        <span class="muted">{{ attachment.mime_type }} · {{ attachment.size_bytes }} bytes</span>
+        <span class="muted">{{ attachment.mime_type }} · {{ t("common.bytes", count=attachment.size_bytes) }}</span>
       </li>
       {% endfor %}
     </ul>
@@ -47,24 +47,24 @@
 </section>
 
 <section class="panel stack">
-  <h2>Reply</h2>
+  <h2>{{ t("requester.detail.reply_heading") }}</h2>
   <form method="post" action="/app/tickets/{{ ticket.reference }}/reply" enctype="multipart/form-data" class="stack">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label class="field">
-      <span>Message</span>
+      <span>{{ t("field.message") }}</span>
       <textarea name="body" rows="6" required>{{ reply_body or '' }}</textarea>
     </label>
     <label class="field">
-      <span>Attachments</span>
+      <span>{{ t("field.attachments") }}</span>
       <input type="file" name="attachments" multiple>
-      <small>Up to 3 files, 5 MiB each.</small>
+      <small>{{ t("hint.attachments_limit") }}</small>
     </label>
-    <button type="submit" class="button">Send reply</button>
+    <button type="submit" class="button">{{ t("button.send_reply") }}</button>
   </form>
   {% if ticket.status != "resolved" %}
   <form method="post" action="/app/tickets/{{ ticket.reference }}/resolve">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button type="submit" class="button button--ghost">Mark resolved</button>
+    <button type="submit" class="button button--ghost">{{ t("button.mark_resolved") }}</button>
   </form>
   {% endif %}
 </section>

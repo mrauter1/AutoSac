@@ -152,6 +152,24 @@ def test_create_pending_ai_run_persists_forced_override_fields():
     assert run.forced_specialist_id == "software-architect"
 
 
+def test_create_pending_ai_run_persists_recovery_fields():
+    _, AIRun, _, create_pending_ai_run, _ = _load_ticketing_dependencies()
+    session = _FakeSession()
+    recovered_from_run_id = uuid.uuid4()
+
+    run = create_pending_ai_run(
+        session,
+        ticket_id=uuid.uuid4(),
+        triggered_by="manual_rerun",
+        recovered_from_run_id=recovered_from_run_id,
+        recovery_attempt_count=2,
+    )
+
+    assert isinstance(run, AIRun)
+    assert run.recovered_from_run_id == recovered_from_run_id
+    assert run.recovery_attempt_count == 2
+
+
 def test_create_pending_ai_run_returns_none_for_active_run_conflict():
     IntegrityError, _, _, create_pending_ai_run, _ = _load_ticketing_dependencies()
     conflict = IntegrityError(
@@ -314,6 +332,19 @@ def test_deferred_requeue_requester_migration_adds_requesting_user_fk():
     assert 'sa.Column("requeue_requested_by_user_id"' in migration_source
     assert 'op.create_foreign_key(' in migration_source
     assert '"fk_tickets_requeue_requested_by_user_id_users"' in migration_source
+
+
+def test_ai_run_recovery_migration_adds_worker_liveness_fields():
+    migration_source = Path(
+        "shared/migrations/versions/20260408_0009_ai_run_recovery.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'op.add_column("ai_runs", sa.Column("worker_pid", sa.Integer(), nullable=True))' in migration_source
+    assert 'op.add_column("ai_runs", sa.Column("worker_instance_id", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("ai_runs", sa.Column("last_heartbeat_at", sa.DateTime(timezone=True), nullable=True))' in migration_source
+    assert 'op.add_column("ai_runs", sa.Column("recovered_from_run_id", postgresql.UUID(as_uuid=True), nullable=True))' in migration_source
+    assert 'op.add_column("ai_runs", sa.Column("recovery_attempt_count", sa.Integer(), server_default=sa.text("0"), nullable=False))' in migration_source
+    assert 'op.create_index("ix_ai_runs_status_last_heartbeat_at", "ai_runs", ["status", "last_heartbeat_at"], unique=False)' in migration_source
 
 
 def test_route_target_compatibility_persistence_backfills_and_allows_selector_steps(tmp_path):
@@ -544,6 +575,11 @@ def test_models_expose_route_target_storage_without_db_taxonomy_constraints_or_t
 
     assert "forced_route_target_id" in AIRun.__table__.c
     assert "forced_specialist_id" in AIRun.__table__.c
+    assert "worker_pid" in AIRun.__table__.c
+    assert "worker_instance_id" in AIRun.__table__.c
+    assert "last_heartbeat_at" in AIRun.__table__.c
+    assert "recovered_from_run_id" in AIRun.__table__.c
+    assert "recovery_attempt_count" in AIRun.__table__.c
 
 
 def test_apply_ai_route_target_sets_route_target_and_requester_language():

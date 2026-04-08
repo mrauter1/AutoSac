@@ -9,28 +9,28 @@
 >
   <div class="ops-filters__grid">
     <label class="field">
-      <span>Status</span>
+      <span>{{ t("filters.status") }}</span>
       <select name="status">
-        <option value="">All statuses</option>
+        <option value="">{{ t("filters.all_statuses") }}</option>
         {% for value in status_options %}
         <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ ops_status_label(value) }}</option>
         {% endfor %}
       </select>
     </label>
     <label class="field">
-      <span>Route target</span>
+      <span>{{ t("filters.route_target") }}</span>
       <select name="route_target_id">
-        <option value="">All route targets</option>
+        <option value="">{{ t("filters.all_route_targets") }}</option>
         {% for option in route_target_options %}
         <option value="{{ option.id }}" {% if filters.route_target_id == option.id %}selected{% endif %}>{{ option.label }}</option>
         {% endfor %}
       </select>
     </label>
     <label class="field">
-      <span>Assigned to</span>
+      <span>{{ t("filters.assigned_to") }}</span>
       <select name="assigned_to">
-        <option value="">Anyone</option>
-        <option value="unassigned" {% if filters.assigned_to == "unassigned" %}selected{% endif %}>Unassigned</option>
+        <option value="">{{ t("filters.anyone") }}</option>
+        <option value="unassigned" {% if filters.assigned_to == "unassigned" %}selected{% endif %}>{{ t("common.unassigned") }}</option>
         {% for user in ops_users %}
         <option value="{{ user.id }}" {% if filters.assigned_to == user.id|string %}selected{% endif %}>{{ user.display_name }}</option>
         {% endfor %}
@@ -40,27 +40,27 @@
   <div class="ops-filters__checks">
     <label class="checkbox">
       <input type="checkbox" name="urgent" {% if filters.urgent %}checked{% endif %}>
-      <span>Urgent only</span>
+      <span>{{ t("filters.urgent_only") }}</span>
     </label>
     <label class="checkbox">
       <input type="checkbox" name="unassigned_only" {% if filters.unassigned_only %}checked{% endif %}>
-      <span>Unassigned only</span>
+      <span>{{ t("filters.unassigned_only") }}</span>
     </label>
     <label class="checkbox">
       <input type="checkbox" name="created_by_me" {% if filters.created_by_me %}checked{% endif %}>
-      <span>Created by me</span>
+      <span>{{ t("filters.created_by_me") }}</span>
     </label>
     <label class="checkbox">
       <input type="checkbox" name="needs_approval" {% if filters.needs_approval %}checked{% endif %}>
-      <span>Needs approval</span>
+      <span>{{ t("filters.needs_approval") }}</span>
     </label>
     <label class="checkbox">
       <input type="checkbox" name="updated_since_viewed" {% if filters.updated_since_viewed %}checked{% endif %}>
-      <span>Updated since my last view</span>
+      <span>{{ t("filters.updated_since_viewed") }}</span>
     </label>
   </div>
   <div class="button-row">
-    <button type="submit" class="button">Apply filters</button>
-    <a class="button button--ghost" href="{{ filters_action }}">Reset</a>
+    <button type="submit" class="button">{{ t("button.apply_filters") }}</button>
+    <a class="button button--ghost" href="{{ filters_action }}">{{ t("button.reset") }}</a>
   </div>
 </form>

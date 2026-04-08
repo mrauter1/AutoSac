@@ -11,10 +11,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.formparsers import MultiPartException
 
+from app.i18n import (
+    DEFAULT_UI_LOCALE,
+    requester_author_label,
+    requester_role_suffix_label,
+    requester_status_change_summary,
+    requester_status_label,
+    resolve_ui_locale,
+    timeline_lane_label,
+)
 from app.auth import get_current_user, get_required_auth_session, require_requester_user, validate_csrf_token
 from app.render import render_markdown_to_html
 from app.timeline import build_author_label, load_ticket_status_history, load_users_by_ids, merge_timeline_items, serialize_status_changes
-from app.ui import build_template_context, requester_author_label, requester_status_label, templates
+from app.ui import build_template_context, templates
 from app.uploads import (
     UploadValidationError,
     get_form_attachments,
@@ -75,7 +84,7 @@ def _load_attachments_by_message(db: Session, *, ticket_id, visibility: str = "p
     return grouped
 
 
-def _serialize_public_thread(db: Session, *, ticket_id) -> list[dict[str, object]]:
+def _serialize_public_thread(db: Session, *, ticket_id, ui_locale: str = DEFAULT_UI_LOCALE) -> list[dict[str, object]]:
     attachments_by_message = _load_attachments_by_message(db, ticket_id=ticket_id)
     messages = _load_public_ticket_messages(db, ticket_id=ticket_id)
     users_by_id = load_users_by_ids(db, (message.author_user_id for message in messages))
@@ -87,12 +96,13 @@ def _serialize_public_thread(db: Session, *, ticket_id) -> list[dict[str, object
                 "id": str(message.id),
                 "created_at": message.created_at,
                 "lane": "public",
-                "lane_label": "Public",
+                "lane_label": timeline_lane_label("public", ui_locale),
                 "author_type": message.author_type,
                 "author_label": build_author_label(
                     author_type=message.author_type,
                     display_name=users_by_id.get(message.author_user_id).display_name if message.author_user_id in users_by_id else None,
-                    fallback_label=requester_author_label,
+                    fallback_label=lambda author_type: requester_author_label(author_type, ui_locale),
+                    role_suffix_label=lambda author_type: requester_role_suffix_label(author_type, ui_locale),
                 ),
                 "source": message.source,
                 "body_markdown": message.body_markdown,
@@ -103,16 +113,18 @@ def _serialize_public_thread(db: Session, *, ticket_id) -> list[dict[str, object
     return thread
 
 
-def _build_requester_timeline(db: Session, *, ticket_id) -> list[dict[str, object]]:
+def _build_requester_timeline(db: Session, *, ticket_id, ui_locale: str = DEFAULT_UI_LOCALE) -> list[dict[str, object]]:
     history_entries = load_ticket_status_history(db, ticket_id=ticket_id)
     users_by_id = load_users_by_ids(db, (getattr(entry, "changed_by_user_id", None) for entry in history_entries))
     return merge_timeline_items(
-        _serialize_public_thread(db, ticket_id=ticket_id),
+        _serialize_public_thread(db, ticket_id=ticket_id, ui_locale=ui_locale),
         serialize_status_changes(
             history_entries,
-            status_label=requester_status_label,
-            actor_label=requester_author_label,
-            summary_style="requester",
+            status_label=lambda status: requester_status_label(status, ui_locale),
+            actor_label=lambda author_type: requester_author_label(author_type, ui_locale),
+            actor_role_suffix_label=lambda author_type: requester_role_suffix_label(author_type, ui_locale),
+            status_summary=lambda from_status_label, to_status_label: requester_status_change_summary(to_status_label, ui_locale),
+            lane_label=timeline_lane_label("status", ui_locale),
             user_display_names={user_id: user.display_name for user_id, user in users_by_id.items()},
         ),
     )
@@ -259,6 +271,7 @@ async def requester_ticket_create(
                     "form_description": description,
                     "form_urgent": urgent,
                 },
+                ui_switch_path="/app/tickets/new",
             ),
             status_code=status.HTTP_400_BAD_REQUEST,
         )
@@ -297,6 +310,7 @@ def requester_ticket_detail(
     auth_session: SessionRecord = Depends(get_required_auth_session),
     db: Session = Depends(db_session_dependency),
 ):
+    ui_locale = resolve_ui_locale(request)
     ticket = _load_requester_ticket_or_404(db, reference=reference, requester_id=current_user.id)
     if can_access_all_tickets(current_user):
         return RedirectResponse(
@@ -312,7 +326,8 @@ def requester_ticket_detail(
             request=request,
             current_user=current_user,
             auth_session=auth_session,
-            extra={"ticket": ticket, "timeline": _build_requester_timeline(db, ticket_id=ticket.id)},
+            extra={"ticket": ticket, "timeline": _build_requester_timeline(db, ticket_id=ticket.id, ui_locale=ui_locale)},
+            ui_locale=ui_locale,
         ),
     )
 
@@ -326,6 +341,7 @@ async def requester_ticket_reply(
     settings: Settings = Depends(get_settings),
     db: Session = Depends(db_session_dependency),
 ):
+    ui_locale = resolve_ui_locale(request)
     ticket = _load_requester_ticket_or_404(db, reference=reference, requester_id=current_user.id)
     body = ""
     try:
@@ -345,10 +361,12 @@ async def requester_ticket_reply(
                 auth_session=auth_session,
                 extra={
                     "ticket": ticket,
-                    "timeline": _build_requester_timeline(db, ticket_id=ticket.id),
+                    "timeline": _build_requester_timeline(db, ticket_id=ticket.id, ui_locale=ui_locale),
                     "error": str(exc),
                     "reply_body": body,
                 },
+                ui_locale=ui_locale,
+                ui_switch_path=f"/app/tickets/{ticket.reference}",
             ),
             status_code=status.HTTP_400_BAD_REQUEST,
         )

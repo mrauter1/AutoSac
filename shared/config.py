@@ -53,8 +53,29 @@ def _env_path(name: str, default: Path) -> Path:
     return Path(raw).expanduser()
 
 
+def _normalize_ui_locale(value: str) -> str:
+    candidate = value.strip()
+    lowered = candidate.lower()
+    if lowered == "en" or lowered.startswith("en-"):
+        return "en"
+    if lowered in {"pt", "pt-br", "pt_br"} or lowered.startswith("pt-"):
+        return "pt-BR"
+    raise SettingsError("UI_DEFAULT_LOCALE must be one of: en, pt-BR")
+
+
+def _env_ui_locale(name: str, default: str) -> str:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return _normalize_ui_locale(default)
+    return _normalize_ui_locale(raw)
+
+
 def get_database_url() -> str:
     return _required_env("DATABASE_URL")
+
+
+def get_default_ui_locale() -> str:
+    return _env_ui_locale("UI_DEFAULT_LOCALE", "en")
 
 
 @dataclass(frozen=True)
@@ -77,6 +98,10 @@ class Settings:
     max_image_bytes: int
     session_default_hours: int
     session_remember_days: int
+    worker_heartbeat_seconds: int = 60
+    ai_run_stale_timeout_seconds: int = 300
+    ai_run_max_recovery_attempts: int = 3
+    default_ui_locale: str = "en"
 
     @property
     def secure_cookies(self) -> bool:
@@ -108,8 +133,15 @@ class Settings:
             raise SettingsError("SESSION_REMEMBER_DAYS must be positive")
         if self.worker_poll_seconds <= 0:
             raise SettingsError("WORKER_POLL_SECONDS must be positive")
+        if self.worker_heartbeat_seconds <= 0:
+            raise SettingsError("WORKER_HEARTBEAT_SECONDS must be positive")
         if self.codex_timeout_seconds <= 0:
             raise SettingsError("CODEX_TIMEOUT_SECONDS must be positive")
+        if self.ai_run_stale_timeout_seconds <= self.worker_heartbeat_seconds:
+            raise SettingsError("AI_RUN_STALE_TIMEOUT_SECONDS must be greater than WORKER_HEARTBEAT_SECONDS")
+        if self.ai_run_max_recovery_attempts < 0:
+            raise SettingsError("AI_RUN_MAX_RECOVERY_ATTEMPTS must be zero or positive")
+        _normalize_ui_locale(self.default_ui_locale)
 
 
 @lru_cache(maxsize=1)
@@ -134,6 +166,10 @@ def get_settings() -> Settings:
         max_image_bytes=_env_int("MAX_IMAGE_BYTES", 5 * 1024 * 1024),
         session_default_hours=_env_int("SESSION_DEFAULT_HOURS", 12),
         session_remember_days=_env_int("SESSION_REMEMBER_DAYS", 30),
+        worker_heartbeat_seconds=_env_int("WORKER_HEARTBEAT_SECONDS", 60),
+        ai_run_stale_timeout_seconds=_env_int("AI_RUN_STALE_TIMEOUT_SECONDS", 300),
+        ai_run_max_recovery_attempts=_env_int("AI_RUN_MAX_RECOVERY_ATTEMPTS", 3),
+        default_ui_locale=get_default_ui_locale(),
     )
     settings.validate_contracts()
     return settings

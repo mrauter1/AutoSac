@@ -687,23 +687,27 @@ def test_requester_cannot_access_ops_ticket_detail():
 @pytest.mark.parametrize(
     ("role", "expected_options"),
     [
-        ("dev_ti", ['<option value="requester">requester</option>']),
+        ("dev_ti", ['<option value="requester">Requester</option>']),
         (
             "admin",
             [
-                '<option value="requester">requester</option>',
-                '<option value="dev_ti">dev_ti</option>',
+                '<option value="requester">Requester</option>',
+                '<option value="dev_ti">Dev/TI</option>',
             ],
         ),
     ],
 )
 def test_ops_users_page_allows_dev_ti_and_admin_with_role_scoped_options(monkeypatch, role, expected_options):
+    from app.i18n import user_role_label
+    from shared.config import get_default_ui_locale
+
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
     current_user = SimpleNamespace(id=uuid.uuid4(), display_name=role.upper(), role=role, is_active=True)
     auth_session = SimpleNamespace(csrf_token="csrf-token")
     users = [SimpleNamespace(email="existing@example.com", display_name="Existing User", role="requester", is_active=True)]
+    locale = get_default_ui_locale()
 
     monkeypatch.setattr(stack["routes_ops"], "_load_users_for_admin", lambda db: users)
 
@@ -717,10 +721,11 @@ def test_ops_users_page_allows_dev_ti_and_admin_with_role_scoped_options(monkeyp
     assert response.status_code == 200
     assert "Existing User" in response.text
     for option in expected_options:
-        assert option in response.text
-    assert '<option value="admin">admin</option>' not in response.text
+        role_value = option.split('"')[1]
+        assert f'<option value="{role_value}">{user_role_label(role_value, locale)}</option>' in response.text
+    assert f'<option value="admin">{user_role_label("admin", locale)}</option>' not in response.text
     if role == "dev_ti":
-        assert '<option value="dev_ti">dev_ti</option>' not in response.text
+        assert f'<option value="dev_ti">{user_role_label("dev_ti", locale)}</option>' not in response.text
     assert db.commit_calls == 1
 
 
@@ -837,6 +842,9 @@ def test_requester_cannot_post_ops_user_creation():
 
 
 def test_ops_user_creation_validation_error_keeps_users_page_context(monkeypatch):
+    from app.i18n import translate, translate_error_text, user_role_label
+    from shared.config import get_default_ui_locale
+
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
@@ -849,6 +857,7 @@ def test_ops_user_creation_validation_error_keeps_users_page_context(monkeypatch
 
     monkeypatch.setattr(stack["routes_ops"], "create_user", fail_create_user)
     monkeypatch.setattr(stack["routes_ops"], "_load_users_for_admin", lambda db: users)
+    locale = get_default_ui_locale()
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
@@ -868,10 +877,10 @@ def test_ops_user_creation_validation_error_keeps_users_page_context(monkeypatch
         )
 
     assert response.status_code == 400
-    assert "User already exists: existing@example.com" in response.text
+    assert translate_error_text("User already exists: existing@example.com", locale) in response.text
     assert "Existing User" in response.text
-    assert "Create user" in response.text
-    assert '<option value="dev_ti">dev_ti</option>' in response.text
+    assert translate(locale, "ops.users.create_heading") in response.text
+    assert f'<option value="dev_ti">{user_role_label("dev_ti", locale)}</option>' in response.text
     assert db.commit_calls == 0
     assert db.rollback_calls == 1
 
@@ -983,6 +992,9 @@ def test_ops_board_route_does_not_mark_ticket_as_read(monkeypatch):
 
 
 def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
+    from app.i18n import translate
+    from shared.config import get_default_ui_locale
+
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
@@ -1051,6 +1063,7 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
         "upsert_ticket_view",
         lambda *args, **kwargs: observed.__setitem__("view_updates", observed["view_updates"] + 1),
     )
+    locale = get_default_ui_locale()
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
@@ -1063,7 +1076,7 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
     assert observed["view_updates"] == 1
     assert db.commit_calls == 1
     assert 'name="forced_route_target_id"' in response.text
-    assert "Use normal routing" in response.text
+    assert translate(locale, "button.use_normal_routing") in response.text
     assert "Software Architect" in response.text
 
 
@@ -1166,6 +1179,9 @@ def test_ops_rerun_ai_rejects_invalid_forced_route_target(monkeypatch):
 
 
 def test_ops_detail_route_separates_analysis_artifacts_from_latest_run(monkeypatch):
+    from app.i18n import translate
+    from shared.config import get_default_ui_locale
+
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
@@ -1274,6 +1290,7 @@ def test_ops_detail_route_separates_analysis_artifacts_from_latest_run(monkeypat
         },
     )
     monkeypatch.setattr(stack["routes_ops"], "upsert_ticket_view", lambda *args, **kwargs: None)
+    locale = get_default_ui_locale()
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
@@ -1283,10 +1300,103 @@ def test_ops_detail_route_separates_analysis_artifacts_from_latest_run(monkeypat
         response = client.get(f"/ops/tickets/{ticket.reference}")
 
     assert response.status_code == 200
-    assert "Analysis steps" in response.text
+    assert translate(locale, "ops.detail.analysis_steps") in response.text
     assert "/tmp/analysis-support-final.json" in response.text
-    assert "Latest run steps" in response.text
+    assert translate(locale, "ops.detail.latest_run_steps") in response.text
     assert "/tmp/latest-router-final.json" in response.text
+
+
+def test_ops_detail_route_renders_running_run_worker_metadata(monkeypatch):
+    from app.i18n import translate
+    from shared.config import get_default_ui_locale
+
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    started_at = datetime(2026, 4, 8, 12, 0, tzinfo=timezone.utc)
+    last_heartbeat_at = started_at + timedelta(minutes=2)
+    ticket = SimpleNamespace(
+        reference="T-000012",
+        id=uuid.uuid4(),
+        title="Running run metadata",
+        status="ai_triage",
+        urgent=False,
+        updated_at=datetime.now(timezone.utc),
+        route_target_id="support",
+        ai_confidence=None,
+        impact_level=None,
+        development_needed=None,
+        requester_language=None,
+        last_ai_action=None,
+        requeue_requested=False,
+    )
+    latest_run = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="running",
+        started_at=started_at,
+        worker_pid=9876,
+        last_heartbeat_at=last_heartbeat_at,
+        recovery_attempt_count=2,
+        error_text=None,
+    )
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_ticket_detail_context",
+        lambda *args, **kwargs: {
+            "ticket": ticket,
+            "route_target_display": {"id": "support", "label": "Support", "kind": "direct_ai"},
+            "creator": None,
+            "assignee": None,
+            "activity_timeline": [],
+            "ops_users": [],
+            "status_options": [],
+            "draft_reply_status_options": [],
+            "public_reply_status_options": [],
+            "default_public_reply_status": "waiting_on_user",
+            "pending_draft": None,
+            "pending_draft_html": "",
+            "latest_run": latest_run,
+            "latest_analysis_run": None,
+            "latest_run_steps": [],
+            "latest_analysis_steps": [],
+            "latest_ai_note": None,
+            "latest_ai_note_html": "",
+            "analysis_view": {
+                "summary_short": "",
+                "summary_internal": "",
+                "relevant_paths": [],
+                "response_confidence": None,
+                "risk_level": None,
+                "publish_mode_recommendation": None,
+                "risk_reason": "",
+                "handoff_reason": "",
+                "assistant_used": None,
+                "assistant_specialist_id": None,
+            },
+            "ai_relevant_paths": [],
+            "ai_summary_short": "",
+            "ai_summary_internal": "",
+        },
+    )
+    monkeypatch.setattr(stack["routes_ops"], "upsert_ticket_view", lambda *args, **kwargs: None)
+    locale = get_default_ui_locale()
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get(f"/ops/tickets/{ticket.reference}")
+
+    assert response.status_code == 200
+    assert translate(locale, "ops.detail.worker_pid") in response.text
+    assert "9876" in response.text
+    assert translate(locale, "ops.detail.last_heartbeat") in response.text
+    assert translate(locale, "ops.detail.recovery_attempts") in response.text
 
 
 def test_ticket_detail_context_uses_latest_accepted_analysis_run(tmp_path, monkeypatch):
@@ -1498,36 +1608,36 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert '"/ops/tickets/{reference}/assign"' in source
     assert '"/ops/tickets/{reference}/set-status"' in source
     assert '"/ops/tickets/{reference}/rerun-ai"' in source
-    assert "Route AI to specialist" in detail_template
+    assert 't("field.route_ai_to_specialist")' in detail_template
     assert 'name="forced_route_target_id"' in detail_template
     assert "add_ops_public_reply" in source
     assert "add_ops_internal_note" in source
     assert "assign_ticket_for_ops" in source
     assert "set_ticket_status_for_ops" in source
-    assert "Status" in filters_template
-    assert "Route target" in filters_template
-    assert "Assigned to" in filters_template
+    assert 't("filters.status")' in filters_template
+    assert 't("filters.route_target")' in filters_template
+    assert 't("filters.assigned_to")' in filters_template
     assert 'hx-get="{{ filters_action }}"' in filters_template
     assert 'hx-target="#{{ filters_target_id }}"' in filters_template
     assert 'hx-swap="outerHTML"' in filters_template
-    assert "Urgent only" in filters_template
-    assert "Unassigned only" in filters_template
-    assert "Created by me" in filters_template
-    assert "Needs approval" in filters_template
-    assert "Updated since my last view" in filters_template
-    assert "Activity" in detail_template
-    assert "AI analysis" in detail_template
+    assert 't("filters.urgent_only")' in filters_template
+    assert 't("filters.unassigned_only")' in filters_template
+    assert 't("filters.created_by_me")' in filters_template
+    assert 't("filters.needs_approval")' in filters_template
+    assert 't("filters.updated_since_viewed")' in filters_template
+    assert 't("ops.detail.activity")' in detail_template
+    assert 't("ops.detail.ai_analysis")' in detail_template
     assert "lane-pill" in detail_template
     assert "timeline-status" in detail_template
-    assert "Summary" in detail_template
-    assert "Internal summary" in detail_template
+    assert 't("ops.detail.summary")' in detail_template
+    assert 't("ops.detail.internal_summary")' in detail_template
     assert '<details class="analysis-disclosure">' in detail_template
-    assert "More analysis" in detail_template
-    assert "Relevant repo/docs paths" in detail_template
-    assert "Pending AI draft" in detail_template
-    assert "Ticket queue" in list_template
+    assert 't("ops.detail.more_analysis")' in detail_template
+    assert 't("ops.detail.relevant_paths")' in detail_template
+    assert 't("ops.detail.pending_ai_draft")' in detail_template
+    assert 't("ops.list.heading")' in list_template
     assert 'id="ops-results"' in rows_template
     assert 'id="ops-results"' in board_template
     assert '/static/htmx.min.js' in base_template
-    assert "Pending draft approval" in board_template
+    assert 't("ops.board.pending_draft_approval")' in board_template
     assert ".analysis-disclosure" in app_css

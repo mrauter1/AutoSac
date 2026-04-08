@@ -22,6 +22,7 @@ On platforms where shared disks across two services are hard, run both in one se
    - one Postgres database (`autosac-db`)
 4. Set secrets when prompted:
    - `APP_BASE_URL` (use your Render URL, e.g. `https://autosac.onrender.com`)
+   - `UI_DEFAULT_LOCALE=pt-BR` if you want Portuguese as the server-side fallback UI language
    - `CODEX_API_KEY` if the deployment will not already have authenticated Codex CLI access. In most cloud runtimes, set it.
 5. Deploy.
 

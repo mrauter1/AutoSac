@@ -10,10 +10,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.ai_run_presenters import present_ai_run_output, present_ticket_route_target
+from app.i18n import (
+    DEFAULT_UI_LOCALE,
+    ops_author_label,
+    ops_role_suffix_label,
+    ops_status_change_summary,
+    ops_status_label,
+    resolve_ui_locale,
+    timeline_lane_label,
+)
 from app.auth import get_required_auth_session, require_ops_user, validate_csrf_token
 from app.render import render_markdown_to_html
 from app.timeline import build_author_label, load_ticket_status_history, load_users_by_ids, merge_timeline_items, serialize_status_changes
-from app.ui import build_template_context, is_htmx_request, ops_author_label, ops_status_label, templates
+from app.ui import build_template_context, is_htmx_request, templates
 from shared.db import db_session_dependency
 from shared.models import AIDraft, AIRun, AIRunStep, Ticket, TicketAttachment, TicketMessage, TicketView, User
 from shared.permissions import is_ops_user
@@ -70,8 +79,8 @@ def _load_ops_draft_or_404(db: Session, *, draft_id: str) -> AIDraft:
     return draft
 
 
-def _lane_label(visibility: str) -> str:
-    return "Internal" if visibility == "internal" else "Public"
+def _lane_label(visibility: str, ui_locale: str) -> str:
+    return timeline_lane_label("internal" if visibility == "internal" else "public", ui_locale)
 
 
 def _load_attachments_by_message(db: Session, *, ticket_id, visibility: str | None = None) -> dict[Any, list[TicketAttachment]]:
@@ -85,7 +94,13 @@ def _load_attachments_by_message(db: Session, *, ticket_id, visibility: str | No
     return grouped
 
 
-def _serialize_thread(db: Session, *, ticket_id, visibility: str | None = None) -> list[dict[str, object]]:
+def _serialize_thread(
+    db: Session,
+    *,
+    ticket_id,
+    ui_locale: str = DEFAULT_UI_LOCALE,
+    visibility: str | None = None,
+) -> list[dict[str, object]]:
     attachments_by_message = _load_attachments_by_message(db, ticket_id=ticket_id, visibility=visibility)
     statement = select(TicketMessage).where(TicketMessage.ticket_id == ticket_id)
     if visibility is not None:
@@ -98,12 +113,13 @@ def _serialize_thread(db: Session, *, ticket_id, visibility: str | None = None) 
             "id": str(message.id),
             "created_at": message.created_at,
             "lane": message.visibility,
-            "lane_label": _lane_label(message.visibility),
+            "lane_label": _lane_label(message.visibility, ui_locale),
             "author_type": message.author_type,
             "author_label": build_author_label(
                 author_type=message.author_type,
                 display_name=users_by_id.get(message.author_user_id).display_name if message.author_user_id in users_by_id else None,
-                fallback_label=ops_author_label,
+                fallback_label=lambda author_type: ops_author_label(author_type, ui_locale),
+                role_suffix_label=lambda author_type: ops_role_suffix_label(author_type, ui_locale),
             ),
             "source": message.source,
             "body_markdown": message.body_markdown,
@@ -114,16 +130,22 @@ def _serialize_thread(db: Session, *, ticket_id, visibility: str | None = None) 
     ]
 
 
-def _build_ops_activity_timeline(db: Session, *, ticket_id) -> list[dict[str, object]]:
+def _build_ops_activity_timeline(db: Session, *, ticket_id, ui_locale: str = DEFAULT_UI_LOCALE) -> list[dict[str, object]]:
     history_entries = load_ticket_status_history(db, ticket_id=ticket_id)
     users_by_id = load_users_by_ids(db, (getattr(entry, "changed_by_user_id", None) for entry in history_entries))
     return merge_timeline_items(
-        _serialize_thread(db, ticket_id=ticket_id),
+        _serialize_thread(db, ticket_id=ticket_id, ui_locale=ui_locale),
         serialize_status_changes(
             history_entries,
-            status_label=ops_status_label,
-            actor_label=ops_author_label,
-            summary_style="ops",
+            status_label=lambda status: ops_status_label(status, ui_locale),
+            actor_label=lambda author_type: ops_author_label(author_type, ui_locale),
+            actor_role_suffix_label=lambda author_type: ops_role_suffix_label(author_type, ui_locale),
+            status_summary=lambda from_status_label, to_status_label: ops_status_change_summary(
+                from_status_label,
+                to_status_label,
+                ui_locale,
+            ),
+            lane_label=timeline_lane_label("status", ui_locale),
             user_display_names={user_id: user.display_name for user_id, user in users_by_id.items()},
         ),
     )
@@ -317,7 +339,13 @@ def _default_public_reply_status(*, ticket: Ticket, current_user: User) -> str:
     return "waiting_on_user"
 
 
-def _ticket_detail_context(db: Session, *, ticket: Ticket, current_user: User) -> dict[str, object]:
+def _ticket_detail_context(
+    db: Session,
+    *,
+    ticket: Ticket,
+    current_user: User,
+    ui_locale: str = DEFAULT_UI_LOCALE,
+) -> dict[str, object]:
     pending_draft = _load_pending_draft(db, ticket_id=ticket.id)
     latest_run = _load_latest_run(db, ticket_id=ticket.id)
     latest_analysis_run = _load_latest_analysis_run(db, ticket_id=ticket.id)
@@ -334,7 +362,7 @@ def _ticket_detail_context(db: Session, *, ticket: Ticket, current_user: User) -
         "route_target_display": present_ticket_route_target(ticket),
         "creator": creator,
         "assignee": assignee,
-        "activity_timeline": _build_ops_activity_timeline(db, ticket_id=ticket.id),
+        "activity_timeline": _build_ops_activity_timeline(db, ticket_id=ticket.id, ui_locale=ui_locale),
         "ops_users": _load_ops_users(db),
         "status_options": _OPS_FILTERABLE_STATUSES,
         "draft_reply_status_options": _OPS_DRAFT_REPLY_STATUSES,
@@ -429,6 +457,7 @@ def ops_create_user(
                     "users": _load_users_for_admin(db),
                     "allowed_new_roles": _allowed_new_user_roles(current_user),
                 },
+                ui_switch_path="/ops/users",
             ),
             status_code=status.HTTP_400_BAD_REQUEST,
         )
@@ -480,7 +509,6 @@ def ops_board(
             **_ops_filter_context(db, current_user=current_user, filters=filters),
             "filters_action": "/ops/board",
             "filters_target_id": "ops-results",
-            "ops_status_label": ops_status_label,
         },
     )
     return _template_or_partial_response(
@@ -499,6 +527,7 @@ def ops_ticket_detail(
     auth_session=Depends(get_required_auth_session),
     db: Session = Depends(db_session_dependency),
 ):
+    ui_locale = resolve_ui_locale(request)
     ticket = _load_ops_ticket_or_404(db, reference=reference)
     upsert_ticket_view(db, user_id=current_user.id, ticket_id=ticket.id)
     db.commit()
@@ -509,7 +538,8 @@ def ops_ticket_detail(
             request=request,
             current_user=current_user,
             auth_session=auth_session,
-            extra=_ticket_detail_context(db, ticket=ticket, current_user=current_user),
+            extra=_ticket_detail_context(db, ticket=ticket, current_user=current_user, ui_locale=ui_locale),
+            ui_locale=ui_locale,
         ),
     )
 

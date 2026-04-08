@@ -425,7 +425,7 @@ def test_validate_csrf_token_rejects_mismatch():
 def test_session_expiry_and_requester_status_mapping(tmp_path):
     pytest.importorskip("fastapi")
     pytest.importorskip("argon2")
-    from app.ui import REQUESTER_AUTHOR_LABELS, REQUESTER_STATUS_LABELS
+    from app.i18n import requester_author_label, requester_status_label
     from shared.security import calculate_session_expiry, utc_now
 
     settings = _make_settings(tmp_path)
@@ -436,15 +436,15 @@ def test_session_expiry_and_requester_status_mapping(tmp_path):
 
     assert int((remember_expiry - now).total_seconds()) == 30 * 24 * 60 * 60
     assert int((default_expiry - now).total_seconds()) == 12 * 60 * 60
-    assert REQUESTER_STATUS_LABELS["new"] == "Reviewing"
-    assert REQUESTER_STATUS_LABELS["waiting_on_user"] == "Waiting for your reply"
-    assert REQUESTER_AUTHOR_LABELS["dev_ti"] == "Team"
+    assert requester_status_label("new") == "Reviewing"
+    assert requester_status_label("waiting_on_user") == "Waiting for your reply"
+    assert requester_author_label("dev_ti") == "Team"
 
 
 def test_requester_routes_source_uses_custom_auth_and_explicit_multipart_limits():
     source = Path("app/routes_requester.py").read_text(encoding="utf-8")
     upload_source = Path("app/uploads.py").read_text(encoding="utf-8")
-    ui_source = Path("app/ui.py").read_text(encoding="utf-8")
+    i18n_source = Path("app/i18n.py").read_text(encoding="utf-8")
     template_source = Path("app/templates/requester_ticket_detail.html").read_text(encoding="utf-8")
 
     assert '"/app/tickets/{reference}/reply"' in source
@@ -452,7 +452,7 @@ def test_requester_routes_source_uses_custom_auth_and_explicit_multipart_limits(
     assert "require_requester_user" in source
     assert "MULTIPART_PART_SIZE_SLACK_BYTES" in upload_source
     assert "max_part_size=settings.max_image_bytes + MULTIPART_PART_SIZE_SLACK_BYTES" in upload_source
-    assert '"dev_ti": "Team"' in ui_source
+    assert "requester_author_label" in i18n_source
     assert "build_author_label(" in source
     assert "_build_requester_timeline" in source
     assert "item.author_label" in template_source
@@ -481,7 +481,7 @@ def test_ops_user_management_routes_and_role_limits_are_present():
     assert '"/ops/users/create"' in source
     assert "if actor.role == \"admin\"" in source
     assert "return (\"requester\",)" in source
-    assert "Create user" in template_source
+    assert 't("ops.users.create_heading")' in template_source
     assert "/ops/users" in base_template_source
 
 

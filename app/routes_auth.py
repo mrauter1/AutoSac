@@ -14,7 +14,8 @@ from app.auth import (
     get_required_auth_session,
     validate_csrf_token,
 )
-from app.ui import build_template_context, post_login_redirect_path, sanitize_next_path, templates
+from app.i18n import UI_LOCALE_COOKIE_MAX_AGE, UI_LOCALE_COOKIE_NAME, normalize_ui_locale
+from app.ui import build_template_context, post_login_redirect_path, sanitize_next_path, sanitize_relative_path, templates
 from shared.config import Settings
 from shared.contracts import PREAUTH_LOGIN_COOKIE_NAME
 from shared.db import db_session_dependency
@@ -187,4 +188,30 @@ def logout_action(
     response = RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
     end_user_session(request=request, response=response, db=db)
     db.commit()
+    return response
+
+
+@router.get("/ui-language")
+def switch_ui_language(
+    locale: str,
+    request: Request,
+    next: str | None = None,
+    settings: Settings = Depends(get_settings_dependency),
+):
+    response = RedirectResponse(
+        sanitize_relative_path(next, allow_login=True) or "/app",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+    normalized_locale = normalize_ui_locale(locale)
+    if normalized_locale is not None:
+        response.set_cookie(
+            key=UI_LOCALE_COOKIE_NAME,
+            value=normalized_locale,
+            httponly=False,
+            samesite="lax",
+            secure=settings.secure_cookies,
+            path="/",
+            max_age=UI_LOCALE_COOKIE_MAX_AGE,
+            expires=UI_LOCALE_COOKIE_MAX_AGE,
+        )
     return response

@@ -218,6 +218,7 @@ class AIRun(Base):
         CheckConstraint(f"status IN {_enum_sql(AI_RUN_STATUSES)}", name="ai_runs_status"),
         CheckConstraint(f"triggered_by IN {_enum_sql(AI_RUN_TRIGGERS)}", name="ai_runs_triggered_by"),
         Index("ix_ai_runs_status_created_at", "status", "created_at"),
+        Index("ix_ai_runs_status_last_heartbeat_at", "status", "last_heartbeat_at"),
         Index("ix_ai_runs_ticket_id_created_at_desc", "ticket_id", text("created_at DESC")),
         Index(
             "uq_ai_runs_active_ticket",
@@ -246,8 +247,13 @@ class AIRun(Base):
     final_output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     stdout_jsonl_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     stderr_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    worker_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    worker_instance_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recovered_from_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    recovery_attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
 

@@ -1,14 +1,14 @@
 {% extends "base.html" %}
 
-{% block title %}Ops Board | Stage 1 AI Triage{% endblock %}
+{% block title %}{{ t("ops.board.heading") }} | {{ t("brand.name") }}{% endblock %}
 
 {% block body %}
 <section class="page-header">
   <div>
-    <p class="eyebrow">Dev/TI view</p>
-    <h1>Ops board</h1>
+    <p class="eyebrow">{{ t("eyebrow.dev_ti_view") }}</p>
+    <h1>{{ t("ops.board.heading") }}</h1>
   </div>
-  <a class="button button--ghost" href="/ops">Open list view</a>
+  <a class="button button--ghost" href="/ops">{{ t("button.open_list_view") }}</a>
 </section>
 
 {% include "ops_filters.html" %}

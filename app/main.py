@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import browser_login_redirect, should_redirect_browser_to_login
+from app.i18n import resolve_ui_locale, translate_error_text
 from app.routes_auth import router as auth_router
 from app.routes_ops import router as ops_router
 from app.routes_requester import router as requester_router
@@ -77,7 +78,16 @@ def create_app() -> FastAPI:
     async def handle_http_exception(request: Request, exc: HTTPException):
         if should_redirect_browser_to_login(request, exc.status_code):
             return browser_login_redirect(request)
-        return await http_exception_handler(request, exc)
+        translated_exc = exc
+        if isinstance(exc.detail, str):
+            translated_detail = translate_error_text(exc.detail, resolve_ui_locale(request))
+            if translated_detail != exc.detail:
+                translated_exc = HTTPException(
+                    status_code=exc.status_code,
+                    detail=translated_detail,
+                    headers=exc.headers,
+                )
+        return await http_exception_handler(request, translated_exc)
 
     return app
 

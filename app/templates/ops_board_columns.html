@@ -14,24 +14,24 @@
         <div class="ticket-card__meta">
           <span class="ticket-ref">{{ ticket.reference }}</span>
           {% if ticket.urgent %}
-          <span class="urgent-pill">Urgent</span>
+          <span class="urgent-pill">{{ t("common.urgent") }}</span>
           {% endif %}
           {% if row.updated_for_user %}
-          <span class="updated-pill">Updated</span>
+          <span class="updated-pill">{{ t("common.updated") }}</span>
           {% endif %}
         </div>
         <h3>{{ ticket.title }}</h3>
-        <p class="muted">{{ row.creator.display_name if row.creator else "Unknown requester" }}</p>
+        <p class="muted">{{ row.creator.display_name if row.creator else t("ops.board.unknown_requester") }}</p>
         {% if row.route_target_display.id %}
         <p class="muted">{{ row.route_target_display.label }}</p>
         {% endif %}
         {% if row.pending_draft %}
-        <p class="muted">Pending draft approval</p>
+        <p class="muted">{{ t("ops.board.pending_draft_approval") }}</p>
         {% endif %}
       </a>
       {% else %}
       <div class="panel panel--quiet">
-        <p class="muted">No tickets</p>
+        <p class="muted">{{ t("ops.board.no_tickets") }}</p>
       </div>
       {% endfor %}
     </div>

@@ -220,11 +220,15 @@ def test_env_example_and_readme_capture_acceptance_contract():
         "APP_BASE_URL",
         "APP_SECRET_KEY",
         "DATABASE_URL",
+        "UI_DEFAULT_LOCALE",
         "CODEX_BIN",
         "CODEX_API_KEY",
         "CODEX_MODEL",
         "CODEX_TIMEOUT_SECONDS",
         "WORKER_POLL_SECONDS",
+        "WORKER_HEARTBEAT_SECONDS",
+        "AI_RUN_STALE_TIMEOUT_SECONDS",
+        "AI_RUN_MAX_RECOVERY_ATTEMPTS",
         "AUTO_SUPPORT_REPLY_MIN_CONFIDENCE",
         "AUTO_CONFIRM_INTENT_MIN_CONFIDENCE",
         "MAX_IMAGES_PER_MESSAGE",
@@ -273,6 +277,7 @@ def _script_env(tmp_path: Path) -> dict[str, str]:
             "APP_BASE_URL": "http://localhost:8000",
             "APP_SECRET_KEY": "test-secret",
             "DATABASE_URL": f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}",
+            "UI_DEFAULT_LOCALE": "pt-BR",
             "UPLOADS_DIR": str(uploads_dir),
             "TRIAGE_WORKSPACE_DIR": str(workspace_dir),
             "REPO_MOUNT_DIR": str(repo_mount_dir),
@@ -364,6 +369,7 @@ def test_get_settings_allows_missing_codex_api_key(monkeypatch, tmp_path):
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
     monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}")
+    monkeypatch.setenv("UI_DEFAULT_LOCALE", "pt-BR")
     monkeypatch.setenv("UPLOADS_DIR", str(uploads_dir))
     monkeypatch.setenv("TRIAGE_WORKSPACE_DIR", str(workspace_dir))
     monkeypatch.setenv("REPO_MOUNT_DIR", str(workspace_dir / "app"))
@@ -386,6 +392,7 @@ def test_get_settings_allows_missing_codex_api_key(monkeypatch, tmp_path):
     settings = get_settings()
 
     assert settings.codex_api_key is None
+    assert settings.default_ui_locale == "pt-BR"
     get_settings.cache_clear()
 
 
