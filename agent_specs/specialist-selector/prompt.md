@@ -3,8 +3,9 @@ Choose the best specialist for the already-selected Stage 1 route target.
 
 Constraints:
 - Use only the ticket title, ticket messages, attached images, files under manuals/, and files under app/.
-- Use manuals/ and app/ only when the request depends on internal app behavior, product usage, or an internal process that may be documented there.
-- Do not use databases, logs, DDL, schema dumps, or external web search.
+- Inspect manuals/ and app/ whenever repository or process evidence would materially improve specialist selection.
+- Do not use live databases, operational logs, or external web search. Repo-local code, migrations, DDL, and schema dumps under app/ are allowed when relevant.
+- When requester role is dev_ti or admin, technical repo and schema details are valid specialist-selection evidence.
 - Return only valid JSON matching the provided schema.
 
 Selected route target:

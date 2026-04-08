@@ -391,6 +391,8 @@ def test_render_router_prompt_includes_generated_route_target_catalog() -> None:
     prompt = render_agent_prompt(load_agent_spec("router"), context=_make_context())
 
     assert "Enabled route targets:" in prompt
+    assert "Repo-local code, migrations, DDL, and schema dumps under app/ are allowed when relevant." in prompt
+    assert "technical repo and schema details are valid routing evidence." in prompt
     assert "- id: support" in prompt
     assert "- id: access_config" in prompt
     assert "- id: business_analyst" in prompt
@@ -441,6 +443,9 @@ def test_render_specialist_prompt_includes_route_target_context() -> None:
     assert "Perform every Stage 1-safe probe you can before concluding." in prompt
     assert "When the exact fix or root cause cannot be confirmed" in prompt
     assert "Make it warm, respectful, empathetic, and concise." in prompt
+    assert "request lacks enough context to understand the problem" in prompt
+    assert "public_reply_markdown may include technical investigation details" in prompt
+    assert "set publish_mode_recommendation to auto_publish" in prompt
     assert "Put clarifying questions in public_reply_markdown" in prompt
     assert "When asking clarifying questions, combine them with the best current understanding" in prompt
     assert "Reserve manual_only for cases where requester-facing guidance would be materially unsafe" in prompt
@@ -469,6 +474,8 @@ def test_render_software_architect_prompt_includes_expected_assessment_structure
     assert "Route target ID: software_architect" in prompt
     assert "Perform every Stage 1-safe probe you can before concluding." in prompt
     assert "Make it warm, respectful, empathetic, and concise." in prompt
+    assert "Repo-local code, migrations, DDL, and schema dumps under app/ are allowed when relevant." in prompt
+    assert "set publish_mode_recommendation to auto_publish" in prompt
 
 
 def test_render_agent_prompt_raises_for_unknown_placeholder() -> None:

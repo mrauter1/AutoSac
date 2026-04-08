@@ -422,7 +422,7 @@ def test_bootstrap_web_and_worker_scripts_validate_end_to_end(tmp_path):
     _create_runtime_schema(db_path)
 
     bootstrap = _run_script(["scripts/bootstrap_workspace.py"], env=env)
-    assert '"bootstrap_version": "stage1-v4"' in bootstrap.stdout
+    assert '"bootstrap_version": "stage1-v5"' in bootstrap.stdout
     with sqlite3.connect(db_path) as connection:
         rows = dict(connection.execute("SELECT key, value_json FROM system_state").fetchall())
     assert "bootstrap_version" in rows

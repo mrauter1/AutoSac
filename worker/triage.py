@@ -252,33 +252,35 @@ def _extract_public_reply_markdown(payload: dict[str, object]) -> str:
     return ""
 
 
-def _override_internal_requester_outcome(
+def _override_internal_requester_publication(
     context: LoadedTicketContext,
     *,
     outcome: ResolvedRunOutcome,
+    final_output_contract: str,
     final_output_json: dict[str, object],
-) -> ResolvedRunOutcome:
-    if not _is_internal_requester(context) or outcome.run_status != "human_review":
-        return outcome
+) -> tuple[ResolvedRunOutcome, dict[str, object]]:
+    if not _is_internal_requester(context):
+        return outcome, final_output_json
 
     public_reply_markdown = _extract_public_reply_markdown(final_output_json)
-    if public_reply_markdown:
-        return ResolvedRunOutcome(
+    if not public_reply_markdown:
+        return outcome, final_output_json
+
+    normalized_final_output_json = final_output_json
+    if final_output_contract == "specialist_result":
+        normalized_final_output_json = dict(final_output_json)
+        normalized_final_output_json["publish_mode_recommendation"] = "auto_publish"
+
+    return (
+        ResolvedRunOutcome(
             run_status="succeeded",
             effective_publication_mode="auto_publish",
             public_reply_markdown=public_reply_markdown,
             internal_note_markdown=outcome.internal_note_markdown,
             next_status="waiting_on_user",
             last_ai_action="auto_public_reply",
-        )
-
-    return ResolvedRunOutcome(
-        run_status="succeeded",
-        effective_publication_mode="manual_only",
-        public_reply_markdown="",
-        internal_note_markdown=outcome.internal_note_markdown,
-        next_status="ai_triage",
-        last_ai_action="manual_only",
+        ),
+        normalized_final_output_json,
     )
 
 
@@ -335,9 +337,10 @@ def _apply_success_result(
                 final_model_name = pipeline_result.specialist_step.prepared.model_name
                 requester_language = specialist_result.requester_language
 
-            outcome = _override_internal_requester_outcome(
+            outcome, final_output_json = _override_internal_requester_publication(
                 context,
                 outcome=outcome,
+                final_output_contract=final_output_contract,
                 final_output_json=final_output_json,
             )
 

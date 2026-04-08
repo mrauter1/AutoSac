@@ -807,7 +807,7 @@ def test_create_admin_script_reports_matching_admin_as_success(monkeypatch, caps
 
     create_admin.main()
 
-    assert observed["defaults"] == ("db", "stage1-v4")
+    assert observed["defaults"] == ("db", "stage1-v5")
     assert capsys.readouterr().out.strip() == "Admin user admin@example.com already matched the requested bootstrap state"
 
 
@@ -842,7 +842,7 @@ def test_bootstrap_workspace_script_seeds_system_state_defaults(monkeypatch, cap
     monkeypatch.setattr(
         bootstrap_script,
         "workspace_contract_snapshot",
-        lambda resolved_settings: {"bootstrap_version": "stage1-v4", "workspace_dir": str(resolved_settings.triage_workspace_dir)},
+        lambda resolved_settings: {"bootstrap_version": "stage1-v5", "workspace_dir": str(resolved_settings.triage_workspace_dir)},
     )
 
     bootstrap_script.main()
@@ -851,10 +851,10 @@ def test_bootstrap_workspace_script_seeds_system_state_defaults(monkeypatch, cap
         ("ensure_uploads_dir", settings),
         ("bootstrap_workspace", settings),
         ("session_scope", settings),
-        ("ensure_system_state_defaults", "db", "stage1-v4"),
+        ("ensure_system_state_defaults", "db", "stage1-v5"),
     ]
     assert json.loads(capsys.readouterr().out) == {
-        "bootstrap_version": "stage1-v4",
+        "bootstrap_version": "stage1-v5",
         "workspace_dir": str(settings.triage_workspace_dir),
     }
 

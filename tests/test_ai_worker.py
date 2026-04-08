@@ -1088,10 +1088,10 @@ def test_apply_success_result_internal_requester_manual_only_with_public_reply_a
     assert observed["public"] == ("waiting_on_user", "auto_public_reply", "Share this directly with the internal requester.")
     assert run.status == "succeeded"
     assert run.final_output_contract == "specialist_result"
-    assert run.final_output_json["publish_mode_recommendation"] == "manual_only"
+    assert run.final_output_json["publish_mode_recommendation"] == "auto_publish"
 
 
-def test_apply_success_result_internal_requester_manual_only_without_public_reply_stays_in_ai_triage(monkeypatch, tmp_path):
+def test_apply_success_result_internal_requester_without_public_reply_keeps_normal_manual_review_flow(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
     ticket = SimpleNamespace(
@@ -1166,7 +1166,7 @@ def test_apply_success_result_internal_requester_manual_only_without_public_repl
 
     assert observed["internal"] == 1
     assert observed["route"] == ("ai_triage", "manual_only")
-    assert run.status == "succeeded"
+    assert run.status == "human_review"
     assert run.final_output_contract == "specialist_result"
 
 
@@ -1474,9 +1474,10 @@ def test_apply_success_result_internal_requester_human_assist_with_public_reply_
     assert observed["public"] == ("waiting_on_user", "auto_public_reply")
     assert run.status == "succeeded"
     assert run.final_output_contract == "specialist_result"
+    assert run.final_output_json["publish_mode_recommendation"] == "auto_publish"
 
 
-def test_apply_success_result_internal_requester_human_assist_none_succeeds_without_human_review(monkeypatch, tmp_path):
+def test_apply_success_result_internal_requester_human_assist_without_public_reply_keeps_human_review(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
     ticket = SimpleNamespace(
@@ -1551,11 +1552,94 @@ def test_apply_success_result_internal_requester_human_assist_none_succeeds_with
     )
 
     assert observed["internal"] == 1
-    assert observed["route"] == ("ai_triage", "manual_only")
-    assert run.status == "succeeded"
+    assert observed["route"] == ("waiting_on_dev_ti", "manual_only")
+    assert run.status == "human_review"
     assert run.final_agent_spec_id is None
     assert run.final_output_contract == "human_handoff_result"
     assert run.final_output_json["route_target_id"] == "manual_review"
+
+
+def test_apply_success_result_internal_requester_software_architect_auto_publishes_despite_route_policy(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000007C",
+        title="Need architecture direction",
+        status="ai_triage",
+        urgent=False,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(
+        ticket=ticket,
+        requester_role="admin",
+        requester_can_view_internal_messages=True,
+    )
+    publication_hash = symbols["build_requester_visible_fingerprint"](context)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash=publication_hash,
+        ended_at=None,
+        error_text=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        model_name=None,
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {"public": None}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: observed.__setitem__("public", (kwargs["next_status"], kwargs["last_ai_action"])),
+    )
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not draft")))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not route manually")))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(
+            route_target_id="software_architect",
+            kind="direct_ai",
+            mode="fixed",
+            specialist_id="software-architect",
+            allow_auto_publish=False,
+        ),
+        specialist_payload=_specialist_payload(
+            publish_mode_recommendation="draft_for_human",
+            public_reply_markdown="Here is the recommended architecture change.",
+            internal_note_markdown="",
+        ),
+        specialist_spec_id="software-architect",
+    )
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
+
+    assert observed["public"] == ("waiting_on_user", "auto_public_reply")
+    assert run.status == "succeeded"
+    assert run.final_agent_spec_id == "software-architect"
+    assert run.final_output_json["publish_mode_recommendation"] == "auto_publish"
 
 
 def test_apply_success_result_direct_ai_manual_only_does_not_create_draft_when_policy_disables_drafts(monkeypatch, tmp_path):
@@ -2344,7 +2428,7 @@ def test_emit_worker_heartbeat_initializes_system_state_defaults(monkeypatch, tm
     bootstrap_state = fake_db.objects[("SystemState", "bootstrap_version")]
     heartbeat_state = fake_db.objects[("SystemState", "worker_heartbeat")]
     assert fake_db.flush_calls == 1
-    assert bootstrap_state.value_json == {"version": "stage1-v4"}
+    assert bootstrap_state.value_json == {"version": "stage1-v5"}
     assert heartbeat_state.value_json["status"] == "alive"
     assert heartbeat_state.value_json["worker_pid"] == 2222
     assert heartbeat_state.value_json["worker_instance_id"] == "worker-test"
@@ -2376,7 +2460,7 @@ def test_emit_worker_heartbeat_updates_stale_bootstrap_version(monkeypatch, tmp_
     )
 
     bootstrap_state = fake_db.objects[("SystemState", "bootstrap_version")]
-    assert bootstrap_state.value_json == {"version": "stage1-v4"}
+    assert bootstrap_state.value_json == {"version": "stage1-v5"}
 
 
 def test_emit_worker_heartbeat_updates_active_run_last_heartbeat(monkeypatch, tmp_path):
