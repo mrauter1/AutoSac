@@ -329,7 +329,7 @@ The implementation MUST add and document these environment variables:
 - `SLACK_DELIVERY_STALE_LOCK_SECONDS`
   integer greater than `SLACK_HTTP_TIMEOUT_SECONDS`; age after which a `processing` target row is treated as abandoned and recovered for retry
 
-### 8.2 `SLACK_TARGETS_JSON` Shape
+### 8.2 `SLACK_TARGETS_JSON` Shape and Validity
 
 `SLACK_TARGETS_JSON` MUST be a JSON object with this exact structure:
 
@@ -343,36 +343,55 @@ The implementation MUST add and document these environment variables:
 ```
 
 Rules:
+- `SLACK_TARGETS_JSON` MUST parse successfully as a JSON object. Any other JSON type is invalid.
 - top-level keys are `target_name`
 - `target_name` MUST match `^[a-z0-9_-]+$`
+- each value MUST be a JSON object
 - each value MUST contain:
   - `enabled`: boolean
-  - `webhook_url`: non-empty string
+  - `webhook_url`: string
+- additional keys MAY be present but MUST be ignored in Phase 1
+- `webhook_url` MUST be a syntactically valid absolute HTTPS URL with a non-empty host
+- `webhook_url` MUST NOT be blank, whitespace-only, use `http` or any non-HTTPS scheme, contain URL userinfo, or contain a fragment
+- values such as `foo` and `http://example.test/hook` are invalid and MUST be treated as configuration errors, not as per-row delivery failures
+- implementations MUST NOT silently trim, normalize, or repair malformed `webhook_url` values
 - `webhook_url` is secret configuration and MUST NOT be stored in database rows or logs
+- any violation of this section makes Slack configuration globally invalid when Section 8.3 says validation is required
 
 ### 8.3 Routing Rules
 
 - Phase 1 routes each eligible event to at most one target: `SLACK_DEFAULT_TARGET_NAME`.
 - The schema supports multiple named targets, but multi-target fan-out is out of scope for this rollout.
 - An `integration_events` row MUST always be created for the emitted business fact, even when Slack is disabled.
-- `SLACK_DEFAULT_TARGET_NAME` is required only when `SLACK_ENABLED = true` and at least one `SLACK_NOTIFY_*` flag is true.
-- An `integration_event_targets` row MUST be created only when all of the following are true at emission time:
-  - `SLACK_ENABLED = true`
-  - the event-type-specific `SLACK_NOTIFY_*` flag for the event is true
-  - `SLACK_DEFAULT_TARGET_NAME` exists in `SLACK_TARGETS_JSON`
-  - the selected target config has `enabled = true`
 - Event-type flag mapping is fixed in Phase 1:
   - `ticket.created` uses `SLACK_NOTIFY_TICKET_CREATED`
   - `ticket.public_message_added` uses `SLACK_NOTIFY_PUBLIC_MESSAGE_ADDED`
   - `ticket.status_changed` uses `SLACK_NOTIFY_STATUS_CHANGED`
+- `SLACK_DEFAULT_TARGET_NAME` is required only when `SLACK_ENABLED = true` and at least one `SLACK_NOTIFY_*` flag is true.
+- When `SLACK_ENABLED = true`, Slack configuration is globally invalid if any of the following are true:
+  - `SLACK_TARGETS_JSON` violates Section 8.2
+  - at least one `SLACK_NOTIFY_*` flag is true and `SLACK_DEFAULT_TARGET_NAME` is missing, blank, does not match `^[a-z0-9_-]+$`, or does not name an entry present in `SLACK_TARGETS_JSON`
+- At emission time, exactly one routing outcome MUST apply in this precedence order:
+  - `suppressed_slack_disabled`: `SLACK_ENABLED = false`
+  - `suppressed_invalid_config`: `SLACK_ENABLED = true` and Slack configuration is globally invalid
+  - `suppressed_notify_disabled`: the event-type-specific `SLACK_NOTIFY_*` flag for the event is false
+  - `suppressed_target_disabled`: the selected `SLACK_DEFAULT_TARGET_NAME` exists and its target config has `enabled = false`
+  - `created`: create exactly one `integration_event_targets` row for `SLACK_DEFAULT_TARGET_NAME`
+- Only the `created` routing outcome may insert an `integration_event_targets` row.
+- `suppressed_invalid_config` MUST still insert the `integration_events` row and required link rows, but it MUST NOT create or mutate any `integration_event_targets` row.
 - Event-type notification flags gate target creation for new events only. They MUST NOT delete or rewrite existing target rows.
 - Changing `SLACK_TARGETS_JSON` or `SLACK_DEFAULT_TARGET_NAME` later MUST NOT delete, rewrite, or add a second target row to an event that already has one target row.
 - If a later duplicate emission reuses an existing event with zero target rows, target-row repair MUST follow Section 6.1 and can create one row only for the current `SLACK_DEFAULT_TARGET_NAME`.
 - Enabling Slack or enabling an event type later MUST NOT backfill old ticket activity. Only newly emitted events after the config change may create target rows.
 - If `SLACK_ENABLED` later becomes `false`, existing `pending` and `failed` target rows MUST remain stored but unclaimed until Slack is re-enabled, because the runtime is disabled globally.
-- If `SLACK_ENABLED` remains `true` but a stored row's `target_name` is missing from the current `SLACK_TARGETS_JSON` or present with `enabled = false`, the next delivery attempt for that row MUST transition it to `dead_letter` without making any outbound HTTP request, as defined in Section 9.4.
+- If `SLACK_ENABLED` remains `true`, Slack configuration is otherwise valid, and a stored row's `target_name` is missing from the current `SLACK_TARGETS_JSON` or present with `enabled = false`, the next delivery attempt for that row MUST transition it to `dead_letter` without making any outbound HTTP request, as defined in Section 9.4.
 - Later restoring a previously missing or disabled target MUST NOT automatically revive rows already in `dead_letter`; terminal rows remain terminal unless an operator intervenes outside this Phase 1 contract.
-- If Slack config is globally invalid at runtime, including malformed JSON, missing required keys, or invalid target-name/webhook values, the implementation MUST log the configuration error and behave as if Slack delivery were disabled. Existing rows MUST remain unchanged and unclaimed until configuration becomes valid again. Core ticket behavior MUST continue to operate.
+- If Slack configuration is globally invalid, the implementation MUST behave as follows:
+  - new emissions MUST use the `suppressed_invalid_config` outcome
+  - the delivery runtime MUST behave as if Slack delivery were disabled for claim/send purposes
+  - existing `pending` and `failed` target rows MUST remain unchanged and unclaimed until configuration becomes valid again
+  - no row may be dead-lettered, retried, or HTTP-sent solely because global configuration is invalid
+  - core ticket behavior MUST continue to operate
 
 ## 9. Delivery Runtime Contract
 
@@ -383,6 +402,7 @@ Rules:
 - It MUST NOT serialize behind the main AI-run polling loop.
 - It MUST use independent DB sessions/transactions from AI-run work.
 - When `SLACK_ENABLED = false`, the delivery runtime MUST NOT claim or send target rows.
+- When Slack configuration is globally invalid under Section 8.3, the delivery runtime MUST NOT claim or send target rows.
 
 ### 9.2 Claiming Work
 
@@ -514,9 +534,13 @@ The exact wording MAY vary, but the required information content above MUST be p
   - send success
   - retry scheduling
   - dead-letter transition
-  - invalid Slack configuration
-- Emission-path logs MUST include at least `event_id`, `event_type`, `aggregate_type`, `aggregate_id`, and `dedupe_key`. They MUST also indicate whether a target row was created in the same transaction. If no `integration_event_targets` row exists for that emission attempt, target-row fields such as `target_name`, `delivery_status`, `attempt_count`, and `locked_by` MUST be omitted rather than fabricated.
-- Delivery-runtime logs MUST include at least `event_id`, `target_name`, `delivery_status`, `attempt_count`, and `locked_by`, plus HTTP status or failure class when applicable.
+  - runtime suppression due to invalid Slack configuration
+- Emission-path logs MUST include at least `event_id`, `event_type`, `aggregate_type`, `aggregate_id`, `dedupe_key`, and `routing_result`, where `routing_result` is one of the Section 8.3 routing outcomes.
+- Emission-path logs with `routing_result = 'created'` or `routing_result = 'suppressed_target_disabled'` MUST include `target_name`.
+- Emission-path logs with `routing_result = 'suppressed_invalid_config'` MUST include a stable machine-readable `config_error_code` plus a sanitized `config_error_summary`. Those fields MUST distinguish, at minimum, JSON parse/type failure, invalid or missing default target selection, and invalid target entry or webhook URL.
+- If no `integration_event_targets` row exists for that emission attempt, target-row state fields such as `delivery_status`, `attempt_count`, and `locked_by` MUST be omitted rather than fabricated.
+- Delivery-runtime row-state logs for target claim, send success, retry scheduling, and dead-letter transition MUST include at least `event_id`, `target_name`, `delivery_status`, `attempt_count`, and `locked_by`, plus HTTP status or failure class when applicable.
+- Delivery-runtime invalid-config suppression logs MUST include at least `config_error_code` and a sanitized `config_error_summary`, and MUST indicate that row claiming was skipped for the poll cycle or equivalent runtime check. Because no row was claimed, these logs MUST omit row-state fields such as `event_id`, `target_name`, `delivery_status`, `attempt_count`, and `locked_by`.
 - Slack delivery failures MUST NOT mutate ticket domain tables beyond the already-committed integration rows.
 - No new UI is required in Phase 1. Operational visibility through SQL queries and worker logs is sufficient.
 
@@ -548,7 +572,9 @@ The implementation MUST include tests covering at least:
 - outbound HTTP timeouts after `SLACK_HTTP_TIMEOUT_SECONDS` are treated as retryable failures
 - stale `processing` rows are recoverable after worker restart by clearing the lock, preserving `attempt_count`, setting `delivery_status = failed`, and making the row immediately eligible again
 - `SLACK_ENABLED = false` still records `integration_events` but creates no new `integration_event_targets`
-- globally invalid Slack configuration behaves like global disablement for the runtime: no rows are claimed or mutated until config becomes valid again
+- malformed or non-HTTPS `webhook_url`, malformed `SLACK_TARGETS_JSON`, and missing, blank, invalid, or unmapped `SLACK_DEFAULT_TARGET_NAME` when `SLACK_ENABLED = true` and any `SLACK_NOTIFY_*` flag is true are global-invalid-config cases: new emissions still record `integration_events` but create no target rows, and existing `pending`/`failed` rows remain unclaimed and unmutated until configuration becomes valid again
+- emission-path logs distinguish `suppressed_invalid_config` from `suppressed_slack_disabled`, `suppressed_notify_disabled`, and `suppressed_target_disabled`
+- delivery-runtime invalid-config suppression logs omit row-state fields because no row was claimed
 
 ## 13. Rollout Sequence
 
