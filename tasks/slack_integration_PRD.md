@@ -383,13 +383,13 @@ Rules:
 - Changing `SLACK_TARGETS_JSON` or `SLACK_DEFAULT_TARGET_NAME` later MUST NOT delete, rewrite, or add a second target row to an event that already has one target row.
 - If a later duplicate emission reuses an existing event with zero target rows, target-row repair MUST follow Section 6.1 and can create one row only for the current `SLACK_DEFAULT_TARGET_NAME`.
 - Enabling Slack or enabling an event type later MUST NOT backfill old ticket activity. Only newly emitted events after the config change may create target rows.
-- If `SLACK_ENABLED` later becomes `false`, existing `pending` and `failed` target rows MUST remain stored but unclaimed until Slack is re-enabled, because the runtime is disabled globally.
+- If `SLACK_ENABLED` later becomes `false`, existing `pending`, `failed`, and `processing` target rows MUST remain stored, unchanged, and unclaimed until Slack is re-enabled. While Slack is disabled globally, the runtime MUST NOT perform stale-lock recovery or any other row-state mutation.
 - If `SLACK_ENABLED` remains `true`, Slack configuration is otherwise valid, and a stored row's `target_name` is missing from the current `SLACK_TARGETS_JSON` or present with `enabled = false`, the next delivery attempt for that row MUST transition it to `dead_letter` without making any outbound HTTP request, as defined in Section 9.4.
 - Later restoring a previously missing or disabled target MUST NOT automatically revive rows already in `dead_letter`; terminal rows remain terminal unless an operator intervenes outside this Phase 1 contract.
 - If Slack configuration is globally invalid, the implementation MUST behave as follows:
   - new emissions MUST use the `suppressed_invalid_config` outcome
-  - the delivery runtime MUST behave as if Slack delivery were disabled for claim/send purposes
-  - existing `pending` and `failed` target rows MUST remain unchanged and unclaimed until configuration becomes valid again
+  - the delivery runtime MUST behave as if Slack delivery were disabled for claim, send, and stale-lock-recovery purposes
+  - existing `pending`, `failed`, and `processing` target rows MUST remain unchanged and unclaimed until configuration becomes valid again
   - no row may be dead-lettered, retried, or HTTP-sent solely because global configuration is invalid
   - core ticket behavior MUST continue to operate
 
@@ -401,8 +401,8 @@ Rules:
 - It MUST NOT run in the synchronous request path.
 - It MUST NOT serialize behind the main AI-run polling loop.
 - It MUST use independent DB sessions/transactions from AI-run work.
-- When `SLACK_ENABLED = false`, the delivery runtime MUST NOT claim or send target rows.
-- When Slack configuration is globally invalid under Section 8.3, the delivery runtime MUST NOT claim or send target rows.
+- When `SLACK_ENABLED = false`, the delivery runtime MUST NOT claim, send, or stale-lock-recover target rows.
+- When Slack configuration is globally invalid under Section 8.3, the delivery runtime MUST NOT claim, send, or stale-lock-recover target rows.
 
 ### 9.2 Claiming Work
 
@@ -466,7 +466,8 @@ Terminal failure:
 
 - A worker crash MUST NOT lose already-committed event rows or target rows.
 - `processing` rows abandoned by a crashed worker MUST be reclaimable.
-- The runtime MUST perform stale-lock recovery before each normal claim cycle, or on the same poll cadence, so stale rows do not remain `processing` indefinitely while the worker stays healthy.
+- Except while Section 8.3 or Section 9.1 globally suppresses Slack delivery, the runtime MUST perform stale-lock recovery before each normal claim cycle, or on the same poll cadence, so stale rows do not remain `processing` indefinitely while the worker stays healthy.
+- While Slack delivery is globally suppressed because `SLACK_ENABLED = false` or configuration is globally invalid, stale-lock recovery MUST NOT mutate `processing` rows. Those rows MUST remain unchanged until suppression ends.
 - A `processing` row MUST be treated as stale when `locked_at` is older than `SLACK_DELIVERY_STALE_LOCK_SECONDS` seconds.
 - Stale-lock recovery MUST set:
   - `delivery_status = 'failed'`
@@ -476,6 +477,7 @@ Terminal failure:
   - `next_attempt_at = now()`
 - Stale-lock recovery MUST preserve the current `attempt_count`. The recovered row becomes eligible for a fresh claim, and only that later fresh claim may increment `attempt_count` again.
 - Stale-lock recovery itself MUST NOT increment `attempt_count`.
+- When global suppression ends, the runtime MUST run stale-lock recovery before any new claim cycle that could otherwise skip those stale `processing` rows.
 
 ## 10. Slack Message Contract
 
@@ -540,7 +542,7 @@ The exact wording MAY vary, but the required information content above MUST be p
 - Emission-path logs with `routing_result = 'suppressed_invalid_config'` MUST include a stable machine-readable `config_error_code` plus a sanitized `config_error_summary`. Those fields MUST distinguish, at minimum, JSON parse/type failure, invalid or missing default target selection, and invalid target entry or webhook URL.
 - If no `integration_event_targets` row exists for that emission attempt, target-row state fields such as `delivery_status`, `attempt_count`, and `locked_by` MUST be omitted rather than fabricated.
 - Delivery-runtime row-state logs for target claim, send success, retry scheduling, and dead-letter transition MUST include at least `event_id`, `target_name`, `delivery_status`, `attempt_count`, and `locked_by`, plus HTTP status or failure class when applicable.
-- Delivery-runtime invalid-config suppression logs MUST include at least `config_error_code` and a sanitized `config_error_summary`, and MUST indicate that row claiming was skipped for the poll cycle or equivalent runtime check. Because no row was claimed, these logs MUST omit row-state fields such as `event_id`, `target_name`, `delivery_status`, `attempt_count`, and `locked_by`.
+- Delivery-runtime invalid-config suppression logs MUST include at least `config_error_code` and a sanitized `config_error_summary`, and MUST indicate that row claiming and stale-lock recovery were skipped for the poll cycle or equivalent runtime check. Because no row was claimed, these logs MUST omit row-state fields such as `event_id`, `target_name`, `delivery_status`, `attempt_count`, and `locked_by`.
 - Slack delivery failures MUST NOT mutate ticket domain tables beyond the already-committed integration rows.
 - No new UI is required in Phase 1. Operational visibility through SQL queries and worker logs is sufficient.
 
@@ -571,10 +573,11 @@ The implementation MUST include tests covering at least:
 - HTTP 3xx and non-retryable 4xx responses move the row to `dead_letter`
 - outbound HTTP timeouts after `SLACK_HTTP_TIMEOUT_SECONDS` are treated as retryable failures
 - stale `processing` rows are recoverable after worker restart by clearing the lock, preserving `attempt_count`, setting `delivery_status = failed`, and making the row immediately eligible again
-- `SLACK_ENABLED = false` still records `integration_events` but creates no new `integration_event_targets`
-- malformed or non-HTTPS `webhook_url`, malformed `SLACK_TARGETS_JSON`, and missing, blank, invalid, or unmapped `SLACK_DEFAULT_TARGET_NAME` when `SLACK_ENABLED = true` and any `SLACK_NOTIFY_*` flag is true are global-invalid-config cases: new emissions still record `integration_events` but create no target rows, and existing `pending`/`failed` rows remain unclaimed and unmutated until configuration becomes valid again
+- while `SLACK_ENABLED = false`, new emissions still record `integration_events` but create no new `integration_event_targets`, and existing `pending`/`failed`/`processing` rows remain unchanged because claim, send, and stale-lock recovery are suppressed
+- malformed or non-HTTPS `webhook_url`, malformed `SLACK_TARGETS_JSON`, and missing, blank, invalid, or unmapped `SLACK_DEFAULT_TARGET_NAME` when `SLACK_ENABLED = true` and any `SLACK_NOTIFY_*` flag is true are global-invalid-config cases: new emissions still record `integration_events` but create no target rows, and existing `pending`/`failed`/`processing` rows remain unchanged until configuration becomes valid again because claim, send, and stale-lock recovery are suppressed
+- once global suppression ends, stale `processing` rows are recovered under Section 9.5 before new claims proceed
 - emission-path logs distinguish `suppressed_invalid_config` from `suppressed_slack_disabled`, `suppressed_notify_disabled`, and `suppressed_target_disabled`
-- delivery-runtime invalid-config suppression logs omit row-state fields because no row was claimed
+- delivery-runtime invalid-config suppression logs omit row-state fields because no row was claimed and stale-lock recovery was also skipped
 
 ## 13. Rollout Sequence
 
