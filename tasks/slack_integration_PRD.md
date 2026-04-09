@@ -264,7 +264,7 @@ Common rules:
 - `message_id`: message UUID as a string
 - `message_author_type`: one of `requester`, `dev_ti`, `ai`, `system`
 - `message_source`: the public `ticket_messages.source` value for the message
-- `message_preview`: sanitized preview text
+- `message_preview`: normalized preview text for Slack rendering, as defined in Section 7.3
 
 `ticket.status_changed` MUST also contain:
 - `status_from`: previous status
@@ -275,8 +275,10 @@ Common rules:
 `message_preview` MUST be derived from the public message `body_text` using these rules:
 - normalize all internal whitespace runs to a single space
 - trim leading and trailing whitespace
-- truncate to `SLACK_MESSAGE_PREVIEW_MAX_CHARS`
+- if the normalized `body_text` length is less than or equal to `SLACK_MESSAGE_PREVIEW_MAX_CHARS`, store the entire normalized body as `message_preview`
+- if the normalized `body_text` length is greater than `SLACK_MESSAGE_PREVIEW_MAX_CHARS`, truncate to `SLACK_MESSAGE_PREVIEW_MAX_CHARS`
 - if truncation occurs, replace the tail with `...` so the final stored preview does not exceed the configured maximum
+- store `message_preview` as plain text in the payload snapshot; Slack-specific escaping is applied only when rendering `text` as required by Section 10
 
 `message_preview` MUST NOT include:
 - internal-only content
@@ -305,10 +307,14 @@ The implementation MUST add and document these environment variables:
   boolean gate for creating target rows for `ticket.status_changed`
 - `SLACK_MESSAGE_PREVIEW_MAX_CHARS`
   integer greater than or equal to 4 for `message_preview`
+- `SLACK_HTTP_TIMEOUT_SECONDS`
+  integer between 1 and 30 inclusive; maximum duration of one outbound Slack webhook request before it is treated as a timeout
 - `SLACK_DELIVERY_BATCH_SIZE`
   integer greater than or equal to 1; maximum number of target rows claimed in one delivery poll
 - `SLACK_DELIVERY_MAX_ATTEMPTS`
   integer greater than or equal to 1; maximum attempts before dead-lettering a retryable failure
+- `SLACK_DELIVERY_STALE_LOCK_SECONDS`
+  integer greater than `SLACK_HTTP_TIMEOUT_SECONDS`; age after which a `processing` target row is treated as abandoned and recovered for retry
 
 ### 8.2 `SLACK_TARGETS_JSON` Shape
 
@@ -343,7 +349,10 @@ Rules:
   - `SLACK_DEFAULT_TARGET_NAME` exists in `SLACK_TARGETS_JSON`
   - the selected target config has `enabled = true`
 - Event-type notification flags gate target creation for new events only. They MUST NOT delete or rewrite existing target rows.
+- Changing `SLACK_TARGETS_JSON` or `SLACK_DEFAULT_TARGET_NAME` later MUST NOT delete or rewrite existing target rows.
 - Enabling Slack or enabling an event type later MUST NOT backfill old ticket activity. Only newly emitted events after the config change may create target rows.
+- If `SLACK_ENABLED` later becomes `false`, existing `pending` and `failed` target rows MUST remain stored but unclaimed until Slack is re-enabled, because the runtime is disabled globally.
+- If `SLACK_ENABLED` remains `true` but a stored row's `target_name` is missing from the current `SLACK_TARGETS_JSON` or present with `enabled = false`, the next delivery attempt for that row MUST transition it to `dead_letter` without making any outbound HTTP request, as defined in Section 9.4.
 - If Slack config is invalid, the implementation MUST log the configuration error and behave as if Slack delivery were disabled. Core ticket behavior MUST continue to operate.
 
 ## 9. Delivery Runtime Contract
@@ -366,6 +375,7 @@ Claiming rules:
 - limit by `SLACK_DELIVERY_BATCH_SIZE`
 - on claim, set:
   - `delivery_status = 'processing'`
+  - `attempt_count = attempt_count + 1`
   - `locked_at = now()`
   - `locked_by = <diagnostic worker identifier>`
 
@@ -373,6 +383,7 @@ Claiming rules:
 
 - Delivery MUST render the Slack message from `payload_json` only.
 - For Phase 1, the sender MUST POST a JSON body of the form `{"text": "<rendered message>"}` to the configured webhook URL.
+- Each outbound webhook request MUST use `SLACK_HTTP_TIMEOUT_SECONDS` as a hard end-to-end timeout for connection and response completion.
 - The rendered message MUST stay within the behavioral rules in Section 10.
 
 ### 9.4 Success, Retry, and Dead Letter
@@ -387,28 +398,34 @@ Success:
   - `locked_by = null`
 
 Retryable failure:
-- transport errors, timeouts, HTTP 429, and HTTP 5xx MUST be treated as retryable
+- transport errors, timeouts after `SLACK_HTTP_TIMEOUT_SECONDS`, HTTP 429, and HTTP 5xx MUST be treated as retryable
 - on retryable failure:
-  - increment `attempt_count`
   - set `delivery_status = 'failed'`
   - set sanitized `last_error`
   - clear `locked_at` and `locked_by`
   - set `next_attempt_at` using bounded exponential backoff
-- if `attempt_count` reaches `SLACK_DELIVERY_MAX_ATTEMPTS`, the row MUST transition to `dead_letter` instead of `failed`
+- if the current `attempt_count` has reached `SLACK_DELIVERY_MAX_ATTEMPTS`, the row MUST transition to `dead_letter` instead of `failed`, and `next_attempt_at` MUST NOT schedule another automatic retry
 
 Terminal failure:
-- malformed local payloads, unsupported event types, missing target configuration at send time, and non-429 HTTP 4xx responses MUST be treated as terminal
+- malformed local payloads, unsupported event types, missing target configuration at send time, disabled target configuration at send time, and non-429 HTTP 4xx responses MUST be treated as terminal
 - on terminal failure:
-  - increment `attempt_count`
   - set `delivery_status = 'dead_letter'`
   - set sanitized `last_error`
   - clear `locked_at` and `locked_by`
+- pre-send terminal failures MUST NOT make any outbound HTTP request
 
 ### 9.5 Restart and Crash Recovery
 
 - A worker crash MUST NOT lose already-committed event rows or target rows.
 - `processing` rows abandoned by a crashed worker MUST be reclaimable.
-- The implementation MUST define a finite stale-lock threshold. When `locked_at` is older than that threshold, the row MUST be recovered by clearing the lock and making it retryable again.
+- A `processing` row MUST be treated as stale when `locked_at` is older than `SLACK_DELIVERY_STALE_LOCK_SECONDS` seconds.
+- Stale-lock recovery MUST set:
+  - `delivery_status = 'failed'`
+  - `locked_at = null`
+  - `locked_by = null`
+  - `last_error` to a sanitized stale-lock recovery summary
+  - `next_attempt_at = now()`
+- Stale-lock recovery MUST preserve the current `attempt_count`. The recovered row becomes eligible for a fresh claim, and only that later fresh claim may increment `attempt_count` again.
 - Stale-lock recovery itself MUST NOT increment `attempt_count`.
 
 ## 10. Slack Message Contract
@@ -425,11 +442,18 @@ Event-specific rendering requirements:
 - `ticket.public_message_added` MUST include `message_author_type` and `message_preview` when the preview is non-empty
 - `ticket.status_changed` MUST include both `status_from` and `status_to`
 
+Slack text sanitization rules:
+- Every user-derived field rendered into Slack `text` MUST be converted to single-line plain text before concatenation by replacing line breaks and tabs with spaces and collapsing repeated spaces.
+- Every user-derived field rendered into Slack `text` MUST then escape `&` as `&amp;`, `<` as `&lt;`, and `>` as `&gt;`.
+- At minimum, `ticket_title` and `message_preview` MUST follow these escaping rules.
+- The renderer MUST NOT emit raw Slack control syntax from user-derived content, including raw forms such as `<!channel>`, `<!here>`, `<!everyone>`, `<@U123>`, or angle-bracket link markup.
+- The only message-body content permitted in a delivered Slack message is `message_preview` as defined in Section 7.3. If the public message fits within `SLACK_MESSAGE_PREVIEW_MAX_CHARS`, that preview MAY equal the full normalized public body. The renderer MUST NOT append raw `body_text` or any expansion longer than `message_preview`.
+
 Delivered Slack messages MUST NOT include:
 - internal notes
 - internal AI analysis
 - attachment storage paths
-- full untruncated message bodies
+- message body content beyond `message_preview`
 - reviewer-only metadata
 - secrets or webhook URLs
 
@@ -478,11 +502,16 @@ The implementation MUST include tests covering at least:
 - internal notes, AI failure notes, draft creation, and draft rejection emit no Slack event targets
 - non-initial actual status changes emit exactly one `ticket.status_changed`
 - duplicate emission attempts collapse on `dedupe_key` without failing the ticket mutation
+- each claimed delivery attempt increments `attempt_count` exactly once, including successful sends and pre-send terminal validation failures
+- `message_preview` stores the full normalized public body when it fits within `SLACK_MESSAGE_PREVIEW_MAX_CHARS`, and otherwise truncates with `...` without exceeding the limit
+- rendered Slack text escapes user-derived fields so requester content cannot trigger Slack mentions or angle-bracket markup
 - claiming logic skips locked rows safely
 - 2xx delivery marks the row `sent`
-- retryable failures increment `attempt_count` and reschedule the row
+- retryable failures leave the already-claimed attempt counted once and reschedule the row
+- target rows whose named target is missing or disabled at send time move to `dead_letter` without an outbound HTTP request
 - terminal failures move the row to `dead_letter`
-- stale `processing` rows are recoverable after worker restart
+- outbound HTTP timeouts after `SLACK_HTTP_TIMEOUT_SECONDS` are treated as retryable failures
+- stale `processing` rows are recoverable after worker restart by clearing the lock, preserving `attempt_count`, setting `delivery_status = failed`, and making the row immediately eligible again
 - `SLACK_ENABLED = false` still records `integration_events` but creates no new `integration_event_targets`
 
 ## 13. Rollout Sequence
