@@ -509,14 +509,14 @@ The exact wording MAY vary, but the required information content above MUST be p
 
 - Webhook URLs are credentials. They MUST live only in environment configuration and process memory.
 - The database MUST store event facts, delivery state, timestamps, counts, and sanitized errors, but MUST NOT store webhook URLs.
-- The worker MUST emit structured logs for:
-  - event emission
+- The process that performs the ticket-mutation transaction MUST emit a structured log for event emission. The worker delivery runtime MUST emit structured logs for:
   - target claim
   - send success
   - retry scheduling
   - dead-letter transition
   - invalid Slack configuration
-- Structured Slack-delivery logs MUST include at least `event_id`, `target_name`, `delivery_status`, `attempt_count`, and `locked_by`, plus HTTP status or failure class when applicable.
+- Emission-path logs MUST include at least `event_id`, `event_type`, `aggregate_type`, `aggregate_id`, and `dedupe_key`. They MUST also indicate whether a target row was created in the same transaction. If no `integration_event_targets` row exists for that emission attempt, target-row fields such as `target_name`, `delivery_status`, `attempt_count`, and `locked_by` MUST be omitted rather than fabricated.
+- Delivery-runtime logs MUST include at least `event_id`, `target_name`, `delivery_status`, `attempt_count`, and `locked_by`, plus HTTP status or failure class when applicable.
 - Slack delivery failures MUST NOT mutate ticket domain tables beyond the already-committed integration rows.
 - No new UI is required in Phase 1. Operational visibility through SQL queries and worker logs is sufficient.
 

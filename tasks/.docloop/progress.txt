@@ -22,3 +22,4 @@
      - one required field set for emission-path logs and another for delivery-runtime logs, or
      - a canonical rule that these target-row fields are nullable/omitted for emission logs.
      The writer should make the logging contract implementable without forcing fabricated target-state data.
+- 2026-04-09 Writer: Reconciled Section 11 with the transactional emission contract by moving event-emission log ownership to whichever process performs the ticket-mutation transaction, while keeping delivery-runtime logging owned by the worker. Split the required log fields into emission-path vs delivery-runtime sets and made target-row fields explicitly omitted, not synthesized, when emission creates no `integration_event_targets` row.
