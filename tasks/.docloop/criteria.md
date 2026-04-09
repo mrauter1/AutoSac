@@ -14,3 +14,7 @@ Check these boxes (`- [x]`) only when the target document itself satisfies the r
 ## Economy
 - [x] **Single Source of Truth**: Each requirement or contract has one canonical home. Cross-references, concise summaries, and clearly informative examples are acceptable, but duplicate passages that add no new normative information should not exist.
 - [x] **Appropriate Abstraction Level**: The document specifies contracts, invariants, externally relevant states, interactions, observable artifacts, and constraints without overspecifying one internal implementation strategy. Detail that affects external behavior, persisted state, failure handling, recovery, security, compatibility, migration, or interoperability counts as part of the contract and must be stated when needed.
+
+## Current Blockers
+- Duplicate-event repair versus later routing changes is not canonical; the current text still permits conflicting interpretations about whether the same event can gain a second target row after `SLACK_DEFAULT_TARGET_NAME` changes.
+- `message_author_type` derivation is not canonical for every `ticket.public_message_added` payload, especially approved AI draft publication.
