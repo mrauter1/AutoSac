@@ -233,6 +233,9 @@ Emission rules:
 - the event MUST represent an actual transition from one distinct status to another
 - if the implementation ever records a no-op history row, it MUST NOT emit `ticket.status_changed` for that row
 - the initial `null -> new` history row created during ticket creation MUST NOT emit this event in Phase 1
+- whether an action emits `ticket.public_message_added` is independent from whether it emits `ticket.status_changed`
+- any action that commits a distinct non-initial status transition MUST emit `ticket.status_changed` even when that same action creates no public message; in current Stage 1 terms, AI draft creation, AI internal route-only, and AI run failure follow this rule when they move a ticket to `waiting_on_dev_ti`
+- actions that create neither a public message nor a distinct non-initial status transition MUST emit no Phase 1 Slack event; in current Stage 1 terms, internal notes and draft rejection fall in this category
 
 ## 7. Payload Contract
 
@@ -249,7 +252,8 @@ Every payload MUST contain:
 - `occurred_at`: RFC 3339 timestamp string for the source business fact
 
 Common rules:
-- `ticket_url` MUST deep-link an authenticated internal operator to the ticket detail page. The exact route path is implementation-specific, but the URL MUST be absolute and stable.
+- `ticket_url` MUST deep-link an authenticated internal operator to the existing Dev/TI ticket detail route and MUST equal `<APP_BASE_URL>/ops/tickets/<ticket_reference>`.
+- The path segment in `ticket_url` MUST be the payload field `ticket_reference`, matching the Stage 1 route `/ops/tickets/{reference}`. `ticket_id` MUST NOT be used in the URL path.
 - `occurred_at` MUST come from the source row for the business fact:
   - ticket creation time for `ticket.created`
   - message creation time for `ticket.public_message_added`
@@ -461,17 +465,17 @@ Illustrative examples:
 
 ```text
 Novo ticket T-000123: Falha ao abrir o sistema
-Abrir no AutoSac: https://autosac.example.local/ops/tickets/...
+Abrir no AutoSac: https://autosac.example.local/ops/tickets/T-000123
 ```
 
 ```text
 Nova mensagem publica em T-000123 por requester: Ainda ocorre erro ao salvar
-Abrir no AutoSac: https://autosac.example.local/ops/tickets/...
+Abrir no AutoSac: https://autosac.example.local/ops/tickets/T-000123
 ```
 
 ```text
 T-000123 mudou de waiting_on_user para waiting_on_dev_ti
-Abrir no AutoSac: https://autosac.example.local/ops/tickets/...
+Abrir no AutoSac: https://autosac.example.local/ops/tickets/T-000123
 ```
 
 The exact wording MAY vary, but the required information content above MUST be preserved.
@@ -499,7 +503,10 @@ The implementation MUST include tests covering at least:
 - ticket creation does not emit `ticket.public_message_added` for the initial message
 - ticket creation does not emit `ticket.status_changed` for the initial `null -> new` history row
 - requester replies, public ops replies, public AI replies, and approved AI draft publication emit exactly one `ticket.public_message_added`
-- internal notes, AI failure notes, draft creation, and draft rejection emit no Slack event targets
+- every payload builds `ticket_url` as `<APP_BASE_URL>/ops/tickets/<ticket_reference>`
+- internal notes and draft rejection emit no Phase 1 Slack event targets in current Stage 1 behavior
+- AI failure notes and draft creation emit no `ticket.public_message_added` target rows
+- AI failure, AI internal route-only, and draft-creation flows emit `ticket.status_changed` when they commit a distinct non-initial status change
 - non-initial actual status changes emit exactly one `ticket.status_changed`
 - duplicate emission attempts collapse on `dedupe_key` without failing the ticket mutation
 - each claimed delivery attempt increments `attempt_count` exactly once, including successful sends and pre-send terminal validation failures
