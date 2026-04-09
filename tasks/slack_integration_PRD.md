@@ -1,219 +1,499 @@
-Mode
-Repo-grounded architecture assessment and implementation plan for Phase 1 Slack outbound notifications only.
+# PRD — Phase 1 Slack Outbound Notifications for AutoSac
 
-Current state
-Verified from the repo:
+Document status: Draft  
+Audience: implementation agent, reviewer, system owner
 
-Stage 1 explicitly excludes Slack and external notifications today in Autosac_PRD.md.
-Ticket mutations are centralized in ticketing.py.
-Public/internal separation is enforced in ticket_messages.visibility and status history is persisted in ticket_status_history in models.py.
-The current worker has one main AI polling loop plus a separate heartbeat thread in main.py, and it already uses row locking with FOR UPDATE SKIP LOCKED in queue.py.
-There is no existing Slack config in config.py, no integration schema in the existing migrations under shared/migrations/versions, and no Slack-related env vars in .env.example.
-Confirmed design direction
-With your decisions applied, the safest Phase 1 design is:
+Normative terms:
+- MUST = mandatory
+- MUST NOT = prohibited
+- SHOULD = recommended
+- MAY = optional
 
-integration_events as the canonical event table, using event_type
-no hard coupling from the integration layer to tickets
-multiple named delivery targets in the schema from day 1, but only one active Slack target in the first rollout
-Slack as an asynchronous projection only; AutoSac remains the system of record
-event emission inside the same DB transaction as the ticket mutation; Slack delivery outside that transaction
-I would not reuse ai_runs as the notification queue. That queue is intentionally single-run-oriented and tied to Codex orchestration. Notification delivery is a separate runtime concern and should not wait behind long AI runs.
+## 1. Purpose
 
-Must-not-break invariants
-Ticket creation, replies, and status changes must succeed even if Slack is down.
-Internal notes must never be emitted to Slack in this first cut.
-tickets.updated_at, ticket_status_history, and current unread/view behavior must stay unchanged.
-The one-active-ai_run invariant must remain untouched.
-Delivery must be idempotent enough to tolerate retries and worker restarts.
-Recommended schema
-1. integration_events
-Purpose: canonical business/integration fact.
+This document extends [Autosac_PRD.md](/home/marcelo/code/AutoSac/tasks/Autosac_PRD.md) with Phase 1 outbound Slack notifications only.
 
-Recommended fields:
+The goal is to notify internal Slack recipients about important ticket activity without making Slack part of the source-of-truth workflow. PostgreSQL remains authoritative. Slack is an asynchronous projection of selected ticket events.
 
-id uuid pk
-source_system text not null default 'autosac'
-event_type text not null
-aggregate_type text not null
-aggregate_id uuid null
-dedupe_key text not null unique
-payload_json jsonb not null
-created_at timestamptz not null default now()
-Recommended initial event_type values:
+## 2. Scope Boundary
 
-ticket.created
-ticket.public_message_added
-ticket.status_changed
-2. integration_event_links
-Purpose: optional links to one or more domain records without forcing the event table to depend on one table.
+Phase 1 Slack scope includes:
+- append-only integration event recording for selected ticket facts
+- per-target delivery state persisted in PostgreSQL
+- asynchronous delivery to one configured Slack webhook target
+- retry, dead-letter, and restart-safe delivery behavior
+- operational visibility through DB rows and worker logs
 
-Recommended fields:
+Phase 1 Slack scope excludes:
+- inbound Slack messages
+- slash commands, buttons, threads, or interactive Slack actions
+- requester-visible behavior changes
+- per-user or per-ticket subscription settings
+- retroactive backfill for tickets, messages, or status history that predate the migration
+- fan-out to multiple active Slack targets in one environment
+- reuse of `ai_runs` as a notification queue
 
-id uuid pk
-event_id uuid fk -> integration_events.id
-entity_type text not null
-entity_id uuid not null
-relation_kind text not null
-created_at timestamptz not null default now()
-Initial examples:
+The schema MUST support multiple named targets from day 1, but this PRD routes each event to at most one target in Phase 1.
 
-ticket.created -> ticket as primary, initial ticket_message as message
-ticket.public_message_added -> ticket as primary, ticket_message as message
-ticket.status_changed -> ticket as primary, ticket_status_history as status_history
-3. integration_event_targets
-Purpose: per-destination delivery state.
+## 3. Preserved AutoSac Invariants
 
-Recommended fields:
+The Slack integration MUST preserve the existing Stage 1 behavior defined in [Autosac_PRD.md](/home/marcelo/code/AutoSac/tasks/Autosac_PRD.md):
 
-id uuid pk
-event_id uuid fk -> integration_events.id
-target_name text not null
-target_kind text not null
-delivery_status text not null
-attempt_count int not null default 0
-next_attempt_at timestamptz not null default now()
-locked_at timestamptz null
-locked_by text null
-last_error text null
-sent_at timestamptz null
-created_at timestamptz not null default now()
-unique constraint on (event_id, target_name)
-Initial target_kind can be slack_webhook.
-Initial delivery_status set: pending, processing, sent, failed, dead_letter.
+- Ticket creation, requester replies, ops replies, AI publication, and status changes MUST succeed even when Slack is disabled, misconfigured, unreachable, rate-limited, or returning errors.
+- `tickets.updated_at`, `ticket_status_history`, unread/view semantics, and the requester/dev-TI visibility boundary MUST remain unchanged.
+- Internal notes and any content visible only in `ticket_messages.visibility = internal` MUST NEVER be emitted to Slack.
+- The one-active-`ai_run` invariant and the existing AI-run queue semantics MUST remain unchanged.
+- Slack delivery MUST be idempotent across retries, duplicate emission attempts, and worker restarts.
+- The migration MUST NOT alter existing ticket rows, message rows, status-history rows, or AI-run rows.
 
-Emission points
-Use only the existing central mutation paths in ticketing.py:
+## 4. Architecture Summary
 
-create_requester_ticket -> emit ticket.created
-add_requester_reply -> emit ticket.public_message_added
-publish_ai_public_reply -> emit ticket.public_message_added
-add_ops_public_reply -> emit ticket.public_message_added
-publish_ai_draft_for_ops -> emit ticket.public_message_added
-record_status_change -> emit ticket.status_changed
-Important rule:
+Phase 1 Slack delivery has three persisted layers:
 
-keep ticket.created separate from ticket.status_changed; do not treat the initial new history row as a second operational notification unless you explicitly want both later
-Do not emit Slack targets from:
+1. `integration_events`
+   Canonical append-only business facts captured inside the same DB transaction as the ticket mutation.
+2. `integration_event_links`
+   Optional cross-references from an event to related domain rows.
+3. `integration_event_targets`
+   Mutable delivery state for one named destination per event.
 
-publish_ai_internal_note
-publish_ai_failure_note
-add_ops_internal_note
-draft creation/rejection paths
-Payload contract
-For Phase 1, keep payload minimal and Slack-safe.
+The delivery runtime MUST live in the existing worker process, but it MUST execute independently of the request path and independently of AI-run polling. A dedicated delivery thread is a conforming implementation, but the contract is that Slack delivery remains asynchronous and separately scheduled.
 
-Recommended event payload fields:
+The delivery runtime MUST render Slack messages from `integration_events.payload_json`. It MUST NOT re-read current ticket or message rows to rebuild historical content, because the event payload is the event-time snapshot.
 
-ticket_id
-ticket_reference
-ticket_title
-ticket_status
-ticket_url
-occurred_at
-message_id when applicable
-message_author_type when applicable
-message_source when applicable
-message_preview when applicable
-status_from and status_to for status events
-Recommended exclusions for first cut:
+## 5. Persisted Model
 
-internal message bodies
-attachment file paths
-raw full message body without truncation
-any hidden routing or reviewer-only metadata
-Target resolution and config
-Extend config.py and .env.example for explicit outbound config.
+### 5.1 `integration_events`
 
-Recommended first-cut config:
+Purpose: canonical immutable record of an integration-relevant business fact.
 
-SLACK_ENABLED
-SLACK_DEFAULT_TARGET_NAME
-SLACK_TARGETS_JSON or equivalent structured env mapping target name -> webhook URL and enabled flag
-SLACK_NOTIFY_TICKET_CREATED
-SLACK_NOTIFY_PUBLIC_MESSAGE_ADDED
-SLACK_NOTIFY_STATUS_CHANGED
-SLACK_MESSAGE_PREVIEW_MAX_CHARS
-SLACK_DELIVERY_BATCH_SIZE
-SLACK_DELIVERY_MAX_ATTEMPTS
-Because you want multiple named targets in schema, I would keep target definitions in config, not in DB, for Phase 1. The DB owns event state; environment config owns credentials/endpoints.
+Columns:
+- `id uuid primary key`
+- `source_system text not null default 'autosac'`
+- `event_type text not null`
+  allowed values in Phase 1:
+  - `ticket.created`
+  - `ticket.public_message_added`
+  - `ticket.status_changed`
+- `aggregate_type text not null`
+  allowed value in Phase 1:
+  - `ticket`
+- `aggregate_id uuid null`
+- `dedupe_key text not null unique`
+- `payload_json jsonb not null`
+- `created_at timestamptz not null default now()`
 
-Delivery runtime
-Recommended runtime approach for the current architecture:
+Rules:
+- In this rollout, every emitted event MUST set `aggregate_type = 'ticket'`.
+- In this rollout, every emitted event MUST set `aggregate_id = payload_json.ticket_id`. `aggregate_id` remains nullable only for future event families and MUST NOT be null in Phase 1 Slack delivery.
+- `payload_json` MUST contain the full event-time snapshot needed for Slack rendering.
+- Rows are append-only. `event_type`, `aggregate_type`, `aggregate_id`, `dedupe_key`, and `payload_json` MUST NOT change after insert.
 
-keep autosac-worker as the only worker service in the first rollout
-add a dedicated delivery thread beside the existing heartbeat thread in main.py
-give it its own DB sessions via session_scope
-claim integration_event_targets in small batches using FOR UPDATE SKIP LOCKED, matching the concurrency pattern already used for ai_runs
-use httpx, which is already present in requirements.txt
-I would not put Slack delivery into the request path, and I would not serialize it behind the main process_ai_run loop.
+Indexes:
+- unique `(dedupe_key)`
+- `(event_type, created_at)`
+- `(aggregate_type, aggregate_id, created_at)`
 
-Retry and idempotency
-Recommended semantics:
+### 5.2 `integration_event_links`
 
-event idempotency via dedupe_key on integration_events
-per-target idempotency via unique (event_id, target_name)
-retries with bounded exponential backoff by updating next_attempt_at
-move to dead_letter after a finite attempt limit
-preserve last_error for operator visibility
-For dedupe_key, use a deterministic key derived from the concrete domain fact, for example:
+Purpose: normalized links from one event to one or more related domain rows without foreign-keying `integration_events` directly to ticket tables.
 
-ticket.created:<ticket_id>
-ticket.public_message_added:<message_id>
-ticket.status_changed:<status_history_id>
-That is stronger than using timestamps and avoids duplicate delivery state when the same transaction is retried.
+Columns:
+- `id uuid primary key`
+- `event_id uuid not null references integration_events(id)`
+- `entity_type text not null`
+  allowed values in Phase 1:
+  - `ticket`
+  - `ticket_message`
+  - `ticket_status_history`
+- `entity_id uuid not null`
+- `relation_kind text not null`
+  allowed values in Phase 1:
+  - `primary`
+  - `message`
+  - `status_history`
+- `created_at timestamptz not null default now()`
 
-Slack message format
-Keep Slack as a notification surface, not a mirrored conversation.
+Required links:
+- `ticket.created` MUST create:
+  - one `primary` link to the ticket row
+  - one `message` link to the initial public `ticket_messages` row created with the ticket
+- `ticket.public_message_added` MUST create:
+  - one `primary` link to the ticket row
+  - one `message` link to the new public `ticket_messages` row
+- `ticket.status_changed` MUST create:
+  - one `primary` link to the ticket row
+  - one `status_history` link to the `ticket_status_history` row that represents the change
 
-Recommended first-cut formatting:
+Indexes and constraints:
+- unique `(event_id, entity_type, entity_id, relation_kind)`
+- `(event_id)`
+- `(entity_type, entity_id)`
 
-Novo ticket T-000123: <title>
+### 5.3 `integration_event_targets`
+
+Purpose: per-target delivery state for one emitted event.
+
+Columns:
+- `id uuid primary key`
+- `event_id uuid not null references integration_events(id)`
+- `target_name text not null`
+- `target_kind text not null`
+  allowed value in Phase 1:
+  - `slack_webhook`
+- `delivery_status text not null`
+  allowed values:
+  - `pending`
+  - `processing`
+  - `sent`
+  - `failed`
+  - `dead_letter`
+- `attempt_count integer not null default 0`
+- `next_attempt_at timestamptz not null default now()`
+- `locked_at timestamptz null`
+- `locked_by text null`
+- `last_error text null`
+- `sent_at timestamptz null`
+- `created_at timestamptz not null default now()`
+
+Rules:
+- One row represents one event routed to one named delivery target. The row is updated in place across retries.
+- `attempt_count` MUST increment exactly once for each claimed row that reaches delivery processing, including terminal pre-send validation failures. Reclaiming stale `processing` rows without new delivery work MUST NOT increment it.
+- `last_error` MUST contain a sanitized operator-facing summary. It MUST NOT contain webhook URLs, secrets, or internal-only ticket content.
+- `sent` and `dead_letter` are terminal states. They MUST NOT be retried automatically.
+
+Eligibility:
+- A row is eligible for claim only when:
+  - `delivery_status in ('pending', 'failed')`
+  - and `next_attempt_at <= now()`
+
+State meanings:
+- `pending`: never attempted and eligible when `next_attempt_at` is due.
+- `processing`: currently claimed by a worker instance.
+- `sent`: delivery succeeded.
+- `failed`: the last attempt failed and the row is waiting for the next scheduled retry.
+- `dead_letter`: delivery will not be retried automatically.
+
+Indexes and constraints:
+- unique `(event_id, target_name)`
+- `(delivery_status, next_attempt_at)`
+- `(locked_at)`
+
+## 6. Event Emission Contract
+
+### 6.1 General Rules
+
+- Event emission MUST happen inside the same DB transaction as the ticket mutation that produced the business fact.
+- If the enclosing ticket mutation rolls back, the event row, link rows, and target rows MUST also roll back.
+- A single ticket mutation transaction MAY emit more than one integration event. Delivery order across different events is best-effort and MUST NOT be treated as guaranteed.
+- Duplicate emission attempts for the same business fact MUST collapse on `dedupe_key`. A duplicate `dedupe_key` MUST NOT make the ticket mutation fail.
+- If a duplicate `dedupe_key` is encountered and the corresponding target row is missing, the implementation MUST create the missing `integration_event_targets` row in the same transaction when current routing rules require one.
+
+### 6.2 Event Types and Dedupe Keys
+
+#### `ticket.created`
+
+Meaning:
+- the ticket creation transaction committed successfully
+
+Dedupe key:
+- `ticket.created:<ticket_id>`
+
+Emission rules:
+- emit exactly once per ticket
+- create the `integration_events` row even when Slack delivery is disabled
+- create the required event links described in Section 5.2
+- MUST NOT also emit `ticket.public_message_added` for the initial `ticket_create` message
+- MUST NOT emit `ticket.status_changed` for the initial `null -> new` history row created during ticket creation
+
+#### `ticket.public_message_added`
+
+Meaning:
+- a new public `ticket_messages` row was committed after initial ticket creation
+
+Dedupe key:
+- `ticket.public_message_added:<message_id>`
+
+Emission rules:
+- emit exactly once per new public message after ticket creation
+- eligible messages are public `ticket_messages` rows other than the initial `ticket_create` row
+- in current Stage 1 terms, this includes public requester replies, public ops replies, public AI auto-replies, and approved AI draft publications
+- draft creation, draft rejection, internal notes, internal AI analysis, and failure notes MUST NOT emit this event
+
+#### `ticket.status_changed`
+
+Meaning:
+- a non-initial ticket status transition was committed
+
+Dedupe key:
+- `ticket.status_changed:<status_history_id>`
+
+Emission rules:
+- emit exactly once per committed non-initial status change
+- the event MUST represent an actual transition from one distinct status to another
+- if the implementation ever records a no-op history row, it MUST NOT emit `ticket.status_changed` for that row
+- the initial `null -> new` history row created during ticket creation MUST NOT emit this event in Phase 1
+
+## 7. Payload Contract
+
+`integration_events.payload_json` MUST be a self-sufficient event snapshot for Slack rendering.
+
+### 7.1 Common Fields
+
+Every payload MUST contain:
+- `ticket_id`: ticket UUID as a string
+- `ticket_reference`: human-readable reference such as `T-000123`
+- `ticket_title`: ticket title at event time
+- `ticket_status`: ticket status after the mutating transaction
+- `ticket_url`: absolute AutoSac URL for the ticket detail page, built from `APP_BASE_URL`
+- `occurred_at`: RFC 3339 timestamp string for the source business fact
+
+Common rules:
+- `ticket_url` MUST deep-link an authenticated internal operator to the ticket detail page. The exact route path is implementation-specific, but the URL MUST be absolute and stable.
+- `occurred_at` MUST come from the source row for the business fact:
+  - ticket creation time for `ticket.created`
+  - message creation time for `ticket.public_message_added`
+  - status-history creation time for `ticket.status_changed`
+- `ticket_status` in `ticket.status_changed` MUST equal `status_to`.
+
+### 7.2 Event-Specific Fields
+
+`ticket.created` adds no required fields beyond the common fields.
+
+`ticket.public_message_added` MUST also contain:
+- `message_id`: message UUID as a string
+- `message_author_type`: one of `requester`, `dev_ti`, `ai`, `system`
+- `message_source`: the public `ticket_messages.source` value for the message
+- `message_preview`: sanitized preview text
+
+`ticket.status_changed` MUST also contain:
+- `status_from`: previous status
+- `status_to`: new status
+
+### 7.3 `message_preview` Rules
+
+`message_preview` MUST be derived from the public message `body_text` using these rules:
+- normalize all internal whitespace runs to a single space
+- trim leading and trailing whitespace
+- truncate to `SLACK_MESSAGE_PREVIEW_MAX_CHARS`
+- if truncation occurs, replace the tail with `...` so the final stored preview does not exceed the configured maximum
+
+`message_preview` MUST NOT include:
+- internal-only content
+- attachment file paths
+- raw Markdown formatting when plain text is already available in `body_text`
+
+If the normalized `body_text` is empty, `message_preview` MUST be the empty string.
+
+## 8. Target Resolution and Configuration
+
+### 8.1 Environment Variables
+
+The implementation MUST add and document these environment variables:
+
+- `SLACK_ENABLED`
+  boolean global circuit breaker for Slack delivery
+- `SLACK_DEFAULT_TARGET_NAME`
+  target name used for Phase 1 routing
+- `SLACK_TARGETS_JSON`
+  JSON object mapping target name to target config
+- `SLACK_NOTIFY_TICKET_CREATED`
+  boolean gate for creating target rows for `ticket.created`
+- `SLACK_NOTIFY_PUBLIC_MESSAGE_ADDED`
+  boolean gate for creating target rows for `ticket.public_message_added`
+- `SLACK_NOTIFY_STATUS_CHANGED`
+  boolean gate for creating target rows for `ticket.status_changed`
+- `SLACK_MESSAGE_PREVIEW_MAX_CHARS`
+  integer greater than or equal to 4 for `message_preview`
+- `SLACK_DELIVERY_BATCH_SIZE`
+  integer greater than or equal to 1; maximum number of target rows claimed in one delivery poll
+- `SLACK_DELIVERY_MAX_ATTEMPTS`
+  integer greater than or equal to 1; maximum attempts before dead-lettering a retryable failure
+
+### 8.2 `SLACK_TARGETS_JSON` Shape
+
+`SLACK_TARGETS_JSON` MUST be a JSON object with this exact structure:
+
+```json
+{
+  "ops_primary": {
+    "enabled": true,
+    "webhook_url": "https://hooks.slack.com/services/..."
+  }
+}
+```
+
+Rules:
+- top-level keys are `target_name`
+- `target_name` MUST match `^[a-z0-9_-]+$`
+- each value MUST contain:
+  - `enabled`: boolean
+  - `webhook_url`: non-empty string
+- `webhook_url` is secret configuration and MUST NOT be stored in database rows or logs
+
+### 8.3 Routing Rules
+
+- Phase 1 routes each eligible event to at most one target: `SLACK_DEFAULT_TARGET_NAME`.
+- The schema supports multiple named targets, but multi-target fan-out is out of scope for this rollout.
+- An `integration_events` row MUST always be created for the emitted business fact, even when Slack is disabled.
+- `SLACK_DEFAULT_TARGET_NAME` is required only when `SLACK_ENABLED = true` and at least one `SLACK_NOTIFY_*` flag is true.
+- An `integration_event_targets` row MUST be created only when all of the following are true at emission time:
+  - `SLACK_ENABLED = true`
+  - the event-type-specific `SLACK_NOTIFY_*` flag for the event is true
+  - `SLACK_DEFAULT_TARGET_NAME` exists in `SLACK_TARGETS_JSON`
+  - the selected target config has `enabled = true`
+- Event-type notification flags gate target creation for new events only. They MUST NOT delete or rewrite existing target rows.
+- Enabling Slack or enabling an event type later MUST NOT backfill old ticket activity. Only newly emitted events after the config change may create target rows.
+- If Slack config is invalid, the implementation MUST log the configuration error and behave as if Slack delivery were disabled. Core ticket behavior MUST continue to operate.
+
+## 9. Delivery Runtime Contract
+
+### 9.1 Worker Ownership
+
+- The delivery runtime MUST execute in the worker process.
+- It MUST NOT run in the synchronous request path.
+- It MUST NOT serialize behind the main AI-run polling loop.
+- It MUST use independent DB sessions/transactions from AI-run work.
+- When `SLACK_ENABLED = false`, the delivery runtime MUST NOT claim or send target rows.
+
+### 9.2 Claiming Work
+
+The worker MUST claim target rows in small batches using row-level locking with `FOR UPDATE SKIP LOCKED` or equivalent safe behavior.
+
+Claiming rules:
+- select only eligible rows as defined in Section 5.3
+- order by `next_attempt_at` ascending, then `created_at` ascending
+- limit by `SLACK_DELIVERY_BATCH_SIZE`
+- on claim, set:
+  - `delivery_status = 'processing'`
+  - `locked_at = now()`
+  - `locked_by = <diagnostic worker identifier>`
+
+### 9.3 Rendering and HTTP Request
+
+- Delivery MUST render the Slack message from `payload_json` only.
+- For Phase 1, the sender MUST POST a JSON body of the form `{"text": "<rendered message>"}` to the configured webhook URL.
+- The rendered message MUST stay within the behavioral rules in Section 10.
+
+### 9.4 Success, Retry, and Dead Letter
+
+Success:
+- a 2xx response marks the row `sent`
+- on success, set:
+  - `delivery_status = 'sent'`
+  - `sent_at = now()`
+  - `last_error = null`
+  - `locked_at = null`
+  - `locked_by = null`
+
+Retryable failure:
+- transport errors, timeouts, HTTP 429, and HTTP 5xx MUST be treated as retryable
+- on retryable failure:
+  - increment `attempt_count`
+  - set `delivery_status = 'failed'`
+  - set sanitized `last_error`
+  - clear `locked_at` and `locked_by`
+  - set `next_attempt_at` using bounded exponential backoff
+- if `attempt_count` reaches `SLACK_DELIVERY_MAX_ATTEMPTS`, the row MUST transition to `dead_letter` instead of `failed`
+
+Terminal failure:
+- malformed local payloads, unsupported event types, missing target configuration at send time, and non-429 HTTP 4xx responses MUST be treated as terminal
+- on terminal failure:
+  - increment `attempt_count`
+  - set `delivery_status = 'dead_letter'`
+  - set sanitized `last_error`
+  - clear `locked_at` and `locked_by`
+
+### 9.5 Restart and Crash Recovery
+
+- A worker crash MUST NOT lose already-committed event rows or target rows.
+- `processing` rows abandoned by a crashed worker MUST be reclaimable.
+- The implementation MUST define a finite stale-lock threshold. When `locked_at` is older than that threshold, the row MUST be recovered by clearing the lock and making it retryable again.
+- Stale-lock recovery itself MUST NOT increment `attempt_count`.
+
+## 10. Slack Message Contract
+
+Slack is a notification surface, not a mirrored conversation transcript.
+
+Each delivered Slack message MUST include:
+- `ticket_reference`
+- a concise event summary
+- an absolute link back to AutoSac via `ticket_url`
+
+Event-specific rendering requirements:
+- `ticket.created` MUST include `ticket_title`
+- `ticket.public_message_added` MUST include `message_author_type` and `message_preview` when the preview is non-empty
+- `ticket.status_changed` MUST include both `status_from` and `status_to`
+
+Delivered Slack messages MUST NOT include:
+- internal notes
+- internal AI analysis
+- attachment storage paths
+- full untruncated message bodies
+- reviewer-only metadata
+- secrets or webhook URLs
+
+Illustrative examples:
+
+```text
+Novo ticket T-000123: Falha ao abrir o sistema
+Abrir no AutoSac: https://autosac.example.local/ops/tickets/...
+```
+
+```text
+Nova mensagem publica em T-000123 por requester: Ainda ocorre erro ao salvar
+Abrir no AutoSac: https://autosac.example.local/ops/tickets/...
+```
+
+```text
 T-000123 mudou de waiting_on_user para waiting_on_dev_ti
-Nova mensagem pública em T-000123 por requester: <preview>
-Always include:
+Abrir no AutoSac: https://autosac.example.local/ops/tickets/...
+```
 
-ticket reference
-short text
-deep link back to AutoSac
-no internal-only content
-Tests to add
-migration creates the three integration tables and indexes correctly
-create_requester_ticket emits exactly one ticket.created
-requester/AI/ops public replies emit ticket.public_message_added
-internal notes emit no Slack target
-record_status_change emits ticket.status_changed
-initial new history row does not accidentally produce duplicate outward notifications if that policy is disabled
-target claim logic skips locked rows safely
-transient HTTP failure increments attempt_count and reschedules
-terminal failure moves target to dead_letter
-duplicate emission attempts collapse on dedupe_key
-Rollout plan
-Add migration and ORM models for the integration tables.
-Add config parsing and validation, still with Slack disabled.
-Add event-building helpers in a dedicated integration module rather than bloating ticketing.py.
-Emit integration events from the central mutation paths.
-Add delivery polling thread to autosac-worker.
-Add Slack formatter and webhook sender.
-Ship with SLACK_ENABLED=false first to verify event creation without external delivery.
-Enable one named target in one environment.
-Observe for duplicate events, dead letters, and accidental over-notification before adding more targets.
-Risks and side effects
-Highest risk: leaking internal content if visibility filtering is implemented in the wrong layer.
-Second risk: duplicate Slack posts if dedupe_key is not tied to message/status-history identity.
-Third risk: delivery starvation if the new thread shares DB/session logic poorly with the main worker loop.
-Fourth risk: scope creep into inbound Slack or per-channel routing too early.
-Verification
-Verified from repo evidence:
+The exact wording MAY vary, but the required information content above MUST be preserved.
 
-the correct mutation boundaries are in ticketing.py
-the current worker runtime shape is in main.py
-safe locking precedent already exists in queue.py
-Slack/external notifications are currently out of scope in Autosac_PRD.md
-no current Slack config or integration schema exists
-Unknowns not confirmable in Stage 1:
+## 11. Observability and Security
 
-actual Slack workspace rate limits and governance
-final webhook secret distribution method in the real environment
-exact target naming convention you want across environments
-At this point the architecture is sufficiently specified for implementation. The only remaining choices are operational, not structural: exact env variable shape for named targets, final preview length, and whether ticket.created should be enabled from day 1 or staged behind config.
+- Webhook URLs are credentials. They MUST live only in environment configuration and process memory.
+- The database MUST store event facts, delivery state, timestamps, counts, and sanitized errors, but MUST NOT store webhook URLs.
+- The worker MUST emit structured logs for:
+  - event emission
+  - target claim
+  - send success
+  - retry scheduling
+  - dead-letter transition
+  - invalid Slack configuration
+- Slack delivery failures MUST NOT mutate ticket domain tables beyond the already-committed integration rows.
+- No new UI is required in Phase 1. Operational visibility through SQL queries and worker logs is sufficient.
 
+## 12. Minimum Test Coverage
+
+The implementation MUST include tests covering at least:
+
+- migration creates `integration_events`, `integration_event_links`, and `integration_event_targets` with the required constraints and indexes
+- ticket creation emits exactly one `ticket.created`
+- ticket creation does not emit `ticket.public_message_added` for the initial message
+- ticket creation does not emit `ticket.status_changed` for the initial `null -> new` history row
+- requester replies, public ops replies, public AI replies, and approved AI draft publication emit exactly one `ticket.public_message_added`
+- internal notes, AI failure notes, draft creation, and draft rejection emit no Slack event targets
+- non-initial actual status changes emit exactly one `ticket.status_changed`
+- duplicate emission attempts collapse on `dedupe_key` without failing the ticket mutation
+- claiming logic skips locked rows safely
+- 2xx delivery marks the row `sent`
+- retryable failures increment `attempt_count` and reschedule the row
+- terminal failures move the row to `dead_letter`
+- stale `processing` rows are recoverable after worker restart
+- `SLACK_ENABLED = false` still records `integration_events` but creates no new `integration_event_targets`
+
+## 13. Rollout Sequence
+
+Recommended rollout:
+
+1. Add the migration and model changes with `SLACK_ENABLED = false`.
+2. Verify that eligible ticket mutations create the expected `integration_events` rows and links without affecting existing ticket behavior.
+3. Enable one named Slack target in a non-production environment.
+4. Enable the desired `SLACK_NOTIFY_*` event types and verify success, retry, and dead-letter behavior.
+5. Promote to production with one target only.
+6. Observe duplicate rate, dead letters, and notification noise before changing which event types are enabled.
+
+No historical backfill is part of this rollout.

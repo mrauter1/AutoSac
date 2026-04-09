@@ -1,2 +1,3 @@
 ## Doc-Loop Progress Log
 
+- 2026-04-09 Writer: Rewrote `slack_integration_PRD.md` from note-style recommendations into a normative Phase 1 spec. Centralized the canonical contracts for schema, event emission, payloads, config, delivery state, retry/dead-letter behavior, and rollout. Removed ungrounded file-level assumptions, resolved the initial-ticket/public-message/status-change overlap in one emission section instead of duplicating rules, and tightened the config/runtime contracts so Slack remains fully asynchronous and non-blocking to core ticket behavior.
