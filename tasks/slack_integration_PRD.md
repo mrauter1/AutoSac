@@ -187,7 +187,10 @@ Indexes and constraints:
 - If the enclosing ticket mutation rolls back, the event row, link rows, and target rows MUST also roll back.
 - A single ticket mutation transaction MAY emit more than one integration event. Delivery order across different events is best-effort and MUST NOT be treated as guaranteed.
 - Duplicate emission attempts for the same business fact MUST collapse on `dedupe_key`. A duplicate `dedupe_key` MUST NOT make the ticket mutation fail.
-- If a duplicate `dedupe_key` is encountered and the corresponding target row is missing, the implementation MUST create the missing `integration_event_targets` row in the same transaction when current routing rules require one.
+- If a duplicate `dedupe_key` is encountered, the implementation MUST reuse the existing `integration_events` row for that business fact rather than inserting another one.
+- Duplicate repair of `integration_event_targets` is allowed only when the reused event currently has zero target rows.
+- If the reused event has zero target rows and current routing rules in Section 8.3 require Slack routing, the implementation MUST create exactly one new `integration_event_targets` row in the same transaction, using the current `SLACK_DEFAULT_TARGET_NAME`.
+- If the reused event already has one target row, duplicate handling MUST NOT create a second target row, replace the existing target name, or migrate the row to another target, even if `SLACK_DEFAULT_TARGET_NAME` or `SLACK_TARGETS_JSON` changed after the event was first emitted.
 
 ### 6.2 Event Types and Dedupe Keys
 
@@ -269,6 +272,11 @@ Common rules:
 - `message_author_type`: one of `requester`, `dev_ti`, `ai`, `system`
 - `message_source`: the public `ticket_messages.source` value for the message
 - `message_preview`: normalized preview text for Slack rendering, as defined in Section 7.3
+
+`message_author_type` rules:
+- `message_author_type` MUST equal the associated public `ticket_messages.author_type` value for the same `message_id`.
+- The payload MUST be derived from the committed public message row. It MUST NOT infer authorship from the workflow actor that triggered publication, approval, or send.
+- For `message_source = 'ai_draft_published'`, `message_author_type` MUST be `ai`, matching the persisted public `ticket_messages` row for the published draft.
 
 `ticket.status_changed` MUST also contain:
 - `status_from`: previous status
@@ -358,7 +366,8 @@ Rules:
   - `ticket.public_message_added` uses `SLACK_NOTIFY_PUBLIC_MESSAGE_ADDED`
   - `ticket.status_changed` uses `SLACK_NOTIFY_STATUS_CHANGED`
 - Event-type notification flags gate target creation for new events only. They MUST NOT delete or rewrite existing target rows.
-- Changing `SLACK_TARGETS_JSON` or `SLACK_DEFAULT_TARGET_NAME` later MUST NOT delete or rewrite existing target rows.
+- Changing `SLACK_TARGETS_JSON` or `SLACK_DEFAULT_TARGET_NAME` later MUST NOT delete, rewrite, or add a second target row to an event that already has one target row.
+- If a later duplicate emission reuses an existing event with zero target rows, target-row repair MUST follow Section 6.1 and can create one row only for the current `SLACK_DEFAULT_TARGET_NAME`.
 - Enabling Slack or enabling an event type later MUST NOT backfill old ticket activity. Only newly emitted events after the config change may create target rows.
 - If `SLACK_ENABLED` later becomes `false`, existing `pending` and `failed` target rows MUST remain stored but unclaimed until Slack is re-enabled, because the runtime is disabled globally.
 - If `SLACK_ENABLED` remains `true` but a stored row's `target_name` is missing from the current `SLACK_TARGETS_JSON` or present with `enabled = false`, the next delivery attempt for that row MUST transition it to `dead_letter` without making any outbound HTTP request, as defined in Section 9.4.
@@ -520,12 +529,14 @@ The implementation MUST include tests covering at least:
 - ticket creation does not emit `ticket.public_message_added` for the initial message
 - ticket creation does not emit `ticket.status_changed` for the initial `null -> new` history row
 - requester replies, public ops replies, public AI replies, and approved AI draft publication emit exactly one `ticket.public_message_added`
+- `ticket.public_message_added.message_author_type` matches the associated public `ticket_messages.author_type`, including `ai_draft_published -> ai`
 - every payload builds `ticket_url` as `<APP_BASE_URL>/ops/tickets/<ticket_reference>`
 - internal notes and draft rejection emit no Phase 1 Slack event targets in current Stage 1 behavior
 - AI failure notes and draft creation emit no `ticket.public_message_added` target rows
 - AI failure, AI internal route-only, and draft-creation flows emit `ticket.status_changed` when they commit a distinct non-initial status change
 - non-initial actual status changes emit exactly one `ticket.status_changed`
 - duplicate emission attempts collapse on `dedupe_key` without failing the ticket mutation
+- duplicate repair creates at most one target row: events that already have a target row never gain a second row after routing changes, while zero-target events may gain one row for the current `SLACK_DEFAULT_TARGET_NAME` only when Section 8.3 routing rules require it
 - each claimed delivery attempt increments `attempt_count` exactly once, including successful sends and pre-send terminal validation failures
 - `message_preview` stores the full normalized public body when it fits within `SLACK_MESSAGE_PREVIEW_MAX_CHARS`, and otherwise stores the first `SLACK_MESSAGE_PREVIEW_MAX_CHARS - 3` normalized code points plus `...`
 - rendered Slack text escapes user-derived fields so requester content cannot trigger Slack mentions or angle-bracket markup
