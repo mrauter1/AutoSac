@@ -3,12 +3,12 @@ Check these boxes (`- [x]`) only when the target document itself satisfies the r
 
 ## Completeness
 - [x] **Implementation-Ready Scope**: The document defines the system purpose, major components, responsibilities, and boundaries clearly enough that an autonomous coding agent would not need to invent the overall design.
-- [ ] **Behavior Completeness**: The main flows, edge cases, failure modes, and recovery behavior that materially affect implementation are specified or explicitly declared out of scope.
+- [x] **Behavior Completeness**: The main flows, edge cases, failure modes, and recovery behavior that materially affect implementation are specified or explicitly declared out of scope.
 - [x] **Interface & Data Contracts**: Every interface, data shape, persisted entity, protocol, file format, and integration needed for implementation is defined with enough precision to code against.
-- [ ] **Operational Constraints**: Relevant runtime constraints are stated clearly, including performance, security, observability, configuration, deployment assumptions, and other non-functional requirements that affect implementation.
+- [x] **Operational Constraints**: Relevant runtime constraints are stated clearly, including performance, security, observability, configuration, deployment assumptions, and other non-functional requirements that affect implementation.
 
 ## Clarity
-- [ ] **Ambiguity Control**: The document contains no unresolved placeholders such as TBD/TODO/??? and no materially ambiguous language that would force an implementer to guess.
+- [x] **Ambiguity Control**: The document contains no unresolved placeholders such as TBD/TODO/??? and no materially ambiguous language that would force an implementer to guess.
 - [x] **Internal Consistency**: Sections, examples, tables, and terminology do not contradict each other.
 
 ## Economy
@@ -16,4 +16,4 @@ Check these boxes (`- [x]`) only when the target document itself satisfies the r
 - [x] **Appropriate Abstraction Level**: The document specifies contracts, invariants, externally relevant states, interactions, observable artifacts, and constraints without overspecifying one internal implementation strategy. Detail that affects external behavior, persisted state, failure handling, recovery, security, compatibility, migration, or interoperability counts as part of the contract and must be stated when needed.
 
 ## Current Blockers
-- Sections 8.3 and 9.5 still leave `processing`-row recovery ambiguous when Slack delivery is globally suppressed. Section 8.3 pauses only existing `pending` and `failed` rows when `SLACK_ENABLED = false` or config is globally invalid, while Section 9.5 requires stale-lock recovery on the delivery poll cadence. The PRD must choose one canonical policy for stale `processing` rows during suppression: either recover them to `failed`/`next_attempt_at = now()` even while claim/send is disabled, or leave them unchanged until Slack is re-enabled or config becomes valid. Without that, competent engineers can produce different crash-recovery and operator-visible row-state behavior.
+- None.
