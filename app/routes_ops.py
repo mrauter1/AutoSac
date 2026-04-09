@@ -27,7 +27,7 @@ from shared.db import db_session_dependency
 from shared.models import AIDraft, AIRun, AIRunStep, Ticket, TicketAttachment, TicketMessage, TicketView, User
 from shared.permissions import is_ops_user
 from shared.routing_registry import RoutingRegistryError, load_routing_registry
-from shared.user_admin import create_user
+from shared.user_admin import create_user, set_user_active_state, update_user
 from shared.ticketing import (
     add_ops_internal_note,
     add_ops_public_reply,
@@ -51,14 +51,52 @@ def _parse_bool(value: str | None) -> bool:
     return value in {"on", "true", "1", "yes"}
 
 
+def _parse_required_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"on", "true", "1", "yes"}:
+        return True
+    if normalized in {"off", "false", "0", "no"}:
+        return False
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid active state.")
+
+
 def _allowed_new_user_roles(actor: User) -> tuple[str, ...]:
     if actor.role == "admin":
         return _MANAGEABLE_USER_ROLES
     return ("requester",)
 
 
+def _can_edit_user_profile(actor: User, target: User) -> bool:
+    if actor.role == "admin":
+        return True
+    return target.role in _MANAGEABLE_USER_ROLES
+
+
+def _can_change_user_role(actor: User, target: User, requested_role: str | None = None) -> bool:
+    if actor.role != "admin" or target.role == "admin":
+        return False
+    if requested_role is None:
+        return True
+    return requested_role in _allowed_new_user_roles(actor)
+
+
+def _can_toggle_user_active(actor: User, target: User) -> bool:
+    return target.role != "admin" and _can_edit_user_profile(actor, target)
+
+
 def _load_users_for_admin(db: Session) -> list[User]:
     return list(db.execute(select(User).order_by(User.is_active.desc(), User.created_at.desc())).scalars())
+
+
+def _load_user_or_404(db: Session, *, user_id: str) -> User:
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found") from exc
+    user = db.get(User, user_uuid)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return user
 
 
 def _load_ops_ticket_or_404(db: Session, *, reference: str) -> Ticket:
@@ -229,6 +267,105 @@ def _ops_manual_rerun_specialist_options() -> list[dict[str, str]]:
     ]
 
 
+def _last_public_message_item_id(timeline: list[dict[str, object]]) -> str | None:
+    for item in reversed(timeline):
+        if item.get("kind") != "message" or item.get("lane") != "public":
+            continue
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id:
+            return item_id
+    return None
+
+
+def _resolve_manual_rerun_specialist_override(forced_route_target_id: str) -> tuple[str | None, str | None]:
+    route_target_value = forced_route_target_id.strip()
+    if not route_target_value:
+        return None, None
+    try:
+        option = load_routing_registry().require_manual_rerun_specialist_option(route_target_value)
+    except RoutingRegistryError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return option.route_target_id, option.specialist_id
+
+
+def _normalize_optional_user_id(user_id: str | None) -> str | None:
+    candidate = (user_id or "").strip()
+    if not candidate:
+        return None
+    try:
+        return str(uuid.UUID(candidate))
+    except ValueError:
+        return None
+
+
+def _users_page_path(*, open_create_form: bool = False, editing_user_id: str | None = None) -> str:
+    if open_create_form:
+        return "/ops/users?create=1"
+    normalized_user_id = _normalize_optional_user_id(editing_user_id)
+    if normalized_user_id is not None:
+        return f"/ops/users?edit_user={normalized_user_id}"
+    return "/ops/users"
+
+
+def _read_users_ui_state(request: Request) -> tuple[bool, str | None]:
+    open_create_form = _parse_bool(request.query_params.get("create"))
+    editing_user_id = None if open_create_form else _normalize_optional_user_id(request.query_params.get("edit_user"))
+    return open_create_form, editing_user_id
+
+
+def _users_page_extra(
+    *,
+    db: Session,
+    current_user: User,
+    error: str | None = None,
+    open_create_form: bool = False,
+    editing_user_id: str | None = None,
+) -> dict[str, object]:
+    extra: dict[str, object] = {
+        "users": _load_users_for_admin(db),
+        "allowed_new_roles": _allowed_new_user_roles(current_user),
+        "open_create_form": open_create_form,
+        "editing_user_id": None if open_create_form else _normalize_optional_user_id(editing_user_id),
+        "can_edit_user_profile": lambda user: _can_edit_user_profile(current_user, user),
+        "can_change_user_role": lambda user: _can_change_user_role(current_user, user),
+        "can_toggle_user_active": lambda user: _can_toggle_user_active(current_user, user),
+    }
+    if error is not None:
+        extra["error"] = error
+    return extra
+
+
+def _render_ops_users_page(
+    request: Request,
+    *,
+    current_user: User,
+    auth_session,
+    db: Session,
+    status_code: int = status.HTTP_200_OK,
+    error: str | None = None,
+    open_create_form: bool = False,
+    editing_user_id: str | None = None,
+):
+    return templates.TemplateResponse(
+        request,
+        "ops_users.html",
+        build_template_context(
+            request=request,
+            current_user=current_user,
+            auth_session=auth_session,
+            extra=_users_page_extra(
+                db=db,
+                current_user=current_user,
+                error=error,
+                open_create_form=open_create_form,
+                editing_user_id=editing_user_id,
+            ),
+            ui_switch_path=_users_page_path(open_create_form=open_create_form, editing_user_id=editing_user_id),
+        ),
+        status_code=status_code,
+    )
+
+
 def _read_filters(request: Request) -> dict[str, object]:
     query = request.query_params
     return {
@@ -355,6 +492,7 @@ def _ticket_detail_context(
     latest_analysis_steps = _load_run_steps(db, run_id=latest_analysis_run_id) if latest_analysis_run_id is not None else []
     latest_ai_note = _load_latest_internal_ai_note(db, ticket_id=ticket.id)
     analysis_view = present_ai_run_output(latest_analysis_run)
+    activity_timeline = _build_ops_activity_timeline(db, ticket_id=ticket.id, ui_locale=ui_locale)
     creator = db.get(User, ticket.created_by_user_id)
     assignee = db.get(User, ticket.assigned_to_user_id) if ticket.assigned_to_user_id else None
     return {
@@ -362,7 +500,8 @@ def _ticket_detail_context(
         "route_target_display": present_ticket_route_target(ticket),
         "creator": creator,
         "assignee": assignee,
-        "activity_timeline": _build_ops_activity_timeline(db, ticket_id=ticket.id, ui_locale=ui_locale),
+        "activity_timeline": activity_timeline,
+        "auto_scroll_message_id": _last_public_message_item_id(activity_timeline),
         "ops_users": _load_ops_users(db),
         "status_options": _OPS_FILTERABLE_STATUSES,
         "draft_reply_status_options": _OPS_DRAFT_REPLY_STATUSES,
@@ -403,19 +542,15 @@ def ops_manage_users(
     auth_session=Depends(get_required_auth_session),
     db: Session = Depends(db_session_dependency),
 ):
+    open_create_form, editing_user_id = _read_users_ui_state(request)
     db.commit()
-    return templates.TemplateResponse(
+    return _render_ops_users_page(
         request,
-        "ops_users.html",
-        build_template_context(
-            request=request,
-            current_user=current_user,
-            auth_session=auth_session,
-            extra={
-                "users": _load_users_for_admin(db),
-                "allowed_new_roles": _allowed_new_user_roles(current_user),
-            },
-        ),
+        current_user=current_user,
+        auth_session=auth_session,
+        db=db,
+        open_create_form=open_create_form,
+        editing_user_id=editing_user_id,
     )
 
 
@@ -445,22 +580,76 @@ def ops_create_user(
         )
     except ValueError as exc:
         db.rollback()
-        return templates.TemplateResponse(
+        return _render_ops_users_page(
             request,
-            "ops_users.html",
-            build_template_context(
-                request=request,
-                current_user=current_user,
-                auth_session=auth_session,
-                extra={
-                    "error": str(exc),
-                    "users": _load_users_for_admin(db),
-                    "allowed_new_roles": _allowed_new_user_roles(current_user),
-                },
-                ui_switch_path="/ops/users",
-            ),
+            current_user=current_user,
+            auth_session=auth_session,
+            db=db,
             status_code=status.HTTP_400_BAD_REQUEST,
+            error=str(exc),
+            open_create_form=True,
         )
+    db.commit()
+    return RedirectResponse("/ops/users", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/ops/users/{user_id}/update")
+def ops_update_user(
+    user_id: str,
+    request: Request,
+    current_user: User = Depends(require_ops_user),
+    auth_session=Depends(get_required_auth_session),
+    csrf_token: str = Form(...),
+    display_name: str = Form(...),
+    password: str = Form(default=""),
+    role: str = Form(...),
+    db: Session = Depends(db_session_dependency),
+):
+    validate_csrf_token(auth_session, csrf_token)
+    user = _load_user_or_404(db, user_id=user_id)
+    if not _can_edit_user_profile(current_user, user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot manage that user")
+    requested_role = role.strip()
+    if requested_role != user.role and not _can_change_user_role(current_user, user, requested_role):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot assign that role")
+    try:
+        update_user(
+            db,
+            user=user,
+            display_name=display_name,
+            role=requested_role,
+            password=password,
+        )
+    except ValueError as exc:
+        db.rollback()
+        return _render_ops_users_page(
+            request,
+            current_user=current_user,
+            auth_session=auth_session,
+            db=db,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error=str(exc),
+            editing_user_id=str(user.id),
+        )
+    db.commit()
+    return RedirectResponse("/ops/users", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/ops/users/{user_id}/set-active")
+def ops_set_user_active(
+    user_id: str,
+    request: Request,
+    current_user: User = Depends(require_ops_user),
+    auth_session=Depends(get_required_auth_session),
+    csrf_token: str = Form(...),
+    is_active: str = Form(...),
+    db: Session = Depends(db_session_dependency),
+):
+    validate_csrf_token(auth_session, csrf_token)
+    user = _load_user_or_404(db, user_id=user_id)
+    if not _can_toggle_user_active(current_user, user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot manage that user")
+    set_user_active_state(db, user=user, is_active=_parse_required_bool(is_active))
     db.commit()
     return RedirectResponse("/ops/users", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -597,12 +786,14 @@ def ops_reply_public(
     csrf_token: str = Form(...),
     body: str = Form(...),
     next_status: str = Form(...),
+    forced_route_target_id: str = Form(default=""),
     db: Session = Depends(db_session_dependency),
 ):
     validate_csrf_token(auth_session, csrf_token)
     ticket = _load_ops_ticket_or_404(db, reference=reference)
     if not body.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Reply text is required")
+    route_target_value, forced_specialist_id = _resolve_manual_rerun_specialist_override(forced_route_target_id)
     try:
         add_ops_public_reply(
             db,
@@ -610,6 +801,8 @@ def ops_reply_public(
             actor=current_user,
             body_markdown=body.strip(),
             next_status=next_status.strip(),
+            forced_route_target_id=route_target_value,
+            forced_specialist_id=forced_specialist_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -646,17 +839,7 @@ def ops_rerun_ai(
 ):
     validate_csrf_token(auth_session, csrf_token)
     ticket = _load_ops_ticket_or_404(db, reference=reference)
-    route_target_value = forced_route_target_id.strip()
-    forced_specialist_id = None
-    if route_target_value:
-        try:
-            option = load_routing_registry().require_manual_rerun_specialist_option(route_target_value)
-        except RoutingRegistryError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        route_target_value = option.route_target_id
-        forced_specialist_id = option.specialist_id
-    else:
-        route_target_value = None
+    route_target_value, forced_specialist_id = _resolve_manual_rerun_specialist_override(forced_route_target_id)
     request_manual_rerun(
         db,
         ticket=ticket,

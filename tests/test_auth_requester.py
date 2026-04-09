@@ -479,9 +479,15 @@ def test_ops_user_management_routes_and_role_limits_are_present():
 
     assert '"/ops/users"' in source
     assert '"/ops/users/create"' in source
+    assert '"/ops/users/{user_id}/update"' in source
+    assert '"/ops/users/{user_id}/set-active"' in source
     assert "if actor.role == \"admin\"" in source
     assert "return (\"requester\",)" in source
     assert 't("ops.users.create_heading")' in template_source
+    assert 't("button.edit")' in template_source
+    assert 't("button.save_changes")' in template_source
+    assert 'class="table ops-users__table"' in template_source
+    assert '"/ops/users?create=1"' in template_source
     assert "/ops/users" in base_template_source
 
 
@@ -1109,6 +1115,61 @@ def test_requester_detail_renders_attachment_links(monkeypatch):
     assert f'/attachments/{attachment_id}' in response.text
     assert "notes.pdf" in response.text
     assert "application/pdf" in response.text
+
+
+def test_requester_detail_marks_last_public_message_for_auto_scroll(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000003", id=uuid.uuid4(), title="Ticket", status="new", urgent=False)
+    first_message_id = str(uuid.uuid4())
+    last_message_id = str(uuid.uuid4())
+    timeline = [
+        {
+            "kind": "message",
+            "id": first_message_id,
+            "created_at": SimpleNamespace(strftime=lambda fmt: "2026-03-26 19:00 UTC"),
+            "author_label": "You",
+            "body_html": "<p>Original request.</p>",
+            "attachments": [],
+        },
+        {
+            "kind": "status_change",
+            "id": str(uuid.uuid4()),
+            "created_at": SimpleNamespace(strftime=lambda fmt: "2026-03-26 19:05 UTC"),
+            "lane_label": "Status",
+            "summary": "Status changed to Reviewing",
+        },
+        {
+            "kind": "message",
+            "id": last_message_id,
+            "created_at": SimpleNamespace(strftime=lambda fmt: "2026-03-26 19:10 UTC"),
+            "author_label": "AI",
+            "body_html": "<p>Need one more detail.</p>",
+            "attachments": [],
+        },
+    ]
+
+    monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(stack["routes_requester"], "_build_requester_timeline", lambda *args, **kwargs: timeline)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: requester
+    app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get(f"/app/tickets/{ticket.reference}")
+
+    assert response.status_code == 200
+    assert response.text.count('data-auto-scroll-target="true"') == 1
+    assert f'id="ticket-message-{last_message_id}"' in response.text
+    assert f'id="ticket-message-{first_message_id}"' in response.text
+    assert re.search(
+        rf'id="ticket-message-{re.escape(last_message_id)}"[^>]*data-auto-scroll-target="true"',
+        response.text,
+    )
 
 
 def test_attachment_download_forbids_non_owner_requester():

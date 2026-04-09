@@ -770,6 +770,103 @@ def test_ensure_admin_user_rejects_conflicting_existing_user():
         )
 
 
+def test_create_user_rejects_invalid_email_address():
+    from shared.user_admin import create_user
+
+    class _AdminSession:
+        def __init__(self):
+            self.users = {}
+
+        def add(self, item):
+            email = getattr(item, "email", None)
+            if email:
+                self.users[email] = item
+
+        def execute(self, statement):
+            class _Result:
+                def __init__(self, user):
+                    self._user = user
+
+                def scalar_one_or_none(self):
+                    return self._user
+
+            params = statement.compile().params
+            return _Result(self.users.get(params["email_1"]))
+
+    with pytest.raises(ValueError, match=r"^Invalid email address\.$"):
+        create_user(
+            _AdminSession(),
+            email="invalid email",
+            display_name="Requester",
+            password="secret-pass",
+            role="requester",
+        )
+
+
+def test_create_user_rejects_short_password():
+    from shared.user_admin import create_user
+
+    class _AdminSession:
+        def add(self, item):
+            return None
+
+        def execute(self, statement):
+            class _Result:
+                def scalar_one_or_none(self):
+                    return None
+
+            return _Result()
+
+    with pytest.raises(ValueError, match=r"^Password must be at least 8 characters\.$"):
+        create_user(
+            _AdminSession(),
+            email="requester@example.com",
+            display_name="Requester",
+            password="short",
+            role="requester",
+        )
+
+
+def test_update_user_rejects_short_password_when_provided():
+    from shared.user_admin import update_user
+
+    user = SimpleNamespace(
+        display_name="Existing User",
+        role="requester",
+        password_hash="hash",
+        updated_at=None,
+    )
+
+    with pytest.raises(ValueError, match=r"^Password must be at least 8 characters\.$"):
+        update_user(
+            None,
+            user=user,
+            display_name="Existing User",
+            role="requester",
+            password="short",
+        )
+
+
+def test_set_password_rejects_blank_password():
+    from shared.user_admin import set_password
+
+    user = SimpleNamespace(password_hash="hash", updated_at=None)
+
+    class _AdminSession:
+        def execute(self, statement):
+            class _Result:
+                def __init__(self, user):
+                    self._user = user
+
+                def scalar_one_or_none(self):
+                    return self._user
+
+            return _Result(user)
+
+    with pytest.raises(ValueError, match=r"^Password is required\.$"):
+        set_password(_AdminSession(), email="requester@example.com", password="   ")
+
+
 def test_create_admin_script_reports_matching_admin_as_success(monkeypatch, capsys):
     import argparse
 

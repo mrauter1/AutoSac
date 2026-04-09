@@ -51,6 +51,15 @@ def _ticket_detail_path(*, current_user: User, reference: str) -> str:
     return f"/app/tickets/{reference}"
 
 
+def _last_public_message_item_id(timeline: list[dict[str, object]]) -> str | None:
+    for item in reversed(timeline):
+        if item.get("kind") == "message":
+            item_id = item.get("id")
+            if isinstance(item_id, str) and item_id:
+                return item_id
+    return None
+
+
 def _load_requester_ticket_or_404(db: Session, *, reference: str, requester_id) -> Ticket:
     ticket = db.execute(
         select(Ticket).where(Ticket.reference == reference, Ticket.created_by_user_id == requester_id)
@@ -318,6 +327,7 @@ def requester_ticket_detail(
             status_code=status.HTTP_303_SEE_OTHER,
         )
     upsert_ticket_view(db, user_id=current_user.id, ticket_id=ticket.id)
+    timeline = _build_requester_timeline(db, ticket_id=ticket.id, ui_locale=ui_locale)
     db.commit()
     return templates.TemplateResponse(
         request,
@@ -326,7 +336,11 @@ def requester_ticket_detail(
             request=request,
             current_user=current_user,
             auth_session=auth_session,
-            extra={"ticket": ticket, "timeline": _build_requester_timeline(db, ticket_id=ticket.id, ui_locale=ui_locale)},
+            extra={
+                "ticket": ticket,
+                "timeline": timeline,
+                "auto_scroll_message_id": _last_public_message_item_id(timeline),
+            },
             ui_locale=ui_locale,
         ),
     )

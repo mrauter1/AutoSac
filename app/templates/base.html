@@ -48,5 +48,16 @@
       {% endif %}
       {% block body %}{% endblock %}
     </main>
+    <script>
+      window.addEventListener("load", () => {
+        const target = document.querySelector("[data-auto-scroll-target='true']");
+        if (!target) {
+          return;
+        }
+        window.requestAnimationFrame(() => {
+          target.scrollIntoView({ block: "start" });
+        });
+      });
+    </script>
   </body>
 </html>

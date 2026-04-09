@@ -3,17 +3,33 @@
 {% block page_class %} page--workspace{% endblock %}
 {% block body %}
 <div class="workspace-view ops-users">
-  <section class="page-header page-header--card page-header--stack">
-    <p class="eyebrow">{{ t("eyebrow.access_administration") }}</p>
-    <h1>{{ t("ops.users.heading") }}</h1>
-    <p class="muted">{{ t("ops.users.subtitle") }}</p>
+  <section class="page-header page-header--card">
+    <div class="stack stack--tight">
+      <p class="eyebrow">{{ t("eyebrow.access_administration") }}</p>
+      <h1>{{ t("ops.users.heading") }}</h1>
+      <p class="muted">{{ t("ops.users.subtitle") }}</p>
+    </div>
+    <div class="button-row ops-users__toolbar">
+      {% if open_create_form %}
+      <a class="button button--ghost" href="/ops/users">{{ t("button.cancel") }}</a>
+      {% else %}
+      <a class="button" href="/ops/users?create=1">{{ t("button.create_user") }}</a>
+      {% endif %}
+    </div>
   </section>
 
-  <section class="ops-users__layout">
-    <section class="panel">
-      <h2>{{ t("ops.users.create_heading") }}</h2>
-      <form method="post" action="/ops/users/create" class="stack">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {% if open_create_form %}
+  <section class="panel ops-users__create-panel">
+    <div class="ops-users__panel-header">
+      <div class="stack stack--tight">
+        <h2>{{ t("ops.users.create_heading") }}</h2>
+        <p class="muted">{{ t("ops.users.manage_hint") }}</p>
+      </div>
+      <a class="button button--ghost" href="/ops/users">{{ t("button.cancel") }}</a>
+    </div>
+    <form method="post" action="/ops/users/create" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="ops-users__form-grid">
         <label class="field">
           <span>{{ t("field.email") }}</span>
           <input type="email" name="email" required>
@@ -34,33 +50,119 @@
             {% endfor %}
           </select>
         </label>
+      </div>
+      <div class="button-row">
         <button type="submit" class="button">{{ t("button.create_user") }}</button>
-      </form>
-    </section>
+      </div>
+    </form>
+  </section>
+  {% endif %}
 
-    <section class="panel">
-      <h2>{{ t("ops.users.current_heading") }}</h2>
-      <table class="table">
+  <section class="panel">
+    <div class="ops-users__panel-header">
+      <div class="stack stack--tight">
+        <h2>{{ t("ops.users.current_heading") }}</h2>
+        <p class="muted">{{ t("ops.users.manage_hint") }}</p>
+      </div>
+    </div>
+    <div class="ops-users__table-wrap">
+      <table class="table ops-users__table">
         <thead>
           <tr>
-            <th>{{ t("table.email") }}</th>
-            <th>{{ t("table.name") }}</th>
-            <th>{{ t("table.role") }}</th>
-            <th>{{ t("table.status") }}</th>
+            <th>{{ t("field.email") }}</th>
+            <th>{{ t("field.display_name") }}</th>
+            <th>{{ t("field.role") }}</th>
+            <th>{{ t("field.status") }}</th>
+            <th>{{ t("common.actions") }}</th>
           </tr>
         </thead>
         <tbody>
           {% for user in users %}
-          <tr>
+          {% set can_edit_profile = can_edit_user_profile(user) %}
+          {% set can_change_role = can_change_user_role(user) %}
+          {% set can_toggle_active = can_toggle_user_active(user) %}
+          {% set is_editing = editing_user_id == user.id|string %}
+          <tr class="ops-users__row{% if not user.is_active %} ops-users__row--inactive{% endif %}">
             <td>{{ user.email }}</td>
-            <td>{{ user.display_name }}</td>
-            <td>{{ user_role_label(user.role) }}</td>
-            <td>{% if user.is_active %}{{ t("ops.users.status.active") }}{% else %}{{ t("ops.users.status.inactive") }}{% endif %}</td>
+            <td>
+              <strong>{{ user.display_name }}</strong>
+            </td>
+            <td>
+              <span class="status-pill">{{ user_role_label(user.role) }}</span>
+            </td>
+            <td>
+              <span class="status-pill{% if not user.is_active %} status-pill--muted{% endif %}">
+                {% if user.is_active %}{{ t("ops.users.status.active") }}{% else %}{{ t("ops.users.status.inactive") }}{% endif %}
+              </span>
+            </td>
+            <td>
+              <div class="ops-users__actions">
+                {% if can_edit_profile %}
+                {% if is_editing %}
+                <a class="button button--ghost" href="/ops/users">{{ t("button.cancel") }}</a>
+                {% else %}
+                <a class="button button--ghost" href="/ops/users?edit_user={{ user.id }}">{{ t("button.edit") }}</a>
+                {% endif %}
+                {% else %}
+                <span class="muted ops-users__read-only">{{ t("ops.users.read_only") }}</span>
+                {% endif %}
+                {% if can_toggle_active %}
+                <form method="post" action="/ops/users/{{ user.id }}/set-active" class="ops-users__toggle-form">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <input type="hidden" name="is_active" value="{% if user.is_active %}0{% else %}1{% endif %}">
+                  <button type="submit" class="button button--ghost">
+                    {% if user.is_active %}{{ t("button.inactivate_user") }}{% else %}{{ t("button.activate_user") }}{% endif %}
+                  </button>
+                </form>
+                {% endif %}
+              </div>
+            </td>
+          </tr>
+          {% if can_edit_profile and is_editing %}
+          <tr class="ops-users__edit-row">
+            <td colspan="5">
+              <form method="post" action="/ops/users/{{ user.id }}/update" class="stack ops-users__inline-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="ops-users__form-grid">
+                  <label class="field">
+                    <span>{{ t("field.display_name") }}</span>
+                    <input type="text" name="display_name" value="{{ user.display_name }}" required>
+                  </label>
+                  <div class="field">
+                    <span>{{ t("field.role") }}</span>
+                    {% if can_change_role %}
+                    <select name="role" required>
+                      {% for role in allowed_new_roles %}
+                      <option value="{{ role }}" {% if role == user.role %}selected{% endif %}>{{ user_role_label(role) }}</option>
+                      {% endfor %}
+                    </select>
+                    {% else %}
+                    <input type="hidden" name="role" value="{{ user.role }}">
+                    <div class="ops-users__readonly-value">{{ user_role_label(user.role) }}</div>
+                    {% endif %}
+                  </div>
+                  <label class="field ops-users__field--full">
+                    <span>{{ t("field.new_password") }}</span>
+                    <input type="password" name="password" minlength="8">
+                  </label>
+                </div>
+                <p class="muted ops-users__password-hint">{{ t("ops.users.password_hint") }}</p>
+                <div class="button-row">
+                  <button type="submit" class="button">{{ t("button.save_changes") }}</button>
+                  <a class="button button--ghost" href="/ops/users">{{ t("button.cancel") }}</a>
+                </div>
+              </form>
+            </td>
+          </tr>
+          {% endif %}
+          {% else %}
+          <tr>
+            <td colspan="5" class="muted">{{ t("common.none_yet") }}</td>
           </tr>
           {% endfor %}
         </tbody>
       </table>
-    </section>
+    </div>
   </section>
 </div>
 {% endblock %}

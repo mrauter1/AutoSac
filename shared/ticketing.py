@@ -621,6 +621,8 @@ def add_ops_public_reply(
     actor: User,
     body_markdown: str,
     next_status: str,
+    forced_route_target_id: str | None = None,
+    forced_specialist_id: str | None = None,
 ) -> TicketMessage:
     if next_status not in {"ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved"}:
         raise ValueError(f"Invalid ops reply next status: {next_status}")
@@ -636,7 +638,13 @@ def add_ops_public_reply(
     )
     db.add(message)
     if next_status == "ai_triage":
-        request_manual_rerun(db, ticket=ticket, actor=actor)
+        request_manual_rerun(
+            db,
+            ticket=ticket,
+            actor=actor,
+            forced_route_target_id=forced_route_target_id,
+            forced_specialist_id=forced_specialist_id,
+        )
         return message
     if ticket.status != next_status:
         record_status_change(

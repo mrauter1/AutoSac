@@ -47,7 +47,11 @@
           <p class="timeline-status__text">{{ item.summary }}</p>
         </article>
         {% else %}
-        <article class="message-card{% if item.lane == 'internal' %} message-card--internal{% endif %}">
+        <article
+          id="ticket-message-{{ item.id }}"
+          class="message-card{% if item.lane == 'internal' %} message-card--internal{% endif %}"
+          {% if auto_scroll_message_id == item.id %}data-auto-scroll-target="true"{% endif %}
+        >
           <div class="message-card__meta">
             <span class="lane-pill lane-pill--{{ item.lane }}">{{ item.lane_label }}</span>
             <strong>{{ item.author_label }}</strong>
@@ -69,6 +73,42 @@
         {% else %}
         <p class="muted">{{ t("ops.detail.no_activity") }}</p>
         {% endfor %}
+      </section>
+
+      <section class="panel stack ops-ticket-detail__main-section">
+        <h2>{{ t("ops.detail.public_reply") }}</h2>
+        <form method="post" action="/ops/tickets/{{ ticket.reference }}/reply-public" class="stack">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label class="field">
+            <span>{{ t("field.reply") }}</span>
+            <textarea name="body" rows="6" required></textarea>
+          </label>
+          <div class="ops-ticket-detail__reply-controls">
+            <label class="field">
+              <span>{{ t("field.next_status") }}</span>
+              <select name="next_status">
+                {% for value in public_reply_status_options %}
+                <option value="{{ value }}" {% if value == default_public_reply_status %}selected{% endif %}>{{ ops_status_label(value) }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="field">
+              <span>{{ t("field.route_ai_to_specialist") }}</span>
+              <select name="forced_route_target_id">
+                <option value="">{{ t("button.use_normal_routing") }}</option>
+                {% for option in rerun_specialist_options %}
+                <option value="{{ option.route_target_id }}">
+                  {{ option.route_target_label }}
+                  {% if option.specialist_display_name != option.route_target_label %}
+                  · {{ option.specialist_display_name }}
+                  {% endif %}
+                </option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+          <button type="submit" class="button">{{ t("button.send_public_reply") }}</button>
+        </form>
       </section>
     </div>
 
@@ -374,26 +414,6 @@
           </select>
         </label>
         <button type="submit" class="button">{{ t("button.update_status") }}</button>
-      </form>
-    </section>
-
-    <section class="panel stack ops-ticket-detail__sidebar-section">
-      <h2>{{ t("ops.detail.public_reply") }}</h2>
-      <form method="post" action="/ops/tickets/{{ ticket.reference }}/reply-public" class="stack">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label class="field">
-          <span>{{ t("field.reply") }}</span>
-          <textarea name="body" rows="6" required></textarea>
-        </label>
-        <label class="field">
-          <span>{{ t("field.next_status") }}</span>
-          <select name="next_status">
-            {% for value in public_reply_status_options %}
-            <option value="{{ value }}" {% if value == default_public_reply_status %}selected{% endif %}>{{ ops_status_label(value) }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <button type="submit" class="button">{{ t("button.send_public_reply") }}</button>
       </form>
     </section>
 

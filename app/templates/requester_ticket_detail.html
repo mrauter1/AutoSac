@@ -28,7 +28,11 @@
         <p class="timeline-status__text">{{ item.summary }}</p>
       </article>
       {% else %}
-      <article class="message-card">
+      <article
+        id="ticket-message-{{ item.id }}"
+        class="message-card"
+        {% if auto_scroll_message_id is defined and auto_scroll_message_id == item.id %}data-auto-scroll-target="true"{% endif %}
+      >
         <div class="message-card__meta">
           <strong>{{ item.author_label }}</strong>
           <span>{{ format_datetime_utc(item.created_at) }}</span>

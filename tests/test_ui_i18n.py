@@ -357,8 +357,83 @@ def test_ops_user_create_error_uses_users_get_path_for_language_switch(monkeypat
         )
 
     assert response.status_code == 400
-    assert "/ui-language?locale=en&amp;next=%2Fops%2Fusers" in response.text
-    assert "/ui-language?locale=pt-BR&amp;next=%2Fops%2Fusers" in response.text
+    assert "/ui-language?locale=en&amp;next=%2Fops%2Fusers%3Fcreate%3D1" in response.text
+    assert "/ui-language?locale=pt-BR&amp;next=%2Fops%2Fusers%3Fcreate%3D1" in response.text
+
+
+def test_ops_user_update_error_uses_editing_users_get_path_for_language_switch(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="admin")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    target_user = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="existing@example.com",
+        display_name="Existing User",
+        role="dev_ti",
+        is_active=True,
+    )
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_user_or_404", lambda db, user_id: target_user)
+    monkeypatch.setattr(stack["routes_ops"], "_load_users_for_admin", lambda db: [target_user])
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "update_user",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("Display name is required.")),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            f"/ops/users/{target_user.id}/update",
+            data={
+                "csrf_token": "csrf-token",
+                "display_name": "   ",
+                "password": "",
+                "role": "dev_ti",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
+    assert f"/ui-language?locale=en&amp;next=%2Fops%2Fusers%3Fedit_user%3D{target_user.id}" in response.text
+    assert f"/ui-language?locale=pt-BR&amp;next=%2Fops%2Fusers%3Fedit_user%3D{target_user.id}" in response.text
+
+
+def test_ops_set_user_active_invalid_state_is_translated(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="admin")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    target_user = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="existing@example.com",
+        display_name="Existing User",
+        role="requester",
+        is_active=True,
+    )
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_user_or_404", lambda db, user_id: target_user)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            f"/ops/users/{target_user.id}/set-active",
+            data={"csrf_token": "csrf-token", "is_active": "maybe"},
+            headers={"Accept-Language": "pt-BR"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Estado de ativação inválido."
 
 
 def test_requester_timeline_uses_portuguese_status_labels(monkeypatch):

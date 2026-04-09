@@ -147,11 +147,17 @@ def test_add_ops_public_reply_ai_triage_delegates_to_manual_rerun(monkeypatch):
         status="waiting_on_dev_ti",
         urgent=False,
     )
-    observed = {"manual_rerun": 0}
+    observed = {"manual_rerun": 0, "forced_route_target_id": None, "forced_specialist_id": None}
 
     monkeypatch.setattr(
         "shared.ticketing.request_manual_rerun",
-        lambda db, ticket, actor: observed.__setitem__("manual_rerun", observed["manual_rerun"] + 1),
+        lambda db, ticket, actor, forced_route_target_id=None, forced_specialist_id=None: observed.update(
+            {
+                "manual_rerun": observed["manual_rerun"] + 1,
+                "forced_route_target_id": forced_route_target_id,
+                "forced_specialist_id": forced_specialist_id,
+            }
+        ),
     )
 
     message = symbols["add_ops_public_reply"](
@@ -160,6 +166,8 @@ def test_add_ops_public_reply_ai_triage_delegates_to_manual_rerun(monkeypatch):
         actor=actor,
         body_markdown="Please continue and answer directly.",
         next_status="ai_triage",
+        forced_route_target_id="software_architect",
+        forced_specialist_id="software-architect",
     )
 
     history = [item for item in fake_db.added if isinstance(item, symbols["TicketStatusHistory"])]
@@ -168,6 +176,8 @@ def test_add_ops_public_reply_ai_triage_delegates_to_manual_rerun(monkeypatch):
     assert message.visibility == "public"
     assert message.source == "human_public_reply"
     assert observed["manual_rerun"] == 1
+    assert observed["forced_route_target_id"] == "software_architect"
+    assert observed["forced_specialist_id"] == "software-architect"
     assert history == []
 
 
@@ -685,20 +695,14 @@ def test_requester_cannot_access_ops_ticket_detail():
 
 
 @pytest.mark.parametrize(
-    ("role", "expected_options"),
+    ("role", "admin_edit_visible"),
     [
-        ("dev_ti", ['<option value="requester">Requester</option>']),
-        (
-            "admin",
-            [
-                '<option value="requester">Requester</option>',
-                '<option value="dev_ti">Dev/TI</option>',
-            ],
-        ),
+        ("dev_ti", False),
+        ("admin", True),
     ],
 )
-def test_ops_users_page_allows_dev_ti_and_admin_with_role_scoped_options(monkeypatch, role, expected_options):
-    from app.i18n import user_role_label
+def test_ops_users_page_lists_table_rows_with_role_scoped_actions(monkeypatch, role, admin_edit_visible):
+    from app.i18n import translate
     from shared.config import get_default_ui_locale
 
     stack = _load_web_stack()
@@ -706,7 +710,21 @@ def test_ops_users_page_allows_dev_ti_and_admin_with_role_scoped_options(monkeyp
     db = _RouteDb()
     current_user = SimpleNamespace(id=uuid.uuid4(), display_name=role.upper(), role=role, is_active=True)
     auth_session = SimpleNamespace(csrf_token="csrf-token")
-    users = [SimpleNamespace(email="existing@example.com", display_name="Existing User", role="requester", is_active=True)]
+    manageable_user = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="existing@example.com",
+        display_name="Existing User",
+        role="requester",
+        is_active=True,
+    )
+    admin_user = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="admin@example.com",
+        display_name="Admin User",
+        role="admin",
+        is_active=True,
+    )
+    users = [manageable_user, admin_user]
     locale = get_default_ui_locale()
 
     monkeypatch.setattr(stack["routes_ops"], "_load_users_for_admin", lambda db: users)
@@ -719,13 +737,95 @@ def test_ops_users_page_allows_dev_ti_and_admin_with_role_scoped_options(monkeyp
         response = client.get("/ops/users")
 
     assert response.status_code == 200
+    assert '<table class="table ops-users__table">' in response.text
     assert "Existing User" in response.text
-    for option in expected_options:
-        role_value = option.split('"')[1]
+    assert '/ops/users?create=1' in response.text
+    assert f'/ops/users?edit_user={manageable_user.id}' in response.text
+    assert f'/ops/users/{manageable_user.id}/set-active' in response.text
+    assert (f'/ops/users?edit_user={admin_user.id}' in response.text) is admin_edit_visible
+    assert f'/ops/users/{admin_user.id}/set-active' not in response.text
+    assert f'/ops/users/{manageable_user.id}/update' not in response.text
+    assert translate(locale, "button.edit") in response.text
+    assert db.commit_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("role", "expected_options"),
+    [
+        ("dev_ti", ("requester",)),
+        ("admin", ("requester", "dev_ti")),
+    ],
+)
+def test_ops_users_create_panel_uses_role_scoped_options(monkeypatch, role, expected_options):
+    from app.i18n import translate, user_role_label
+    from shared.config import get_default_ui_locale
+
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name=role.upper(), role=role, is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_users_for_admin", lambda db: [])
+    locale = get_default_ui_locale()
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops/users?create=1")
+
+    assert response.status_code == 200
+    assert translate(locale, "ops.users.create_heading") in response.text
+    for role_value in expected_options:
         assert f'<option value="{role_value}">{user_role_label(role_value, locale)}</option>' in response.text
     assert f'<option value="admin">{user_role_label("admin", locale)}</option>' not in response.text
     if role == "dev_ti":
         assert f'<option value="dev_ti">{user_role_label("dev_ti", locale)}</option>' not in response.text
+    assert translate(locale, "button.cancel") in response.text
+    assert db.commit_calls == 1
+
+
+def test_ops_users_page_opens_selected_inline_editor(monkeypatch):
+    from app.i18n import translate
+    from shared.config import get_default_ui_locale
+
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name="ADMIN", role="admin", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    editable_user = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="editable@example.com",
+        display_name="Editable User",
+        role="dev_ti",
+        is_active=True,
+    )
+    other_user = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="other@example.com",
+        display_name="Other User",
+        role="requester",
+        is_active=True,
+    )
+    locale = get_default_ui_locale()
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_users_for_admin", lambda db: [editable_user, other_user])
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get(f"/ops/users?edit_user={editable_user.id}")
+
+    assert response.status_code == 200
+    assert f'/ops/users/{editable_user.id}/update' in response.text
+    assert f'/ops/users/{other_user.id}/update' not in response.text
+    assert translate(locale, "field.new_password") in response.text
+    assert translate(locale, "button.save_changes") in response.text
     assert db.commit_calls == 1
 
 
@@ -850,7 +950,15 @@ def test_ops_user_creation_validation_error_keeps_users_page_context(monkeypatch
     db = _RouteDb()
     current_user = SimpleNamespace(id=uuid.uuid4(), display_name="ADMIN", role="admin", is_active=True)
     auth_session = SimpleNamespace(csrf_token="csrf-token")
-    users = [SimpleNamespace(email="existing@example.com", display_name="Existing User", role="dev_ti", is_active=True)]
+    users = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            email="existing@example.com",
+            display_name="Existing User",
+            role="dev_ti",
+            is_active=True,
+        )
+    ]
 
     def fail_create_user(db, *, email, display_name, password, role):
         raise ValueError("User already exists: existing@example.com")
@@ -880,9 +988,230 @@ def test_ops_user_creation_validation_error_keeps_users_page_context(monkeypatch
     assert translate_error_text("User already exists: existing@example.com", locale) in response.text
     assert "Existing User" in response.text
     assert translate(locale, "ops.users.create_heading") in response.text
+    assert 'action="/ops/users/create"' in response.text
     assert f'<option value="dev_ti">{user_role_label("dev_ti", locale)}</option>' in response.text
     assert db.commit_calls == 0
     assert db.rollback_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("actor_role", "target_role", "requested_role", "expected_status"),
+    [
+        ("admin", "requester", "requester", 303),
+        ("admin", "requester", "dev_ti", 303),
+        ("admin", "dev_ti", "requester", 303),
+        ("admin", "dev_ti", "dev_ti", 303),
+        ("admin", "admin", "admin", 303),
+        ("admin", "admin", "requester", 403),
+        ("dev_ti", "requester", "requester", 303),
+        ("dev_ti", "dev_ti", "dev_ti", 303),
+        ("dev_ti", "requester", "dev_ti", 403),
+        ("dev_ti", "dev_ti", "requester", 403),
+    ],
+)
+def test_ops_user_update_role_matrix(monkeypatch, actor_role, target_role, requested_role, expected_status):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name=actor_role.upper(), role=actor_role, is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    target_user = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="existing@example.com",
+        display_name="Existing User",
+        role=target_role,
+        is_active=True,
+    )
+    updated = []
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_user_or_404", lambda db, user_id: target_user)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "update_user",
+        lambda db, *, user, display_name, role, password=None: updated.append(
+            {
+                "user": user,
+                "display_name": display_name,
+                "role": role,
+                "password": password,
+            }
+        ),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            f"/ops/users/{target_user.id}/update",
+            data={
+                "csrf_token": "csrf-token",
+                "display_name": "Updated User",
+                "password": "new-password-123",
+                "role": requested_role,
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == expected_status
+    if expected_status == 303:
+        assert response.headers["location"] == "/ops/users"
+        assert updated == [
+            {
+                "user": target_user,
+                "display_name": "Updated User",
+                "role": requested_role,
+                "password": "new-password-123",
+            }
+        ]
+        assert db.commit_calls == 1
+        assert db.rollback_calls == 0
+    else:
+        assert updated == []
+        assert db.commit_calls == 0
+        assert db.rollback_calls == 0
+
+
+def test_ops_user_update_validation_error_keeps_users_page_context(monkeypatch):
+    from app.i18n import translate, translate_error_text
+    from shared.config import get_default_ui_locale
+
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name="ADMIN", role="admin", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    target_user = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="existing@example.com",
+        display_name="Existing User",
+        role="dev_ti",
+        is_active=True,
+    )
+    locale = get_default_ui_locale()
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_user_or_404", lambda db, user_id: target_user)
+    monkeypatch.setattr(stack["routes_ops"], "_load_users_for_admin", lambda db: [target_user])
+    monkeypatch.setattr(stack["routes_ops"], "update_user", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("Display name is required.")))
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            f"/ops/users/{target_user.id}/update",
+            data={
+                "csrf_token": "csrf-token",
+                "display_name": "   ",
+                "password": "",
+                "role": "dev_ti",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
+    assert translate_error_text("Display name is required.", locale) in response.text
+    assert translate(locale, "ops.users.current_heading") in response.text
+    assert "Existing User" in response.text
+    assert f'action="/ops/users/{target_user.id}/update"' in response.text
+    assert db.commit_calls == 0
+    assert db.rollback_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("actor_role", "target_role", "is_active_value", "expected_status"),
+    [
+        ("admin", "requester", "0", 303),
+        ("admin", "dev_ti", "1", 303),
+        ("admin", "admin", "0", 403),
+        ("dev_ti", "requester", "0", 303),
+        ("dev_ti", "dev_ti", "0", 303),
+    ],
+)
+def test_ops_set_user_active_role_matrix(monkeypatch, actor_role, target_role, is_active_value, expected_status):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name=actor_role.upper(), role=actor_role, is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    target_user = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="existing@example.com",
+        display_name="Existing User",
+        role=target_role,
+        is_active=True,
+    )
+    observed = []
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_user_or_404", lambda db, user_id: target_user)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "set_user_active_state",
+        lambda db, *, user, is_active: observed.append({"user": user, "is_active": is_active}),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            f"/ops/users/{target_user.id}/set-active",
+            data={"csrf_token": "csrf-token", "is_active": is_active_value},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == expected_status
+    if expected_status == 303:
+        assert response.headers["location"] == "/ops/users"
+        assert observed == [{"user": target_user, "is_active": is_active_value == "1"}]
+        assert db.commit_calls == 1
+        assert db.rollback_calls == 0
+    else:
+        assert observed == []
+        assert db.commit_calls == 0
+        assert db.rollback_calls == 0
+
+
+def test_ops_set_user_active_rejects_invalid_flag(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name="ADMIN", role="admin", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    target_user = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="existing@example.com",
+        display_name="Existing User",
+        role="requester",
+        is_active=True,
+    )
+    observed = []
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_user_or_404", lambda db, user_id: target_user)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "set_user_active_state",
+        lambda db, *, user, is_active: observed.append({"user": user, "is_active": is_active}),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            f"/ops/users/{target_user.id}/set-active",
+            data={"csrf_token": "csrf-token", "is_active": "maybe"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
+    assert observed == []
+    assert db.commit_calls == 0
+    assert db.rollback_calls == 0
 
 
 def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):
@@ -1075,9 +1404,88 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
     assert response.status_code == 200
     assert observed["view_updates"] == 1
     assert db.commit_calls == 1
-    assert 'name="forced_route_target_id"' in response.text
+    assert response.text.count('name="forced_route_target_id"') == 2
     assert translate(locale, "button.use_normal_routing") in response.text
     assert "Software Architect" in response.text
+
+
+def test_ops_reply_public_allows_forced_specialist_route_target(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000012R", id=uuid.uuid4())
+    observed = {}
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "add_ops_public_reply",
+        lambda db, ticket, actor, body_markdown, next_status, forced_route_target_id=None, forced_specialist_id=None: observed.update(
+            {
+                "body_markdown": body_markdown,
+                "next_status": next_status,
+                "forced_route_target_id": forced_route_target_id,
+                "forced_specialist_id": forced_specialist_id,
+            }
+        ),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            f"/ops/tickets/{ticket.reference}/reply-public",
+            data={
+                "csrf_token": "csrf-token",
+                "body": "Please retry the AI with architecture context.",
+                "next_status": "ai_triage",
+                "forced_route_target_id": "software_architect",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/ops/tickets/{ticket.reference}"
+    assert observed == {
+        "body_markdown": "Please retry the AI with architecture context.",
+        "next_status": "ai_triage",
+        "forced_route_target_id": "software_architect",
+        "forced_specialist_id": "software-architect",
+    }
+    assert db.commit_calls == 1
+
+
+def test_ops_reply_public_rejects_invalid_forced_route_target(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000012S", id=uuid.uuid4())
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            f"/ops/tickets/{ticket.reference}/reply-public",
+            data={
+                "csrf_token": "csrf-token",
+                "body": "Please retry.",
+                "next_status": "ai_triage",
+                "forced_route_target_id": "manual_review",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
 
 
 def test_ops_set_ticket_status_ai_triage_triggers_manual_rerun(monkeypatch):
@@ -1451,6 +1859,72 @@ def test_ticket_detail_context_uses_latest_accepted_analysis_run(tmp_path, monke
     assert context["default_public_reply_status"] == "ai_triage"
 
 
+def test_ticket_detail_context_uses_last_public_message_for_auto_scroll(monkeypatch):
+    stack = _load_web_stack()
+    last_public_message_id = str(uuid.uuid4())
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        created_by_user_id=uuid.uuid4(),
+        assigned_to_user_id=None,
+    )
+    timeline = [
+        {
+            "kind": "message",
+            "id": str(uuid.uuid4()),
+            "lane": "public",
+            "created_at": datetime.now(timezone.utc),
+            "author_label": "Requester",
+            "body_html": "<p>Original request</p>",
+            "attachments": [],
+        },
+        {
+            "kind": "message",
+            "id": str(uuid.uuid4()),
+            "lane": "internal",
+            "created_at": datetime.now(timezone.utc),
+            "author_label": "Dev/TI",
+            "body_html": "<p>Internal note</p>",
+            "attachments": [],
+        },
+        {
+            "kind": "message",
+            "id": last_public_message_id,
+            "lane": "public",
+            "created_at": datetime.now(timezone.utc),
+            "author_label": "Requester",
+            "body_html": "<p>Follow-up</p>",
+            "attachments": [],
+        },
+        {
+            "kind": "status_change",
+            "id": str(uuid.uuid4()),
+            "created_at": datetime.now(timezone.utc),
+            "summary": "AI Triage -> Waiting on User",
+            "actor_label": "AI",
+        },
+    ]
+
+    class _ContextDb:
+        def get(self, model, key):
+            return None
+
+    monkeypatch.setattr(stack["routes_ops"], "_build_ops_activity_timeline", lambda *args, **kwargs: timeline)
+    monkeypatch.setattr(stack["routes_ops"], "_load_pending_draft", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_analysis_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_internal_ai_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_users", lambda *args, **kwargs: [])
+
+    context = stack["routes_ops"]._ticket_detail_context(
+        _ContextDb(),
+        ticket=ticket,
+        current_user=SimpleNamespace(id=uuid.uuid4(), role="admin"),
+    )
+
+    assert context["activity_timeline"] == timeline
+    assert context["auto_scroll_message_id"] == last_public_message_id
+
+
 def test_build_ops_activity_timeline_merges_status_changes_after_messages(monkeypatch):
     stack = _load_web_stack()
     ticket_id = uuid.uuid4()
@@ -1608,8 +2082,10 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert '"/ops/tickets/{reference}/assign"' in source
     assert '"/ops/tickets/{reference}/set-status"' in source
     assert '"/ops/tickets/{reference}/rerun-ai"' in source
+    assert 'forced_route_target_id: str = Form(default="")' in source
     assert 't("field.route_ai_to_specialist")' in detail_template
-    assert 'name="forced_route_target_id"' in detail_template
+    assert detail_template.count('name="forced_route_target_id"') == 2
+    assert 'ops-ticket-detail__main-section' in detail_template
     assert "add_ops_public_reply" in source
     assert "add_ops_internal_note" in source
     assert "assign_ticket_for_ops" in source
@@ -1628,6 +2104,8 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert 't("ops.detail.activity")' in detail_template
     assert 't("ops.detail.ai_analysis")' in detail_template
     assert 'page{% block page_class %}{% endblock %}' in base_template
+    assert 'data-auto-scroll-target="true"' in detail_template
+    assert 'scrollIntoView({ block: "start" })' in base_template
     assert 'page--ops-ticket-detail' in detail_template
     assert "ops-ticket-detail__layout" in detail_template
     assert "ops-ticket-detail__main" in detail_template
