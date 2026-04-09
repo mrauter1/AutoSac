@@ -40,7 +40,44 @@ codex login
 
 If you do not want to use `codex login`, leave that step out and set `CODEX_API_KEY` in `.env` later.
 
-## 3. Clone the repository and create the Python environment
+## 3. Allow Codex sandboxing on Ubuntu 24.04
+
+Ubuntu 24.04 may block Codex local read-only probing with an AppArmor error similar to:
+
+```text
+bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted
+```
+
+If that happens, add an AppArmor profile for `bwrap`. Most Ubuntu installs use `/usr/bin/bwrap`. If `which bwrap` prints a different path, adjust both the profile filename and the path inside the profile.
+
+```bash
+which bwrap
+sudo mkdir -p /etc/apparmor.d/local
+
+sudo tee /etc/apparmor.d/usr.bin.bwrap >/dev/null <<'EOF'
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/usr.bin.bwrap>
+}
+EOF
+
+sudo touch /etc/apparmor.d/local/usr.bin.bwrap
+sudo apparmor_parser -r /etc/apparmor.d/usr.bin.bwrap
+sudo systemctl daemon-reload
+sudo systemctl reload apparmor
+codex sandbox linux -- bash -lc 'pwd'
+```
+
+Expected result:
+
+- the sandbox test prints a working directory instead of failing with the `bwrap` / `RTM_NEWADDR` error
+
+## 4. Clone the repository and create the Python environment
 
 ```bash
 cd ~
@@ -52,7 +89,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-## 4. Create the runtime directories
+## 5. Create the runtime directories
 
 Create the directories that AutoSac expects for uploads and the read-only worker workspace:
 
@@ -68,7 +105,7 @@ Notes:
 - `app/` and `manuals/` only need to exist for bootstrap and readiness checks to pass.
 - If you want the worker to inspect internal application files or manuals, populate those directories before running production traffic.
 
-## 5. Create `.env`
+## 6. Create `.env`
 
 Start from the example file:
 
@@ -100,7 +137,7 @@ Important:
 - If `command -v codex` returns a path outside the normal system PATH, set `CODEX_BIN` to that full path instead of `codex`.
 - Leave `CODEX_API_KEY` empty if you already ran `codex login` as the service user.
 
-## 6. Prepare PostgreSQL, the workspace, and the schema
+## 7. Prepare PostgreSQL, the workspace, and the schema
 
 Activate the virtual environment if you are not already in it:
 
@@ -126,7 +163,7 @@ What this does:
 - backfills historical AI run rows into the current step-based structure
 - writes the worker workspace contract and initializes the workspace git repository
 
-## 7. Create the first admin user
+## 8. Create the first admin user
 
 ```bash
 python scripts/create_admin.py \
@@ -137,7 +174,7 @@ python scripts/create_admin.py \
 
 You can add more local users later with `python scripts/create_user.py`.
 
-## 8. Run readiness checks
+## 9. Run readiness checks
 
 Before enabling systemd services, make sure both checks pass:
 
@@ -148,7 +185,7 @@ python scripts/run_worker.py --check
 
 Both commands should exit successfully.
 
-## 9. Optional manual first start
+## 10. Optional manual first start
 
 If you want to verify the processes manually before installing the services, start them in two terminals:
 
@@ -172,7 +209,7 @@ Then open `http://YOUR_SERVER_IP:8000/login`.
 
 Stop both processes after you confirm the app is reachable.
 
-## 10. Install the systemd services
+## 11. Install the systemd services
 
 Use the repo-provided installer:
 
@@ -203,7 +240,7 @@ sudo bash scripts/setup_systemd_services.sh \
   --env-file /home/YOUR_USER/AutoSac/.env
 ```
 
-## 11. Verify the services
+## 12. Verify the services
 
 ```bash
 systemctl status autosac-web autosac-worker --no-pager
@@ -218,7 +255,7 @@ Expected results:
 - `/healthz` returns `{"status":"ok"}`
 - `/readyz` returns `{"status":"ready"}`
 
-## 12. Reboot test
+## 13. Reboot test
 
 Confirm the services return after a reboot:
 

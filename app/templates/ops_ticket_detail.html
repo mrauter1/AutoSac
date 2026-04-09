@@ -1,131 +1,133 @@
 {% extends "base.html" %}
 
 {% block title %}{{ ticket.reference }} | {{ t("ops.detail.short_title") }} | {{ t("brand.name") }}{% endblock %}
+{% block page_class %} page--ops-ticket-detail{% endblock %}
 
 {% block body %}
-<section class="page-header page-header--stack">
-  <div class="ticket-card__meta">
-    <span class="ticket-ref">{{ ticket.reference }}</span>
-    <span class="status-pill">{{ ops_status_label(ticket.status) }}</span>
-    {% if route_target_display.id %}
-    <span class="status-pill">{{ route_target_display.label }}</span>
-    {% endif %}
-    {% if route_target_display.kind %}
-    <span class="status-pill">{{ route_target_kind_label(route_target_display.kind) }}</span>
-    {% endif %}
-    {% if ticket.urgent %}
-    <span class="urgent-pill">{{ t("common.urgent") }}</span>
-    {% endif %}
-    {% if pending_draft %}
-    <span class="updated-pill">{{ t("ops.detail.draft_pending_approval") }}</span>
-    {% endif %}
-  </div>
-  <h1>{{ ticket.title }}</h1>
-  <p class="muted">
-    {{ t("ops.detail.requester", value=creator.display_name if creator else unknown_label) }}
-    · {{ t("ops.detail.assigned", value=assignee.display_name if assignee else unassigned_label) }}
-    · {{ t("ops.detail.updated", value=format_datetime_utc(ticket.updated_at)) }}
-  </p>
-</section>
-
-<section class="detail-grid">
-  <div class="stack">
-    <section class="panel stack">
-      <div class="thread-header">
-        <h2>{{ t("ops.detail.activity") }}</h2>
-      </div>
-      {% for item in activity_timeline %}
-      {% if item.kind == "status_change" %}
-      <article class="timeline-status">
-        <div class="timeline-status__meta">
-          <span class="lane-pill lane-pill--status">{{ item.lane_label }}</span>
-          <strong>{{ item.actor_label }}</strong>
-          <span>{{ format_datetime_utc(item.created_at) }}</span>
-        </div>
-        <p class="timeline-status__text">{{ item.summary }}</p>
-      </article>
-      {% else %}
-      <article class="message-card{% if item.lane == 'internal' %} message-card--internal{% endif %}">
-        <div class="message-card__meta">
-          <span class="lane-pill lane-pill--{{ item.lane }}">{{ item.lane_label }}</span>
-          <strong>{{ item.author_label }}</strong>
-          <span>{{ format_datetime_utc(item.created_at) }}</span>
-        </div>
-        <div class="message-card__body">{{ item.body_html | safe }}</div>
-        {% if item.attachments %}
-        <ul class="attachment-list">
-          {% for attachment in item.attachments %}
-          <li>
-            <a href="/attachments/{{ attachment.id }}">{{ attachment.original_filename }}</a>
-            <span class="muted">{{ attachment.mime_type }} · {{ t("common.bytes", count=attachment.size_bytes) }}</span>
-          </li>
-          {% endfor %}
-        </ul>
-        {% endif %}
-      </article>
+<div class="ops-ticket-detail">
+  <section class="page-header page-header--stack ops-ticket-detail__header">
+    <div class="ticket-card__meta ops-ticket-detail__meta">
+      <span class="ticket-ref">{{ ticket.reference }}</span>
+      <span class="status-pill">{{ ops_status_label(ticket.status) }}</span>
+      {% if route_target_display.id %}
+      <span class="status-pill">{{ route_target_display.label }}</span>
       {% endif %}
-      {% else %}
-      <p class="muted">{{ t("ops.detail.no_activity") }}</p>
-      {% endfor %}
-    </section>
-  </div>
-
-  <div class="stack">
-    <section class="panel stack stack--tight analysis-panel">
-      <h2>{{ t("ops.detail.ai_analysis") }}</h2>
-      <dl class="meta-list meta-list--compact">
-        <div>
-          <dt>{{ t("field.route_target") }}</dt>
-          <dd>{{ route_target_display.label }}</dd>
-        </div>
-        <div>
-          <dt>{{ t("ops.detail.target_kind") }}</dt>
-          <dd>{{ route_target_kind_label(route_target_display.kind) if route_target_display.kind else unknown_label }}</dd>
-        </div>
-        <div>
-          <dt>{{ t("ops.detail.latest_run") }}</dt>
-          <dd>{{ ai_run_status_label(latest_run.status) if latest_run else t("ops.detail.no_runs_yet") }}</dd>
-        </div>
-        {% if latest_run and latest_run.status == "running" and latest_run.started_at is defined and latest_run.started_at %}
-        <div>
-          <dt>{{ t("ops.detail.run_started_at") }}</dt>
-          <dd>{{ format_datetime_utc(latest_run.started_at) }}</dd>
-        </div>
-        {% endif %}
-        {% if latest_run and latest_run.status == "running" and latest_run.worker_pid is defined and latest_run.worker_pid is not none %}
-        <div>
-          <dt>{{ t("ops.detail.worker_pid") }}</dt>
-          <dd>{{ latest_run.worker_pid }}</dd>
-        </div>
-        {% endif %}
-      </dl>
-      {% if analysis_view.summary_short or analysis_view.summary_internal or analysis_view.handoff_reason %}
-      <div class="stack stack--tight">
-        {% if analysis_view.summary_short %}
-        <div>
-          <strong>{{ t("ops.detail.summary") }}</strong>
-          <p class="muted">{{ analysis_view.summary_short }}</p>
-        </div>
-        {% endif %}
-        {% if analysis_view.summary_internal %}
-        <div>
-          <strong>{{ t("ops.detail.internal_summary") }}</strong>
-          <p class="muted">{{ analysis_view.summary_internal }}</p>
-        </div>
-        {% endif %}
-        {% if analysis_view.handoff_reason %}
-        <div>
-          <strong>{{ t("ops.detail.handoff_reason") }}</strong>
-          <p class="muted">{{ analysis_view.handoff_reason }}</p>
-        </div>
-        {% endif %}
-      </div>
+      {% if route_target_display.kind %}
+      <span class="status-pill">{{ route_target_kind_label(route_target_display.kind) }}</span>
       {% endif %}
-      {% if latest_run and latest_run.error_text or latest_run and latest_run.status == "running" and latest_run.last_heartbeat_at is defined and latest_run.last_heartbeat_at or latest_run and (latest_run.status == "running" or latest_run.recovery_attempt_count is defined and latest_run.recovery_attempt_count) or ai_relevant_paths or latest_ai_note or latest_analysis_steps or latest_run_steps or analysis_view.response_confidence or analysis_view.risk_level or analysis_view.publish_mode_recommendation or analysis_view.risk_reason or analysis_view.assistant_used is not none or analysis_view.get("legacy_confidence") is not none or analysis_view.get("legacy_impact_level") or analysis_view.get("legacy_development_needed") is not none or ticket.requester_language or ticket.last_ai_action or ticket.requeue_requested %}
-      <details class="analysis-disclosure">
-        <summary>{{ t("ops.detail.more_analysis") }}</summary>
-        <div class="analysis-disclosure__content stack stack--tight">
-          <dl class="meta-list meta-list--compact">
+      {% if ticket.urgent %}
+      <span class="urgent-pill">{{ t("common.urgent") }}</span>
+      {% endif %}
+      {% if pending_draft %}
+      <span class="updated-pill">{{ t("ops.detail.draft_pending_approval") }}</span>
+      {% endif %}
+    </div>
+    <h1>{{ ticket.title }}</h1>
+    <p class="muted ops-ticket-detail__subtitle">
+      {{ t("ops.detail.requester", value=creator.display_name if creator else unknown_label) }}
+      · {{ t("ops.detail.assigned", value=assignee.display_name if assignee else unassigned_label) }}
+      · {{ t("ops.detail.updated", value=format_datetime_utc(ticket.updated_at)) }}
+    </p>
+  </section>
+
+  <section class="ops-ticket-detail__layout">
+    <div class="ops-ticket-detail__main stack">
+      <section class="panel stack ops-ticket-detail__thread">
+        <div class="thread-header">
+          <h2>{{ t("ops.detail.activity") }}</h2>
+        </div>
+        {% for item in activity_timeline %}
+        {% if item.kind == "status_change" %}
+        <article class="timeline-status">
+          <div class="timeline-status__meta">
+            <span class="lane-pill lane-pill--status">{{ item.lane_label }}</span>
+            <strong>{{ item.actor_label }}</strong>
+            <span>{{ format_datetime_utc(item.created_at) }}</span>
+          </div>
+          <p class="timeline-status__text">{{ item.summary }}</p>
+        </article>
+        {% else %}
+        <article class="message-card{% if item.lane == 'internal' %} message-card--internal{% endif %}">
+          <div class="message-card__meta">
+            <span class="lane-pill lane-pill--{{ item.lane }}">{{ item.lane_label }}</span>
+            <strong>{{ item.author_label }}</strong>
+            <span>{{ format_datetime_utc(item.created_at) }}</span>
+          </div>
+          <div class="message-card__body">{{ item.body_html | safe }}</div>
+          {% if item.attachments %}
+          <ul class="attachment-list">
+            {% for attachment in item.attachments %}
+            <li>
+              <a href="/attachments/{{ attachment.id }}">{{ attachment.original_filename }}</a>
+              <span class="muted">{{ attachment.mime_type }} · {{ t("common.bytes", count=attachment.size_bytes) }}</span>
+            </li>
+            {% endfor %}
+          </ul>
+          {% endif %}
+        </article>
+        {% endif %}
+        {% else %}
+        <p class="muted">{{ t("ops.detail.no_activity") }}</p>
+        {% endfor %}
+      </section>
+    </div>
+
+    <div class="ops-ticket-detail__sidebar stack">
+      <section class="panel stack stack--tight analysis-panel ops-ticket-detail__sidebar-section">
+        <h2>{{ t("ops.detail.ai_analysis") }}</h2>
+        <dl class="meta-list meta-list--compact">
+          <div>
+            <dt>{{ t("field.route_target") }}</dt>
+            <dd>{{ route_target_display.label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.target_kind") }}</dt>
+            <dd>{{ route_target_kind_label(route_target_display.kind) if route_target_display.kind else unknown_label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.latest_run") }}</dt>
+            <dd>{{ ai_run_status_label(latest_run.status) if latest_run else t("ops.detail.no_runs_yet") }}</dd>
+          </div>
+          {% if latest_run and latest_run.status == "running" and latest_run.started_at is defined and latest_run.started_at %}
+          <div>
+            <dt>{{ t("ops.detail.run_started_at") }}</dt>
+            <dd>{{ format_datetime_utc(latest_run.started_at) }}</dd>
+          </div>
+          {% endif %}
+          {% if latest_run and latest_run.status == "running" and latest_run.worker_pid is defined and latest_run.worker_pid is not none %}
+          <div>
+            <dt>{{ t("ops.detail.worker_pid") }}</dt>
+            <dd>{{ latest_run.worker_pid }}</dd>
+          </div>
+          {% endif %}
+        </dl>
+        {% if analysis_view.summary_short or analysis_view.summary_internal or analysis_view.handoff_reason %}
+        <div class="stack stack--tight">
+          {% if analysis_view.summary_short %}
+          <div class="ops-ticket-detail__summary-block">
+            <strong>{{ t("ops.detail.summary") }}</strong>
+            <p class="muted ops-ticket-detail__long-text">{{ analysis_view.summary_short }}</p>
+          </div>
+          {% endif %}
+          {% if analysis_view.summary_internal %}
+          <div class="ops-ticket-detail__summary-block">
+            <strong>{{ t("ops.detail.internal_summary") }}</strong>
+            <p class="muted ops-ticket-detail__long-text">{{ analysis_view.summary_internal }}</p>
+          </div>
+          {% endif %}
+          {% if analysis_view.handoff_reason %}
+          <div class="ops-ticket-detail__summary-block">
+            <strong>{{ t("ops.detail.handoff_reason") }}</strong>
+            <p class="muted ops-ticket-detail__long-text">{{ analysis_view.handoff_reason }}</p>
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
+        {% if latest_run and latest_run.error_text or latest_run and latest_run.status == "running" and latest_run.last_heartbeat_at is defined and latest_run.last_heartbeat_at or latest_run and (latest_run.status == "running" or latest_run.recovery_attempt_count is defined and latest_run.recovery_attempt_count) or ai_relevant_paths or latest_ai_note or latest_analysis_steps or latest_run_steps or analysis_view.response_confidence or analysis_view.risk_level or analysis_view.publish_mode_recommendation or analysis_view.risk_reason or analysis_view.assistant_used is not none or analysis_view.get("legacy_confidence") is not none or analysis_view.get("legacy_impact_level") or analysis_view.get("legacy_development_needed") is not none or ticket.requester_language or ticket.last_ai_action or ticket.requeue_requested %}
+        <details class="analysis-disclosure">
+          <summary>{{ t("ops.detail.more_analysis") }}</summary>
+          <div class="analysis-disclosure__content stack stack--tight">
+            <dl class="meta-list meta-list--compact">
             {% if analysis_view.response_confidence %}
             <div>
               <dt>{{ t("ops.detail.response_confidence") }}</dt>
@@ -198,103 +200,130 @@
               <dd>{{ analysis_view.assistant_specialist_id }}</dd>
             </div>
             {% endif %}
-          </dl>
-          {% if latest_run and latest_run.error_text %}
-          <div>
-            <strong>{% if latest_run.status == "failed" %}{{ t("ops.detail.run_error") }}{% else %}{{ t("ops.detail.run_warning") }}{% endif %}</strong>
-            <p class="muted">{{ latest_run.error_text }}</p>
-          </div>
-          {% endif %}
-          {% if analysis_view.risk_reason %}
-          <div>
-            <strong>{{ t("ops.detail.risk_rationale") }}</strong>
-            <p class="muted">{{ analysis_view.risk_reason }}</p>
-          </div>
-          {% endif %}
-          {% if ai_relevant_paths %}
-          <div>
-            <strong>{{ t("ops.detail.relevant_paths") }}</strong>
-            <ul class="attachment-list">
-              {% for item in ai_relevant_paths %}
-              <li><code>{{ item.path }}</code> <span class="muted">{{ item.reason }}</span></li>
+            </dl>
+            {% if latest_run and latest_run.error_text %}
+            <div class="ops-ticket-detail__summary-block">
+              <strong>{% if latest_run.status == "failed" %}{{ t("ops.detail.run_error") }}{% else %}{{ t("ops.detail.run_warning") }}{% endif %}</strong>
+              <p class="muted ops-ticket-detail__long-text">{{ latest_run.error_text }}</p>
+            </div>
+            {% endif %}
+            {% if analysis_view.risk_reason %}
+            <div class="ops-ticket-detail__summary-block">
+              <strong>{{ t("ops.detail.risk_rationale") }}</strong>
+              <p class="muted ops-ticket-detail__long-text">{{ analysis_view.risk_reason }}</p>
+            </div>
+            {% endif %}
+            {% if ai_relevant_paths %}
+            <div class="ops-ticket-detail__summary-block">
+              <strong>{{ t("ops.detail.relevant_paths") }}</strong>
+              <ul class="attachment-list ops-ticket-detail__code-list">
+                {% for item in ai_relevant_paths %}
+                <li><code>{{ item.path }}</code> <span class="muted">{{ item.reason }}</span></li>
+                {% endfor %}
+              </ul>
+            </div>
+            {% endif %}
+            {% if latest_ai_note %}
+            <div class="ops-ticket-detail__summary-block">
+              <strong>{{ t("ops.detail.latest_ai_note") }}</strong>
+              <div class="message-card__body ops-ticket-detail__rich-text">{{ latest_ai_note_html | safe }}</div>
+            </div>
+            {% endif %}
+            {% if latest_analysis_steps %}
+            <div class="ops-ticket-detail__summary-block">
+              <strong>{{ t("ops.detail.analysis_steps") }}</strong>
+              {% for step in latest_analysis_steps %}
+              <div class="stack stack--tight ops-ticket-detail__step">
+                <p class="muted">
+                  {{ t("common.step") }} {{ step.step_index }}
+                  · {{ ai_run_step_kind_label(step.step_kind) }}
+                  · {{ step.agent_spec_id.replace("-", " ").replace("_", " ").title() }}
+                  · {{ ai_run_status_label(step.status) }}
+                </p>
+                <ul class="attachment-list ops-ticket-detail__code-list">
+                  {% if step.prompt_path %}<li><code>{{ step.prompt_path }}</code></li>{% endif %}
+                  {% if step.schema_path %}<li><code>{{ step.schema_path }}</code></li>{% endif %}
+                  {% if step.final_output_path %}<li><code>{{ step.final_output_path }}</code></li>{% endif %}
+                  {% if step.stdout_jsonl_path %}<li><code>{{ step.stdout_jsonl_path }}</code></li>{% endif %}
+                  {% if step.stderr_path %}<li><code>{{ step.stderr_path }}</code></li>{% endif %}
+                </ul>
+              </div>
               {% endfor %}
-            </ul>
-          </div>
-          {% endif %}
-          {% if latest_ai_note %}
-          <div>
-            <strong>{{ t("ops.detail.latest_ai_note") }}</strong>
-            <div class="message-card__body">{{ latest_ai_note_html | safe }}</div>
-          </div>
-          {% endif %}
-          {% if latest_analysis_steps %}
-          <div>
-            <strong>{{ t("ops.detail.analysis_steps") }}</strong>
-            {% for step in latest_analysis_steps %}
-            <div class="stack stack--tight">
-              <p class="muted">
-                {{ t("common.step") }} {{ step.step_index }}
-                · {{ ai_run_step_kind_label(step.step_kind) }}
-                · {{ step.agent_spec_id.replace("-", " ").replace("_", " ").title() }}
-                · {{ ai_run_status_label(step.status) }}
-              </p>
-              <ul class="attachment-list">
-                {% if step.prompt_path %}<li><code>{{ step.prompt_path }}</code></li>{% endif %}
-                {% if step.schema_path %}<li><code>{{ step.schema_path }}</code></li>{% endif %}
-                {% if step.final_output_path %}<li><code>{{ step.final_output_path }}</code></li>{% endif %}
-                {% if step.stdout_jsonl_path %}<li><code>{{ step.stdout_jsonl_path }}</code></li>{% endif %}
-                {% if step.stderr_path %}<li><code>{{ step.stderr_path }}</code></li>{% endif %}
-              </ul>
             </div>
-            {% endfor %}
-          </div>
-          {% endif %}
-          {% if latest_run and latest_analysis_run and latest_run.id != latest_analysis_run.id and latest_run_steps %}
-          <div>
-            <strong>{{ t("ops.detail.latest_run_steps") }}</strong>
-            {% for step in latest_run_steps %}
-            <div class="stack stack--tight">
-              <p class="muted">
-                {{ t("common.step") }} {{ step.step_index }}
-                · {{ ai_run_step_kind_label(step.step_kind) }}
-                · {{ step.agent_spec_id.replace("-", " ").replace("_", " ").title() }}
-                · {{ ai_run_status_label(step.status) }}
-              </p>
-              <ul class="attachment-list">
-                {% if step.prompt_path %}<li><code>{{ step.prompt_path }}</code></li>{% endif %}
-                {% if step.schema_path %}<li><code>{{ step.schema_path }}</code></li>{% endif %}
-                {% if step.final_output_path %}<li><code>{{ step.final_output_path }}</code></li>{% endif %}
-                {% if step.stdout_jsonl_path %}<li><code>{{ step.stdout_jsonl_path }}</code></li>{% endif %}
-                {% if step.stderr_path %}<li><code>{{ step.stderr_path }}</code></li>{% endif %}
-              </ul>
+            {% endif %}
+            {% if latest_run and latest_analysis_run and latest_run.id != latest_analysis_run.id and latest_run_steps %}
+            <div class="ops-ticket-detail__summary-block">
+              <strong>{{ t("ops.detail.latest_run_steps") }}</strong>
+              {% for step in latest_run_steps %}
+              <div class="stack stack--tight ops-ticket-detail__step">
+                <p class="muted">
+                  {{ t("common.step") }} {{ step.step_index }}
+                  · {{ ai_run_step_kind_label(step.step_kind) }}
+                  · {{ step.agent_spec_id.replace("-", " ").replace("_", " ").title() }}
+                  · {{ ai_run_status_label(step.status) }}
+                </p>
+                <ul class="attachment-list ops-ticket-detail__code-list">
+                  {% if step.prompt_path %}<li><code>{{ step.prompt_path }}</code></li>{% endif %}
+                  {% if step.schema_path %}<li><code>{{ step.schema_path }}</code></li>{% endif %}
+                  {% if step.final_output_path %}<li><code>{{ step.final_output_path }}</code></li>{% endif %}
+                  {% if step.stdout_jsonl_path %}<li><code>{{ step.stdout_jsonl_path }}</code></li>{% endif %}
+                  {% if step.stderr_path %}<li><code>{{ step.stderr_path }}</code></li>{% endif %}
+                </ul>
+              </div>
+              {% endfor %}
             </div>
-            {% endfor %}
-          </div>
-          {% elif latest_run and not latest_analysis_run and latest_run_steps %}
-          <div>
-            <strong>{{ t("ops.detail.latest_run_steps") }}</strong>
-            {% for step in latest_run_steps %}
-            <div class="stack stack--tight">
-              <p class="muted">
-                {{ t("common.step") }} {{ step.step_index }}
-                · {{ ai_run_step_kind_label(step.step_kind) }}
-                · {{ step.agent_spec_id.replace("-", " ").replace("_", " ").title() }}
-                · {{ ai_run_status_label(step.status) }}
-              </p>
-              <ul class="attachment-list">
-                {% if step.prompt_path %}<li><code>{{ step.prompt_path }}</code></li>{% endif %}
-                {% if step.schema_path %}<li><code>{{ step.schema_path }}</code></li>{% endif %}
-                {% if step.final_output_path %}<li><code>{{ step.final_output_path }}</code></li>{% endif %}
-                {% if step.stdout_jsonl_path %}<li><code>{{ step.stdout_jsonl_path }}</code></li>{% endif %}
-                {% if step.stderr_path %}<li><code>{{ step.stderr_path }}</code></li>{% endif %}
-              </ul>
+            {% elif latest_run and not latest_analysis_run and latest_run_steps %}
+            <div class="ops-ticket-detail__summary-block">
+              <strong>{{ t("ops.detail.latest_run_steps") }}</strong>
+              {% for step in latest_run_steps %}
+              <div class="stack stack--tight ops-ticket-detail__step">
+                <p class="muted">
+                  {{ t("common.step") }} {{ step.step_index }}
+                  · {{ ai_run_step_kind_label(step.step_kind) }}
+                  · {{ step.agent_spec_id.replace("-", " ").replace("_", " ").title() }}
+                  · {{ ai_run_status_label(step.status) }}
+                </p>
+                <ul class="attachment-list ops-ticket-detail__code-list">
+                  {% if step.prompt_path %}<li><code>{{ step.prompt_path }}</code></li>{% endif %}
+                  {% if step.schema_path %}<li><code>{{ step.schema_path }}</code></li>{% endif %}
+                  {% if step.final_output_path %}<li><code>{{ step.final_output_path }}</code></li>{% endif %}
+                  {% if step.stdout_jsonl_path %}<li><code>{{ step.stdout_jsonl_path }}</code></li>{% endif %}
+                  {% if step.stderr_path %}<li><code>{{ step.stderr_path }}</code></li>{% endif %}
+                </ul>
+              </div>
+              {% endfor %}
             </div>
-            {% endfor %}
+            {% endif %}
           </div>
-          {% endif %}
-        </div>
-      </details>
-      {% endif %}
+        </details>
+        {% endif %}
+      </section>
+
+    {% if pending_draft %}
+    <section class="panel stack ops-ticket-detail__sidebar-section">
+      <h2>{{ t("ops.detail.pending_ai_draft") }}</h2>
+      <div class="message-card__body ops-ticket-detail__rich-text">{{ pending_draft_html | safe }}</div>
+      <form method="post" action="/ops/drafts/{{ pending_draft.id }}/approve-publish" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="field">
+          <span>{{ t("field.next_status") }}</span>
+          <select name="next_status">
+            {% for value in draft_reply_status_options %}
+            <option value="{{ value }}" {% if value == "waiting_on_user" %}selected{% endif %}>{{ ops_status_label(value) }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit" class="button">{{ t("button.approve_and_publish") }}</button>
+      </form>
+      <form method="post" action="/ops/drafts/{{ pending_draft.id }}/reject">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="button button--ghost">{{ t("button.reject_draft") }}</button>
+      </form>
+    </section>
+    {% endif %}
+
+    <section class="panel stack stack--tight ops-ticket-detail__sidebar-section">
+      <h2>{{ t("button.rerun_ai") }}</h2>
       <form method="post" action="/ops/tickets/{{ ticket.reference }}/rerun-ai" class="stack stack--tight">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label class="field">
@@ -315,30 +344,7 @@
       </form>
     </section>
 
-    {% if pending_draft %}
-    <section class="panel stack">
-      <h2>{{ t("ops.detail.pending_ai_draft") }}</h2>
-      <div class="message-card__body">{{ pending_draft_html | safe }}</div>
-      <form method="post" action="/ops/drafts/{{ pending_draft.id }}/approve-publish" class="stack">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label class="field">
-          <span>{{ t("field.next_status") }}</span>
-          <select name="next_status">
-            {% for value in draft_reply_status_options %}
-            <option value="{{ value }}" {% if value == "waiting_on_user" %}selected{% endif %}>{{ ops_status_label(value) }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <button type="submit" class="button">{{ t("button.approve_and_publish") }}</button>
-      </form>
-      <form method="post" action="/ops/drafts/{{ pending_draft.id }}/reject">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="button button--ghost">{{ t("button.reject_draft") }}</button>
-      </form>
-    </section>
-    {% endif %}
-
-    <section class="panel stack">
+    <section class="panel stack ops-ticket-detail__sidebar-section">
       <h2>{{ t("ops.detail.assignment") }}</h2>
       <form method="post" action="/ops/tickets/{{ ticket.reference }}/assign" class="stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -355,7 +361,7 @@
       </form>
     </section>
 
-    <section class="panel stack">
+    <section class="panel stack ops-ticket-detail__sidebar-section">
       <h2>{{ t("field.status") }}</h2>
       <form method="post" action="/ops/tickets/{{ ticket.reference }}/set-status" class="stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -371,7 +377,7 @@
       </form>
     </section>
 
-    <section class="panel stack">
+    <section class="panel stack ops-ticket-detail__sidebar-section">
       <h2>{{ t("ops.detail.public_reply") }}</h2>
       <form method="post" action="/ops/tickets/{{ ticket.reference }}/reply-public" class="stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -391,7 +397,7 @@
       </form>
     </section>
 
-    <section class="panel stack">
+    <section class="panel stack ops-ticket-detail__sidebar-section">
       <h2>{{ t("ops.detail.internal_note") }}</h2>
       <form method="post" action="/ops/tickets/{{ ticket.reference }}/note-internal" class="stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -402,6 +408,7 @@
         <button type="submit" class="button">{{ t("button.add_internal_note") }}</button>
       </form>
     </section>
-  </div>
-</section>
+    </div>
+  </section>
+</div>
 {% endblock %}

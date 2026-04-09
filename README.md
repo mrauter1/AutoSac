@@ -162,6 +162,7 @@ Useful endpoints:
 - `APP_BASE_URL=https://...` automatically enables secure cookies.
 - `UI_DEFAULT_LOCALE=pt-BR` makes Portuguese the server-side fallback when there is no saved language cookie and no matching browser language.
 - Leave `CODEX_API_KEY` empty to rely on existing Codex CLI login in local environments.
+- On Ubuntu 24.04, Codex read-only probing may require an AppArmor profile for `bwrap`; see the Ubuntu internal server guide.
 - `scripts/setup_postgres_local.sh` is intended for local localhost PostgreSQL only; it is not part of the cloud deployment path.
 - `WORKER_HEARTBEAT_SECONDS`, `AI_RUN_STALE_TIMEOUT_SECONDS`, and `AI_RUN_MAX_RECOVERY_ATTEMPTS` control stale-run detection and automatic recovery.
 - After `alembic upgrade head`, run `python scripts/backfill_ai_run_steps.py` before relying on `/readyz` or the service smoke checks.
@@ -170,7 +171,7 @@ Useful endpoints:
 
 ## Deployment
 
-For a step-by-step Ubuntu internal server setup with boot-time systemd services, see `docs/ubuntu_internal_server_setup.md`.
+For a step-by-step Ubuntu internal server setup with boot-time systemd services and the Ubuntu 24.04 AppArmor / `bwrap` fix for Codex sandboxing, see `docs/ubuntu_internal_server_setup.md`.
 
 For a phone-friendly cloud deployment walkthrough and one-click Render blueprint setup, see `docs_deployment.md` and `render.yaml`.
 

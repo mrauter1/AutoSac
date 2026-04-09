@@ -1,27 +1,30 @@
 {% extends "base.html" %}
 
 {% block title %}{{ t("login.heading") }} | {{ t("brand.name") }}{% endblock %}
+{% block page_class %} page--auth{% endblock %}
 
 {% block body %}
-<section class="panel panel--narrow">
-  <p class="eyebrow">{{ t("eyebrow.internal_access") }}</p>
-  <h1>{{ t("login.heading") }}</h1>
-  <p class="muted">{{ t("login.subtitle") }}</p>
-  <form method="post" action="/login" class="stack">
-    <input type="hidden" name="csrf_token" value="{{ login_csrf_token or '' }}">
-    <label class="field">
-      <span>{{ t("field.email") }}</span>
-      <input type="email" name="email" value="{{ email or '' }}" autocomplete="username" required>
-    </label>
-    <label class="field">
-      <span>{{ t("field.password") }}</span>
-      <input type="password" name="password" autocomplete="current-password" required>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" name="remember_me">
-      <span>{{ t("field.remember_me") }}</span>
-    </label>
-    <button type="submit" class="button">{{ t("button.sign_in") }}</button>
-  </form>
-</section>
+<div class="auth-view">
+  <section class="panel panel--narrow auth-card">
+    <p class="eyebrow">{{ t("eyebrow.internal_access") }}</p>
+    <h1>{{ t("login.heading") }}</h1>
+    <p class="muted">{{ t("login.subtitle") }}</p>
+    <form method="post" action="/login" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ login_csrf_token or '' }}">
+      <label class="field">
+        <span>{{ t("field.email") }}</span>
+        <input type="email" name="email" value="{{ email or '' }}" autocomplete="username" required>
+      </label>
+      <label class="field">
+        <span>{{ t("field.password") }}</span>
+        <input type="password" name="password" autocomplete="current-password" required>
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" name="remember_me">
+        <span>{{ t("field.remember_me") }}</span>
+      </label>
+      <button type="submit" class="button">{{ t("button.sign_in") }}</button>
+    </form>
+  </section>
+</div>
 {% endblock %}

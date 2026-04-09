@@ -578,11 +578,15 @@ def test_login_get_issues_preauth_challenge_with_sanitized_next(monkeypatch, tmp
 
 
 def test_login_post_rejects_missing_or_invalid_preauth_csrf_before_auth(monkeypatch, tmp_path):
+    from app.i18n import translate
+    from shared.config import get_default_ui_locale
+
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
     preauth = _FakePreauthStore()
     settings = _make_settings(tmp_path)
+    locale = get_default_ui_locale()
 
     monkeypatch.setattr(stack["routes_auth"], "create_preauth_login_session", preauth.create)
     monkeypatch.setattr(stack["routes_auth"], "get_valid_preauth_login_session", preauth.get_valid)
@@ -607,7 +611,7 @@ def test_login_post_rejects_missing_or_invalid_preauth_csrf_before_auth(monkeypa
             follow_redirects=False,
         )
         assert invalid_csrf.status_code == 403
-        assert "Invalid login form token." in invalid_csrf.text
+        assert translate(locale, "error.invalid_login_token") in invalid_csrf.text
         assert initial_csrf not in invalid_csrf.text
         assert "triage_preauth_login=preauth-2" in invalid_csrf.headers["set-cookie"]
 
@@ -619,12 +623,15 @@ def test_login_post_rejects_missing_or_invalid_preauth_csrf_before_auth(monkeypa
         )
 
     assert missing_state.status_code == 403
-    assert "Your login form expired." in missing_state.text
+    assert translate(locale, "error.login_expired") in missing_state.text
     assert "triage_preauth_login=preauth-3" in missing_state.headers["set-cookie"]
     assert db.commit_calls == 3
 
 
 def test_login_post_failed_credentials_rotates_preauth_challenge(monkeypatch, tmp_path):
+    from app.i18n import translate
+    from shared.config import get_default_ui_locale
+
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
@@ -638,6 +645,7 @@ def test_login_post_failed_credentials_rotates_preauth_challenge(monkeypatch, tm
         is_active=True,
     )
     settings = _make_settings(tmp_path)
+    locale = get_default_ui_locale()
 
     monkeypatch.setattr(stack["routes_auth"], "create_preauth_login_session", preauth.create)
     monkeypatch.setattr(stack["routes_auth"], "get_valid_preauth_login_session", preauth.get_valid)
@@ -665,7 +673,7 @@ def test_login_post_failed_credentials_rotates_preauth_challenge(monkeypatch, tm
         )
 
     assert failed.status_code == 400
-    assert "Invalid email or password." in failed.text
+    assert translate(locale, "error.invalid_credentials") in failed.text
     assert initial_csrf not in failed.text
     assert re.search(r'name="csrf_token" value="csrf-2"', failed.text)
     assert "triage_preauth_login=preauth-2" in failed.headers["set-cookie"]

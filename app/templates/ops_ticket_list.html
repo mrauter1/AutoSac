@@ -1,16 +1,19 @@
 {% extends "base.html" %}
 
 {% block title %}{{ t("ops.list.heading") }} | {{ t("brand.name") }}{% endblock %}
+{% block page_class %} page--workspace{% endblock %}
 
 {% block body %}
-<section class="page-header">
-  <div>
-    <p class="eyebrow">{{ t("eyebrow.dev_ti_view") }}</p>
-    <h1>{{ t("ops.list.heading") }}</h1>
-  </div>
-  <a class="button button--ghost" href="/ops/board">{{ t("button.open_board_view") }}</a>
-</section>
+<div class="workspace-view workspace-view--ops">
+  <section class="page-header page-header--card">
+    <div>
+      <p class="eyebrow">{{ t("eyebrow.dev_ti_view") }}</p>
+      <h1>{{ t("ops.list.heading") }}</h1>
+    </div>
+    <a class="button button--ghost" href="/ops/board">{{ t("button.open_board_view") }}</a>
+  </section>
 
-{% include "ops_filters.html" %}
-{% include "ops_ticket_rows.html" %}
+  {% include "ops_filters.html" %}
+  {% include "ops_ticket_rows.html" %}
+</div>
 {% endblock %}

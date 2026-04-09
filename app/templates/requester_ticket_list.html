@@ -1,41 +1,44 @@
 {% extends "base.html" %}
 
 {% block title %}{{ t("requester.list.heading") }} | {{ t("brand.name") }}{% endblock %}
+{% block page_class %} page--workspace{% endblock %}
 
 {% block body %}
-<section class="page-header">
-  <div>
-    <p class="eyebrow">{{ t("eyebrow.requester_view") }}</p>
-    <h1>{{ t("requester.list.heading") }}</h1>
-  </div>
-  <a class="button" href="/app/tickets/new">{{ t("button.open_ticket") }}</a>
-</section>
-
-{% if tickets %}
-<section class="ticket-list stack">
-  {% for row in tickets %}
-  {% set ticket = row.ticket %}
-  <a class="ticket-card" href="/app/tickets/{{ ticket.reference }}">
-    <div class="ticket-card__meta">
-      <span class="ticket-ref">{{ ticket.reference }}</span>
-      <span class="status-pill">{{ requester_status_label(ticket.status) }}</span>
-      {% if ticket.urgent %}
-      <span class="urgent-pill">{{ t("common.urgent") }}</span>
-      {% endif %}
-      {% if row.updated_for_user %}
-      <span class="updated-pill">{{ t("common.updated") }}</span>
-      {% endif %}
+<div class="workspace-view requester-list">
+  <section class="page-header page-header--card">
+    <div>
+      <p class="eyebrow">{{ t("eyebrow.requester_view") }}</p>
+      <h1>{{ t("requester.list.heading") }}</h1>
     </div>
-    <h2>{{ ticket.title }}</h2>
-    <p class="ticket-card__time">{{ t("requester.list.last_updated", value=format_datetime_utc(ticket.updated_at)) }}</p>
-  </a>
-  {% endfor %}
-</section>
-{% else %}
-<section class="panel">
-  <h2>{{ t("requester.list.empty_heading") }}</h2>
-  <p class="muted">{{ t("requester.list.empty_body") }}</p>
-  <a class="button" href="/app/tickets/new">{{ t("button.create_first_ticket") }}</a>
-</section>
-{% endif %}
+    <a class="button" href="/app/tickets/new">{{ t("button.open_ticket") }}</a>
+  </section>
+
+  {% if tickets %}
+  <section class="ticket-list stack">
+    {% for row in tickets %}
+    {% set ticket = row.ticket %}
+    <a class="ticket-card" href="/app/tickets/{{ ticket.reference }}">
+      <div class="ticket-card__meta">
+        <span class="ticket-ref">{{ ticket.reference }}</span>
+        <span class="status-pill">{{ requester_status_label(ticket.status) }}</span>
+        {% if ticket.urgent %}
+        <span class="urgent-pill">{{ t("common.urgent") }}</span>
+        {% endif %}
+        {% if row.updated_for_user %}
+        <span class="updated-pill">{{ t("common.updated") }}</span>
+        {% endif %}
+      </div>
+      <h2>{{ ticket.title }}</h2>
+      <p class="ticket-card__time">{{ t("requester.list.last_updated", value=format_datetime_utc(ticket.updated_at)) }}</p>
+    </a>
+    {% endfor %}
+  </section>
+  {% else %}
+  <section class="panel">
+    <h2>{{ t("requester.list.empty_heading") }}</h2>
+    <p class="muted">{{ t("requester.list.empty_body") }}</p>
+    <a class="button" href="/app/tickets/new">{{ t("button.create_first_ticket") }}</a>
+  </section>
+  {% endif %}
+</div>
 {% endblock %}

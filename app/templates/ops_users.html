@@ -1,61 +1,66 @@
 {% extends "base.html" %}
 {% block title %}{{ t("ops.users.heading") }} | {{ t("brand.name") }}{% endblock %}
+{% block page_class %} page--workspace{% endblock %}
 {% block body %}
-<section class="panel">
-  <p class="eyebrow">{{ t("eyebrow.access_administration") }}</p>
-  <h1>{{ t("ops.users.heading") }}</h1>
-  <p>{{ t("ops.users.subtitle") }}</p>
-</section>
+<div class="workspace-view ops-users">
+  <section class="page-header page-header--card page-header--stack">
+    <p class="eyebrow">{{ t("eyebrow.access_administration") }}</p>
+    <h1>{{ t("ops.users.heading") }}</h1>
+    <p class="muted">{{ t("ops.users.subtitle") }}</p>
+  </section>
 
-<section class="panel">
-  <h2>{{ t("ops.users.create_heading") }}</h2>
-  <form method="post" action="/ops/users/create" class="stack-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label>
-      {{ t("field.email") }}
-      <input type="email" name="email" required>
-    </label>
-    <label>
-      {{ t("field.display_name") }}
-      <input type="text" name="display_name" required>
-    </label>
-    <label>
-      {{ t("field.password") }}
-      <input type="password" name="password" required minlength="8">
-    </label>
-    <label>
-      {{ t("field.role") }}
-      <select name="role" required>
-        {% for role in allowed_new_roles %}
-        <option value="{{ role }}">{{ user_role_label(role) }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <button type="submit" class="button">{{ t("button.create_user") }}</button>
-  </form>
-</section>
+  <section class="ops-users__layout">
+    <section class="panel">
+      <h2>{{ t("ops.users.create_heading") }}</h2>
+      <form method="post" action="/ops/users/create" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="field">
+          <span>{{ t("field.email") }}</span>
+          <input type="email" name="email" required>
+        </label>
+        <label class="field">
+          <span>{{ t("field.display_name") }}</span>
+          <input type="text" name="display_name" required>
+        </label>
+        <label class="field">
+          <span>{{ t("field.password") }}</span>
+          <input type="password" name="password" required minlength="8">
+        </label>
+        <label class="field">
+          <span>{{ t("field.role") }}</span>
+          <select name="role" required>
+            {% for role in allowed_new_roles %}
+            <option value="{{ role }}">{{ user_role_label(role) }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit" class="button">{{ t("button.create_user") }}</button>
+      </form>
+    </section>
 
-<section class="panel">
-  <h2>{{ t("ops.users.current_heading") }}</h2>
-  <table class="table">
-    <thead>
-      <tr>
-        <th>{{ t("table.email") }}</th>
-        <th>{{ t("table.name") }}</th>
-        <th>{{ t("table.role") }}</th>
-        <th>{{ t("table.status") }}</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for user in users %}
-      <tr>
-        <td>{{ user.email }}</td>
-        <td>{{ user.display_name }}</td>
-        <td>{{ user_role_label(user.role) }}</td>
-        <td>{% if user.is_active %}{{ t("ops.users.status.active") }}{% else %}{{ t("ops.users.status.inactive") }}{% endif %}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</section>
+    <section class="panel">
+      <h2>{{ t("ops.users.current_heading") }}</h2>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>{{ t("table.email") }}</th>
+            <th>{{ t("table.name") }}</th>
+            <th>{{ t("table.role") }}</th>
+            <th>{{ t("table.status") }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for user in users %}
+          <tr>
+            <td>{{ user.email }}</td>
+            <td>{{ user.display_name }}</td>
+            <td>{{ user_role_label(user.role) }}</td>
+            <td>{% if user.is_active %}{{ t("ops.users.status.active") }}{% else %}{{ t("ops.users.status.inactive") }}{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </section>
+</div>
 {% endblock %}

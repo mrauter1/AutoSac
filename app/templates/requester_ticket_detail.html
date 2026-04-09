@@ -1,71 +1,78 @@
 {% extends "base.html" %}
 
 {% block title %}{{ ticket.reference }} | {{ t("brand.name") }}{% endblock %}
+{% block page_class %} page--workspace{% endblock %}
 
 {% block body %}
-<section class="page-header page-header--stack">
-  <div class="ticket-card__meta">
-    <span class="ticket-ref">{{ ticket.reference }}</span>
-    <span class="status-pill">{{ requester_status_label(ticket.status) }}</span>
-    {% if ticket.urgent %}
-    <span class="urgent-pill">{{ t("common.urgent") }}</span>
-    {% endif %}
-  </div>
-  <h1>{{ ticket.title }}</h1>
-</section>
+<div class="workspace-view requester-detail">
+  <section class="page-header page-header--card page-header--stack requester-detail__header">
+    <div class="ticket-card__meta">
+      <span class="ticket-ref">{{ ticket.reference }}</span>
+      <span class="status-pill">{{ requester_status_label(ticket.status) }}</span>
+      {% if ticket.urgent %}
+      <span class="urgent-pill">{{ t("common.urgent") }}</span>
+      {% endif %}
+    </div>
+    <h1>{{ ticket.title }}</h1>
+  </section>
 
-<section class="thread stack">
-  {% for item in timeline %}
-  {% if item.kind == "status_change" %}
-  <article class="timeline-status">
-    <div class="timeline-status__meta">
-      <span class="lane-pill lane-pill--status">{{ item.lane_label }}</span>
-      <span>{{ format_datetime_utc(item.created_at) }}</span>
-    </div>
-    <p class="timeline-status__text">{{ item.summary }}</p>
-  </article>
-  {% else %}
-  <article class="message-card">
-    <div class="message-card__meta">
-      <strong>{{ item.author_label }}</strong>
-      <span>{{ format_datetime_utc(item.created_at) }}</span>
-    </div>
-    <div class="message-card__body">{{ item.body_html | safe }}</div>
-    {% if item.attachments %}
-    <ul class="attachment-list">
-      {% for attachment in item.attachments %}
-      <li>
-        <a href="/attachments/{{ attachment.id }}">{{ attachment.original_filename }}</a>
-        <span class="muted">{{ attachment.mime_type }} · {{ t("common.bytes", count=attachment.size_bytes) }}</span>
-      </li>
+  <section class="requester-detail__layout">
+    <section class="panel stack requester-detail__thread">
+      {% for item in timeline %}
+      {% if item.kind == "status_change" %}
+      <article class="timeline-status">
+        <div class="timeline-status__meta">
+          <span class="lane-pill lane-pill--status">{{ item.lane_label }}</span>
+          <span>{{ format_datetime_utc(item.created_at) }}</span>
+        </div>
+        <p class="timeline-status__text">{{ item.summary }}</p>
+      </article>
+      {% else %}
+      <article class="message-card">
+        <div class="message-card__meta">
+          <strong>{{ item.author_label }}</strong>
+          <span>{{ format_datetime_utc(item.created_at) }}</span>
+        </div>
+        <div class="message-card__body">{{ item.body_html | safe }}</div>
+        {% if item.attachments %}
+        <ul class="attachment-list">
+          {% for attachment in item.attachments %}
+          <li>
+            <a href="/attachments/{{ attachment.id }}">{{ attachment.original_filename }}</a>
+            <span class="muted">{{ attachment.mime_type }} · {{ t("common.bytes", count=attachment.size_bytes) }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </article>
+      {% endif %}
       {% endfor %}
-    </ul>
-    {% endif %}
-  </article>
-  {% endif %}
-  {% endfor %}
-</section>
+    </section>
 
-<section class="panel stack">
-  <h2>{{ t("requester.detail.reply_heading") }}</h2>
-  <form method="post" action="/app/tickets/{{ ticket.reference }}/reply" enctype="multipart/form-data" class="stack">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label class="field">
-      <span>{{ t("field.message") }}</span>
-      <textarea name="body" rows="6" required>{{ reply_body or '' }}</textarea>
-    </label>
-    <label class="field">
-      <span>{{ t("field.attachments") }}</span>
-      <input type="file" name="attachments" multiple>
-      <small>{{ t("hint.attachments_limit") }}</small>
-    </label>
-    <button type="submit" class="button">{{ t("button.send_reply") }}</button>
-  </form>
-  {% if ticket.status != "resolved" %}
-  <form method="post" action="/app/tickets/{{ ticket.reference }}/resolve">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button type="submit" class="button button--ghost">{{ t("button.mark_resolved") }}</button>
-  </form>
-  {% endif %}
-</section>
+    <aside class="requester-detail__sidebar stack">
+      <section class="panel stack">
+        <h2>{{ t("requester.detail.reply_heading") }}</h2>
+        <form method="post" action="/app/tickets/{{ ticket.reference }}/reply" enctype="multipart/form-data" class="stack">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label class="field">
+            <span>{{ t("field.message") }}</span>
+            <textarea name="body" rows="6" required>{{ reply_body or '' }}</textarea>
+          </label>
+          <label class="field">
+            <span>{{ t("field.attachments") }}</span>
+            <input type="file" name="attachments" multiple>
+            <small>{{ t("hint.attachments_limit") }}</small>
+          </label>
+          <button type="submit" class="button">{{ t("button.send_reply") }}</button>
+        </form>
+        {% if ticket.status != "resolved" %}
+        <form method="post" action="/app/tickets/{{ ticket.reference }}/resolve">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="button button--ghost">{{ t("button.mark_resolved") }}</button>
+        </form>
+        {% endif %}
+      </section>
+    </aside>
+  </section>
+</div>
 {% endblock %}

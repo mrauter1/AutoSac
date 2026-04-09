@@ -42,7 +42,7 @@
         </div>
       </div>
     </header>
-    <main class="page">
+    <main class="page{% block page_class %}{% endblock %}">
       {% if error %}
       <div class="alert" role="alert">{{ error }}</div>
       {% endif %}

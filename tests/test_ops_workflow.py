@@ -1627,6 +1627,12 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert 't("filters.updated_since_viewed")' in filters_template
     assert 't("ops.detail.activity")' in detail_template
     assert 't("ops.detail.ai_analysis")' in detail_template
+    assert 'page{% block page_class %}{% endblock %}' in base_template
+    assert 'page--ops-ticket-detail' in detail_template
+    assert "ops-ticket-detail__layout" in detail_template
+    assert "ops-ticket-detail__main" in detail_template
+    assert "ops-ticket-detail__sidebar" in detail_template
+    assert "ops-ticket-detail__sidebar-section" in detail_template
     assert "lane-pill" in detail_template
     assert "timeline-status" in detail_template
     assert 't("ops.detail.summary")' in detail_template
@@ -1641,3 +1647,5 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert '/static/htmx.min.js' in base_template
     assert 't("ops.board.pending_draft_approval")' in board_template
     assert ".analysis-disclosure" in app_css
+    assert ".page--ops-ticket-detail" in app_css
+    assert ".ops-ticket-detail__layout" in app_css
