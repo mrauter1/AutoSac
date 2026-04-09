@@ -3,9 +3,9 @@ Check these boxes (`- [x]`) only when the target document itself satisfies the r
 
 ## Completeness
 - [x] **Implementation-Ready Scope**: The document defines the system purpose, major components, responsibilities, and boundaries clearly enough that an autonomous coding agent would not need to invent the overall design.
-- [ ] **Behavior Completeness**: The main flows, edge cases, failure modes, and recovery behavior that materially affect implementation are specified or explicitly declared out of scope.
-- [ ] **Interface & Data Contracts**: Every interface, data shape, persisted entity, protocol, file format, and integration needed for implementation is defined with enough precision to code against.
-- [x] **Operational Constraints**: Relevant runtime constraints are stated clearly, including performance, security, observability, configuration, deployment assumptions, and other non-functional requirements that affect implementation.
+- [x] **Behavior Completeness**: The main flows, edge cases, failure modes, and recovery behavior that materially affect implementation are specified or explicitly declared out of scope.
+- [x] **Interface & Data Contracts**: Every interface, data shape, persisted entity, protocol, file format, and integration needed for implementation is defined with enough precision to code against.
+- [ ] **Operational Constraints**: Relevant runtime constraints are stated clearly, including performance, security, observability, configuration, deployment assumptions, and other non-functional requirements that affect implementation.
 
 ## Clarity
 - [ ] **Ambiguity Control**: The document contains no unresolved placeholders such as TBD/TODO/??? and no materially ambiguous language that would force an implementer to guess.
@@ -16,5 +16,5 @@ Check these boxes (`- [x]`) only when the target document itself satisfies the r
 - [x] **Appropriate Abstraction Level**: The document specifies contracts, invariants, externally relevant states, interactions, observable artifacts, and constraints without overspecifying one internal implementation strategy. Detail that affects external behavior, persisted state, failure handling, recovery, security, compatibility, migration, or interoperability counts as part of the contract and must be stated when needed.
 
 ## Current Blockers
-- Duplicate-event repair versus later routing changes is not canonical; the current text still permits conflicting interpretations about whether the same event can gain a second target row after `SLACK_DEFAULT_TARGET_NAME` changes.
-- `message_author_type` derivation is not canonical for every `ticket.public_message_added` payload, especially approved AI draft publication.
+- Section 11 assigns `event emission` logging to the worker, but Section 6.1 defines event emission inside the ticket-mutation transaction rather than in the delivery runtime. The PRD must make log ownership consistent with where emission actually happens.
+- Section 11 requires all structured Slack-delivery logs to include `target_name`, `delivery_status`, `attempt_count`, and `locked_by`, but emission can occur when no `integration_event_targets` row exists. The PRD must either split required fields by log type or explicitly define null/absent-field behavior for emission logs.
