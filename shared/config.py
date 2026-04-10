@@ -118,6 +118,7 @@ class SlackSettings:
     is_valid: bool = True
     config_error_code: str | None = None
     config_error_summary: str | None = None
+    routing_mode: str = "webhook"
 
     @property
     def any_notify_enabled(self) -> bool:

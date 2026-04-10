@@ -48,7 +48,7 @@ INTEGRATION_EVENT_TYPES = ("ticket.created", "ticket.public_message_added", "tic
 INTEGRATION_AGGREGATE_TYPES = ("ticket",)
 INTEGRATION_EVENT_LINK_ENTITY_TYPES = ("ticket", "ticket_message", "ticket_status_history")
 INTEGRATION_EVENT_LINK_RELATION_KINDS = ("primary", "message", "status_history")
-INTEGRATION_TARGET_KINDS = ("slack_webhook", "slack_dm")
+INTEGRATION_TARGET_KINDS = ("slack_dm",)
 SLACK_RECIPIENT_REASONS = ("requester", "assignee", "requester_assignee")
 INTEGRATION_DELIVERY_STATUSES = ("pending", "processing", "sent", "failed", "dead_letter")
 

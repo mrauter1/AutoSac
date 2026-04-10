@@ -95,7 +95,7 @@ def upgrade() -> None:
     op.create_check_constraint(
         op.f("ck_integration_event_targets_integration_event_targets_target_kind"),
         "integration_event_targets",
-        "target_kind IN ('slack_webhook', 'slack_dm')",
+        "target_kind IN ('slack_dm')",
     )
     op.create_check_constraint(
         op.f("ck_integration_event_targets_integration_event_targets_recipient_reason"),

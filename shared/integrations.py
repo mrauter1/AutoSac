@@ -28,6 +28,7 @@ INTEGRATION_ROUTING_RESULTS = (
     "suppressed_slack_disabled",
     "suppressed_invalid_config",
     "suppressed_notify_disabled",
+    "suppressed_no_recipients",
     "suppressed_target_disabled",
 )
 
@@ -268,6 +269,10 @@ def resolve_routing_decision(slack: SlackSettings, *, event_type: str) -> Routin
     notify_enabled = _EVENT_TYPE_TO_NOTIFY_ENABLED[event_type](slack)
     if not notify_enabled:
         return RoutingDecision(routing_result="suppressed_notify_disabled")
+    if slack.routing_mode == "dm":
+        # Recipient selection lands in a later phase; the DB-backed DM runtime must not
+        # fall back to webhook target semantics or misclassify valid config as invalid.
+        return RoutingDecision(routing_result="suppressed_no_recipients")
     target = slack.get_target(slack.default_target_name)
     if target is None:
         return RoutingDecision(

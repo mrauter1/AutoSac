@@ -60,7 +60,7 @@ def test_slack_dm_foundation_migration_adds_settings_user_mapping_and_recipient_
     assert 'op.add_column("users", sa.Column("slack_user_id", sa.Text(), nullable=True))' in migration_source
     assert 'op.add_column("integration_event_targets", sa.Column("recipient_user_id"' in migration_source
     assert 'op.add_column("integration_event_targets", sa.Column("recipient_reason", sa.Text(), nullable=True))' in migration_source
-    assert '"target_kind IN (\'slack_webhook\', \'slack_dm\')"' in migration_source
+    assert '"target_kind IN (\'slack_dm\')"' in migration_source
 
 
 def test_encrypt_and_decrypt_slack_bot_token_round_trip(tmp_path):
@@ -134,6 +134,35 @@ def test_load_slack_dm_settings_flags_undecryptable_token_and_runtime_context_us
     assert loaded.config_error_code == "slack_bot_token_undecryptable"
     assert runtime.slack.message_preview_max_chars == 333
     assert runtime.slack.config_error_code == "slack_bot_token_undecryptable"
+    assert runtime.slack.routing_mode == "dm"
+
+
+def test_valid_db_loaded_slack_runtime_uses_dm_routing_without_webhook_targets(tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from shared.integrations import build_slack_runtime_context, resolve_routing_decision
+    from shared.models import SlackDMSettings
+    from shared.slack_dm import encrypt_slack_bot_token
+
+    db = _FakeStateDb()
+    db.add(
+        SlackDMSettings(
+            singleton_key="default",
+            enabled=True,
+            bot_token_ciphertext=encrypt_slack_bot_token("test-secret", "xoxb-test-token"),
+            notify_ticket_created=True,
+        )
+    )
+    settings = _make_settings(tmp_path)
+
+    runtime = build_slack_runtime_context(settings, db=db)
+    decision = resolve_routing_decision(runtime.slack, event_type="ticket.created")
+
+    assert runtime.slack.routing_mode == "dm"
+    assert runtime.slack.is_valid is True
+    assert decision.routing_result == "suppressed_no_recipients"
+    assert decision.target_name is None
+    assert decision.config_error_code is None
 
 
 def test_persist_slack_delivery_health_upserts_system_state(tmp_path):

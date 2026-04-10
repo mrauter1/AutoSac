@@ -1078,3 +1078,70 @@ Fix the two blockers in the implementation, then rerun the targeted Slack founda
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=producer | cycle=2 | attempt=1 | thread_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_producer.md
+session_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+---
+I’m moving from review findings into implementation now. The main design constraint is that this phase must enforce DM-only schema semantics without accidentally inventing half-finished recipient routing, so I’m checking the current event-routing contract before I edit it.
+
+The reviewer findings line up with the phase plan: enforce DM-only schema now, then make the DB-backed request runtime stop leaning on webhook target semantics while still keeping full recipient routing out of scope. I’m breaking this into a small schema/test pass and a small runtime-routing pass, then I’ll rerun the targeted Slack suites and update the phase notes.
+
+I’ve got a phase-safe way to resolve the runtime finding without prematurely implementing full recipient routing: make DB-loaded Slack settings explicitly DM-mode, then let the existing emitter record event/link rows with `suppressed_no_recipients` instead of misclassifying valid config or creating webhook targets. I’m checking the duplicate-routing helpers before I patch it through.
+
+I’m editing the core runtime files now. The code change is small but specific: DM-loaded settings will carry an explicit routing mode, the migration/model will become DM-only, and the emitter will stop treating valid DB Slack config as “invalid” just because webhook target fields are absent.
+
+The schema and runtime patches are in. I’m running the focused Slack foundation and emission suites now to catch any fallout from the new DM-mode routing before I touch the phase notes.
+
+The focused suites are green. I’m doing one quick regression pass on compile/hardening checks, then I’ll update the implementation notes with the exact phase-scoped behavior change I landed for DM-mode routing.
+
+I’ve got one non-obvious phase decision worth preserving for later loops: DB-loaded Slack settings now use a DM routing mode that deliberately records `suppressed_no_recipients` until the actual recipient-insert phase lands, while direct `Settings.slack` injection stays webhook-mode for existing unit tests only. I’m recording that and then I’ll finalize the phase notes.
+
+I’ve finished the implementation pass and the targeted validation is clean. I’m doing one last diff read so the close-out only calls out the concrete phase-scoped changes and any remaining known gap.
+
+Scope considered
+
+Phase-local fixes for the two verifier findings only: DM-only persistence semantics, DB-backed Slack runtime gating, focused regression tests, and the required phase artifacts. I left unrelated dirty files, including the existing `README.md` diff, out of scope.
+
+What I analyzed
+
+I reviewed the active verifier feedback, the phase plan, the shared decisions ledger, and the affected code paths in [shared/migrations/versions/20260410_0012_slack_dm_persistence_runtime_foundation.py](/home/marcelo/code/AutoSac/shared/migrations/versions/20260410_0012_slack_dm_persistence_runtime_foundation.py), [shared/models.py](/home/marcelo/code/AutoSac/shared/models.py), [shared/config.py](/home/marcelo/code/AutoSac/shared/config.py), [shared/slack_dm.py](/home/marcelo/code/AutoSac/shared/slack_dm.py), [shared/integrations.py](/home/marcelo/code/AutoSac/shared/integrations.py), and the Slack foundation/emission tests.
+
+What I changed
+
+I tightened the schema to DM-only in [20260410_0012_slack_dm_persistence_runtime_foundation.py](/home/marcelo/code/AutoSac/shared/migrations/versions/20260410_0012_slack_dm_persistence_runtime_foundation.py#L95) and [shared/models.py](/home/marcelo/code/AutoSac/shared/models.py#L51), so `integration_event_targets.target_kind` now only permits `slack_dm`.
+
+I added an explicit `routing_mode` to [shared/config.py](/home/marcelo/code/AutoSac/shared/config.py#L96), had DB-loaded/default Slack settings opt into DM mode in [shared/slack_dm.py](/home/marcelo/code/AutoSac/shared/slack_dm.py#L126) and [shared/slack_dm.py](/home/marcelo/code/AutoSac/shared/slack_dm.py#L212), and updated [shared/integrations.py](/home/marcelo/code/AutoSac/shared/integrations.py#L26) and [shared/integrations.py](/home/marcelo/code/AutoSac/shared/integrations.py#L260) so valid DB-backed DM config no longer falls back to webhook target lookup or `suppressed_invalid_config`. In this phase it now records zero-target emissions as `suppressed_no_recipients`, which keeps the request path DM-aware without prematurely implementing recipient inserts.
+
+I updated [tests/test_slack_dm_foundation.py](/home/marcelo/code/AutoSac/tests/test_slack_dm_foundation.py#L51) to assert the DM-only constraint and added coverage for the DM-mode routing behavior in [tests/test_slack_dm_foundation.py](/home/marcelo/code/AutoSac/tests/test_slack_dm_foundation.py#L140). I also refreshed [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/dm-persistence-runtime-foundation/implementation_notes.md) and appended the non-obvious routing decision to [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt).
+
+Key findings / decisions
+
+The two blocking review findings are addressed: DM-only target-kind enforcement is now real, and the DB-backed request runtime no longer interprets valid Slack DM config through webhook-only fields.
+
+I kept direct `Settings.slack` injection on the legacy webhook-mode path for non-DB unit tests only, while production request and worker flows continue using DB-loaded DM mode. That split is recorded in the shared decisions file to prevent drift in later phases.
+
+Validation passed:
+- `python3 -m compileall shared app worker tests`
+- `python3 -m pytest tests/test_slack_dm_foundation.py tests/test_slack_event_emission.py -q`
+- `python3 -m pytest tests/test_slack_delivery.py tests/test_ai_worker.py -q`
+- `python3 -m pytest tests/test_hardening_validation.py -q`
+
+Open issues / next step
+
+Recipient-based DM target-row insertion is still intentionally deferred to the later emission phase, so valid DB-backed config currently records zero-target events as `suppressed_no_recipients`.
+
+Broader web-route suites remain blocked in this environment by missing installed dependencies (`python-multipart`, `bleach`), so they were still not usable as signal for this phase.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>

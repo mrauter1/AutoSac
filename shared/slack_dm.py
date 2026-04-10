@@ -124,7 +124,7 @@ def validate_slack_dm_settings_input(values: SlackDMSettingsInput) -> SlackDMSet
 
 
 def build_default_slack_settings() -> SlackSettings:
-    return SlackSettings()
+    return SlackSettings(routing_mode="dm")
 
 
 def _derive_slack_token_key(app_secret_key: str) -> bytes:
@@ -309,6 +309,7 @@ def load_slack_dm_settings(db: Session, *, app_settings: Settings) -> SlackSetti
         is_valid=error_code is None,
         config_error_code=error_code,
         config_error_summary=error_summary,
+        routing_mode="dm",
     )
 
 
