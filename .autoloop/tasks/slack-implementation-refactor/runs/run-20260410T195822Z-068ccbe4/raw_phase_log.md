@@ -847,3 +847,132 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=producer | cycle=1 | attempt=1 | thread_id=019d7930-97a6-7b51-9e7c-ef957ac17320
+---
+provider=codex
+mode=start
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_producer.md
+session_id=019d7930-97a6-7b51-9e7c-ef957ac17320
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d7930-97a6-7b51-9e7c-ef957ac17320
+---
+I’m implementing the emission-time DM recipient routing phase. First I’m reading the phase artifacts and the current Slack integration code to pin down the required blast radius before editing.
+
+I’ve confirmed this phase sits on top of earlier DM foundation work and that the current routing code still has webhook-era branches. Next I’m reading the concrete emission logic and its tests so I can replace only the routing/target creation behavior without drifting into the delivery phase.
+
+The current tests are still asserting webhook target names, so this phase will require a coordinated test rewrite rather than a narrow assertion tweak. I’m checking the model and config shapes now so the routing helper can use the existing DM fields and DB-backed runtime cleanly.
+
+I have enough context to pin down the edit shape. Plan:
+1. Refactor `shared/integrations.py` so DM routing computes eligible requester/assignee recipients, inserts `slack_dm` target rows, records `recipient_target_count`, and keeps duplicate reuse read-only.
+2. Rewrite the Slack emission tests around DM-mode settings, recipient collapse/no-recipient behavior, and no-backfill duplicate reuse after later Slack ID or assignment changes.
+3. Update the phase notes and this turn’s decisions block with any non-obvious constraints that would otherwise drift.
+
+I’ve narrowed the behavior change: the runtime already distinguishes DM mode, but the emission code still hardcodes “created means one webhook target.” I’m checking for any other callers or tests that depend on that assumption before I cut it out.
+
+I’m at the edit point. I’m changing `shared/integrations.py` to treat “created” as “one or more DM recipients were resolved,” not “a single webhook target exists,” and I’m rewriting the emission tests around DM recipient rows, collapse rules, no-recipient suppression, and duplicate no-backfill behavior.
+
+The routing code is in place. I’m patching the test harness next so fake sessions can resolve `User` rows by ID and the fixtures model DM-mode Slack settings instead of webhook targets.
+
+The main emission-path tests are converted. I’m on the duplicate-reuse cases now, making sure the old dedupe behavior stays read-only when Slack IDs or assignments change later and that logs carry counts instead of target names.
+
+The code and emission tests are patched. I’m running the focused Slack emission and foundation suites now to catch any contract drift before I update the phase artifacts.
+
+The focused suites passed. I’m doing one more pass over the repository state, then I’ll append the turn-specific decision note and phase implementation notes with the exact scope and validation performed.
+
+The focused emission suites are green. I’m running one adjacent persistence suite as a regression check because the routing code now loads `User` rows during emission and I want to confirm that doesn’t disturb the existing foundation coverage.
+
+I’ve got clean verification on the changed code. I’m writing the minimal durable artifacts now: one decision note for the routing ownership split and the phase implementation notes with scope, invariants, and validation.
+
+I’m done with the phase-local work. I’m checking the final working tree once so the closeout can clearly separate my changes from the unrelated pre-existing dirt in the repo.
+
+Scope considered
+
+- Implemented only the phase-local emission routing slice in [shared/integrations.py](/home/marcelo/code/AutoSac/shared/integrations.py) and its focused coverage in [tests/test_slack_event_emission.py](/home/marcelo/code/AutoSac/tests/test_slack_event_emission.py).
+- Ignored unrelated pre-existing worktree dirt in `README.md` and `tasks/slack_dm_integration_PRD.md`.
+
+What I analyzed
+
+- The current emission path, duplicate reuse logic, and log payloads in [shared/integrations.py](/home/marcelo/code/AutoSac/shared/integrations.py).
+- The phase artifacts and prior implementation notes to keep this change inside the agreed emission-time scope.
+- Existing Slack emission and foundation tests to preserve payload or dedupe invariants while replacing webhook-era target assumptions.
+
+What I changed
+
+- Replaced webhook-style target creation with DM recipient routing from `tickets.created_by_user_id` and `tickets.assigned_to_user_id`, filtered to active users with nonblank `slack_user_id`.
+- Added requester/assignee collapse into one `requester_assignee` row with `target_name = user:<recipient_user_id>`, `target_kind = slack_dm`, and persisted recipient fields.
+- Kept zero-recipient events as persisted `integration_events` plus links with `routing_result = suppressed_no_recipients` and zero target rows.
+- Changed emission logging to include `recipient_target_count` and kept `routing_target_name` null for DM routing.
+- Kept duplicate reuse read-only: existing target rows stay authoritative, and later Slack ID or assignment changes do not add or rewrite recipient rows.
+- Updated the phase notes in [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/emission-dm-recipient-routing/implementation_notes.md) and appended the turn decision block in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt).
+
+Key findings / decisions
+
+- `resolve_routing_decision()` now acts as the global config/notify gate only; actual recipient lookup and promotion to `created` stays inside `_record_integration_event()`.
+- Existing target rows remain the duplicate source of truth; zero-target duplicates preserve stored routing unless the snapshot is stale or missing, in which case they still degrade to `suppressed_notify_disabled`.
+
+Open issues / next step
+
+- Focused validation passed:
+  - `python3 -m pytest tests/test_slack_event_emission.py tests/test_slack_dm_foundation.py -q`
+  - `python3 -m pytest tests/test_foundation_persistence.py -q`
+  - `python3 -m compileall shared tests`
+- Next phase is worker-side DM transport and delivery-state handling; this turn did not change send-time Slack Web API behavior.
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=verifier | cycle=1 | attempt=1 | thread_id=019d7930-97a6-7b51-9e7c-ef957ac17320
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_verifier.md
+session_id=019d7930-97a6-7b51-9e7c-ef957ac17320
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d7930-97a6-7b51-9e7c-ef957ac17320
+---
+I’m reviewing the emission-time DM routing implementation against the phase contract now. First I’m reading the phase criteria and the touched diff so I can decide whether the code actually satisfies the accepted behavior before I write any reviewer artifacts.
+
+I’ve read the routing implementation and the phase notes. I’m checking for any repo-wide regression surface now, especially whether removing the old webhook-target branch in `shared/integrations.py` broke any still-live callers or tests outside this phase.
+
+I didn’t find a phase-blocking or phase-worthy defect in the implementation. I’m marking the criteria complete and recording that this review pass has no in-scope findings so the phase artifacts match the verified result.
+
+Scope considered
+
+- Reviewed the phase-local emission routing implementation in `shared/integrations.py` and the focused coverage in `tests/test_slack_event_emission.py`.
+- Checked phase artifacts in `.autoloop/tasks/slack-implementation-refactor/implement/phases/emission-dm-recipient-routing/`.
+
+What I analyzed
+
+- Recipient selection from requester and current assignee, eligibility filtering, duplicate collapse, and persisted routing outcomes.
+- Duplicate reuse behavior for zero-target and existing-target events.
+- Emission logging changes for `recipient_target_count` and the `routing_target_name = null` contract.
+- The shared decision ledger for phase constraints and prior runtime assumptions.
+
+What I reviewed
+
+- Verified the implementation against AC-1 through AC-3 and the in-scope/out-of-scope phase contract.
+- Ran:
+  - `python3 -m pytest tests/test_slack_event_emission.py tests/test_slack_dm_foundation.py tests/test_foundation_persistence.py -q`
+- Updated:
+  - `.autoloop/tasks/slack-implementation-refactor/implement/phases/emission-dm-recipient-routing/criteria.md`
+  - `.autoloop/tasks/slack-implementation-refactor/implement/phases/emission-dm-recipient-routing/feedback.md`
+
+Key findings / decisions
+
+- No in-scope review findings for this pass.
+- The phase artifacts now reflect a complete review with all criteria checked.
+
+Open issues / next step
+
+- No blocking reviewer action is required for this phase.
+- The next planned work remains the later worker-delivery phase, which is explicitly out of scope for this review.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
