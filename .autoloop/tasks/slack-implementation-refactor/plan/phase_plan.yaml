@@ -1,105 +1,158 @@
 version: 1
 task_id: slack-implementation-refactor
-request_snapshot_ref: /home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/runs/run-20260410T184024Z-448797a6/request.md
+request_snapshot_ref: /home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/runs/run-20260410T195822Z-068ccbe4/request.md
 phases:
-  - phase_id: schema-emission-runtime-boundary
-    title: Schema, Emission, and Runtime Boundary
-    objective: Add the additive Slack refactor schema, remove hidden session-based settings lookup, and move emission plus duplicate handling to explicit runtime and first-class routing snapshot persistence.
-    status: planned
-    in_scope:
-      - Add routing snapshot columns on integration_events and claim_token on integration_event_targets in a new additive migration and model update.
-      - Introduce SlackRuntimeContext and remove Session.info based settings access from Slack code.
-      - Refactor shared/integrations.py to persist routing snapshot columns, stop writing _integration_routing, and preserve duplicate behavior from stored routing columns and target rows only.
-      - Thread explicit Slack runtime through shared/ticketing.py and the request or worker callers that can emit Slack events.
-      - Update Slack emission and migration tests for the new persistence model.
-    out_of_scope:
-      - Delivery claim-token ownership enforcement during worker finalization.
-      - Any mixed-version compatibility bridge for legacy Slack rows.
-      - Any non-Slack worker or ticketing redesign.
-    dependencies: []
-    acceptance_criteria:
-      - id: AC-1
-        text: No Slack emission path reads Session.info["settings"], and missing runtime context is treated as a programmer error instead of a valid suppression path.
-      - id: AC-2
-        text: Newly inserted integration_events rows populate the routing snapshot columns and keep payload_json free of _integration_routing or equivalent metadata.
-      - id: AC-3
-        text: Duplicate reuse reports created from an existing target row, reuses stored non-created suppression for zero-target events, and falls back to suppressed_notify_disabled for zero-target rows whose stored snapshot is absent or stale created.
-    deliverables:
-      - New additive migration and shared/models.py updates for routing snapshot columns plus claim_token
-      - SlackRuntimeContext and refactored shared/integrations.py emission helpers
-      - shared/ticketing.py and upstream request or worker call-site updates for explicit runtime propagation
-      - Updated Slack emission and persistence tests
-    risks:
-      - Call-site propagation can miss a Slack-emitting path because settings currently arrive implicitly through session construction.
-      - Duplicate reuse can regress if current routing decisions leak back into reused rows.
-      - The migration and model changes must stay additive because rollback is code/config first.
-    rollback:
-      - Keep SLACK_ENABLED=false and revert code while leaving the additive columns in place if the runtime-boundary or emission refactor regresses.
-      - Do not add a legacy payload-metadata bridge as part of rollback handling.
-  - phase_id: delivery-claim-outcome-finalization
-    title: Delivery Claim, Outcome, and Finalization Refactor
-    objective: Refactor Slack delivery so claim ownership is proven by claim_token and every post-claim mutation goes through one canonical finalization boundary driven by typed executor outcomes.
-    status: planned
-    in_scope:
-      - Extend claim handles and repository queries to write and use claim_token.
-      - Introduce typed delivery outcomes for sent, retryable_failure, and dead_letter_terminal.
-      - Move retry exhaustion conversion and next_attempt_at calculation into executor classification before finalization.
-      - Consolidate success, retry, dead-letter, and ownership-lost handling behind one repository finalization operation.
-      - Preserve current suppression, rendering, timeout, backoff, stale-lock recovery, and logging contracts while adding claim-token observability where allowed.
-    out_of_scope:
-      - Schema cleanup that drops existing Slack columns.
-      - Any change to Slack message wording or routing business rules.
-      - Any mixed-version support for claim_token IS NULL processing rows.
-    dependencies:
-      - schema-emission-runtime-boundary
-    acceptance_criteria:
-      - id: AC-1
-        text: Claiming a due target row writes a fresh claim_token, increments attempt_count once, and returns a claim handle that includes claim_token, payload_json, and the existing observability fields.
-      - id: AC-2
-        text: Finalization proves ownership with id plus processing status plus claim_token, clears claim state on every transition out of processing, and leaves the row unchanged when ownership is lost.
-      - id: AC-3
-        text: Retryable transport or HTTP failures below the configured limit finalize to failed with executor-supplied next_attempt_at, while retryable failures at or above the limit finalize directly to dead_letter with terminal_reason retry_exhausted and no repository-side reclassification.
-    deliverables:
-      - Refactored worker/slack_delivery.py repository and executor helpers plus updated claim handle and outcome types
-      - Canonical finalization write-set implementation for sent, failed, dead_letter, and ownership_lost
-      - Updated Slack delivery tests for claim_token, typed outcomes, stale-lock recovery, and ownership-lost behavior
-    risks:
-      - Splitting repository versus executor responsibilities can still leave duplicated row writes if finalization is not made the sole owner.
-      - Claim-token enforcement can weaken debugging if locked_by and attempt_count stop appearing in logs.
-      - Retry-exhaustion handling can drift if outcome construction and finalization both try to own it.
-    rollback:
-      - Keep Slack disabled and revert worker code while preserving additive schema if delivery-state transitions or ownership checks regress.
-      - Treat any post-migration failure as a forward-fix issue rather than restoring legacy ownership predicates.
-  - phase_id: regression-rollout-verification
-    title: Regression Completion and Rollout Verification
-    objective: Finish the required regression coverage, validate rollout assumptions, and leave the refactor aligned with the Phase 1 Slack contract and the refactor PRD acceptance criteria.
-    status: planned
-    in_scope:
-      - Update Slack emission, delivery, and migration tests to the new runtime boundary, routing snapshot, and claim-token model.
-      - Add or adjust rollout-facing docs or check coverage only where needed to keep the pre-launch disposable-row assumption and config-first rollback explicit.
-      - Run the targeted Slack regression suite and resolve any breakage introduced by signature propagation or finalization consolidation.
-      - Remove leftover code or test references that require _integration_routing or locked_by plus attempt_count ownership checks.
-    out_of_scope:
-      - New Slack functionality or backfill behavior.
-      - Dropping existing Slack columns in this refactor.
-      - Any unrelated repository-wide test cleanup.
-    dependencies:
-      - delivery-claim-outcome-finalization
-    acceptance_criteria:
-      - id: AC-1
-        text: The test suite covers explicit runtime context, first-class routing snapshot persistence, duplicate reuse edge cases, claim-token ownership loss, retry exhaustion before finalization, and canonical write sets for sent, failed, and dead_letter.
-      - id: AC-2
-        text: No remaining code or tests depend on _integration_routing payload metadata, Session.info based Slack settings lookup, or legacy claimed-row ownership predicates.
-      - id: AC-3
-        text: Rollout notes remain explicit that deployment occurs with SLACK_ENABLED=false, request-path and worker code ship together, and pre-refactor Slack rows are disposable pre-launch state only.
-    deliverables:
-      - Updated Slack regression suite and migration assertions
-      - Any necessary docs or check updates for rollout and rollback clarity
-      - Final refactor state aligned with the PRD acceptance criteria
-    risks:
-      - Signature changes can regress request or worker flows outside the direct Slack tests if affected callers are not rerun.
-      - Rollout assumptions can drift back to mixed-version expectations if the disposable-row rule is not kept explicit.
-      - Test coverage can miss the single-finalization invariant unless write-set assertions are made direct.
-    rollback:
-      - Hold Slack disabled and revert code if final verification exposes regressions, leaving the additive schema intact.
-      - Do not reintroduce payload-metadata or mixed-version compatibility paths as a rollback shortcut.
+- phase_id: schema-emission-runtime-boundary
+  title: Schema, Emission, and Runtime Boundary
+  objective: Add the additive Slack refactor schema, remove hidden session-based settings
+    lookup, and move emission plus duplicate handling to explicit runtime and first-class
+    routing snapshot persistence.
+  status: planned
+  in_scope:
+  - Add routing snapshot columns on integration_events and claim_token on integration_event_targets
+    in a new additive migration and model update.
+  - Introduce SlackRuntimeContext and remove Session.info based settings access from
+    Slack code.
+  - Refactor shared/integrations.py to persist routing snapshot columns, stop writing
+    _integration_routing, and preserve duplicate behavior from stored routing columns
+    and target rows only.
+  - Thread explicit Slack runtime through shared/ticketing.py and the request or worker
+    callers that can emit Slack events.
+  - Update Slack emission and migration tests for the new persistence model.
+  out_of_scope:
+  - Delivery claim-token ownership enforcement during worker finalization.
+  - Any mixed-version compatibility bridge for legacy Slack rows.
+  - Any non-Slack worker or ticketing redesign.
+  dependencies: []
+  acceptance_criteria:
+  - id: AC-1
+    text: No Slack emission path reads Session.info["settings"], and missing runtime
+      context is treated as a programmer error instead of a valid suppression path.
+  - id: AC-2
+    text: Newly inserted integration_events rows populate the routing snapshot columns
+      and keep payload_json free of _integration_routing or equivalent metadata.
+  - id: AC-3
+    text: Duplicate reuse reports created from an existing target row, reuses stored
+      non-created suppression for zero-target events, and falls back to suppressed_notify_disabled
+      for zero-target rows whose stored snapshot is absent or stale created.
+  deliverables:
+  - New additive migration and shared/models.py updates for routing snapshot columns
+    plus claim_token
+  - SlackRuntimeContext and refactored shared/integrations.py emission helpers
+  - shared/ticketing.py and upstream request or worker call-site updates for explicit
+    runtime propagation
+  - Updated Slack emission and persistence tests
+  risks:
+  - Call-site propagation can miss a Slack-emitting path because settings currently
+    arrive implicitly through session construction.
+  - Duplicate reuse can regress if current routing decisions leak back into reused
+    rows.
+  - The migration and model changes must stay additive because rollback is code/config
+    first.
+  rollback:
+  - Keep SLACK_ENABLED=false and revert code while leaving the additive columns in
+    place if the runtime-boundary or emission refactor regresses.
+  - Do not add a legacy payload-metadata bridge as part of rollback handling.
+- phase_id: delivery-claim-outcome-finalization
+  title: Delivery Claim, Outcome, and Finalization Refactor
+  objective: Refactor Slack delivery so claim ownership is proven by claim_token and
+    every post-claim mutation goes through one canonical finalization boundary driven
+    by typed executor outcomes.
+  status: planned
+  in_scope:
+  - Extend claim handles and repository queries to write and use claim_token.
+  - Introduce typed delivery outcomes for sent, retryable_failure, and dead_letter_terminal.
+  - Move retry exhaustion conversion and next_attempt_at calculation into executor
+    classification before finalization.
+  - Consolidate success, retry, dead-letter, and ownership-lost handling behind one
+    repository finalization operation.
+  - Preserve current suppression, rendering, timeout, backoff, stale-lock recovery,
+    and logging contracts while adding claim-token observability where allowed.
+  out_of_scope:
+  - Schema cleanup that drops existing Slack columns.
+  - Any change to Slack message wording or routing business rules.
+  - Any mixed-version support for claim_token IS NULL processing rows.
+  dependencies:
+  - schema-emission-runtime-boundary
+  acceptance_criteria:
+  - id: AC-1
+    text: Claiming a due target row writes a fresh claim_token, increments attempt_count
+      once, and returns a claim handle that includes claim_token, payload_json, and
+      the existing observability fields.
+  - id: AC-2
+    text: Finalization proves ownership with id plus processing status plus claim_token,
+      clears claim state on every transition out of processing, and leaves the row
+      unchanged when ownership is lost.
+  - id: AC-3
+    text: Retryable transport or HTTP failures below the configured limit finalize
+      to failed with executor-supplied next_attempt_at, while retryable failures at
+      or above the limit finalize directly to dead_letter with terminal_reason retry_exhausted
+      and no repository-side reclassification.
+  deliverables:
+  - Refactored worker/slack_delivery.py repository and executor helpers plus updated
+    claim handle and outcome types
+  - Canonical finalization write-set implementation for sent, failed, dead_letter,
+    and ownership_lost
+  - Updated Slack delivery tests for claim_token, typed outcomes, stale-lock recovery,
+    and ownership-lost behavior
+  risks:
+  - Splitting repository versus executor responsibilities can still leave duplicated
+    row writes if finalization is not made the sole owner.
+  - Claim-token enforcement can weaken debugging if locked_by and attempt_count stop
+    appearing in logs.
+  - Retry-exhaustion handling can drift if outcome construction and finalization both
+    try to own it.
+  rollback:
+  - Keep Slack disabled and revert worker code while preserving additive schema if
+    delivery-state transitions or ownership checks regress.
+  - Treat any post-migration failure as a forward-fix issue rather than restoring
+    legacy ownership predicates.
+- phase_id: regression-rollout-verification
+  title: Regression Completion and Rollout Verification
+  objective: Finish the required regression coverage, validate rollout assumptions,
+    and leave the refactor aligned with the Phase 1 Slack contract and the refactor
+    PRD acceptance criteria.
+  status: planned
+  in_scope:
+  - Update Slack emission, delivery, and migration tests to the new runtime boundary,
+    routing snapshot, and claim-token model.
+  - Add or adjust rollout-facing docs or check coverage only where needed to keep
+    the pre-launch disposable-row assumption and config-first rollback explicit.
+  - Run the targeted Slack regression suite and resolve any breakage introduced by
+    signature propagation or finalization consolidation.
+  - Remove leftover code or test references that require _integration_routing or locked_by
+    plus attempt_count ownership checks.
+  out_of_scope:
+  - New Slack functionality or backfill behavior.
+  - Dropping existing Slack columns in this refactor.
+  - Any unrelated repository-wide test cleanup.
+  dependencies:
+  - delivery-claim-outcome-finalization
+  acceptance_criteria:
+  - id: AC-1
+    text: The test suite covers explicit runtime context, first-class routing snapshot
+      persistence, duplicate reuse edge cases, claim-token ownership loss, retry exhaustion
+      before finalization, and canonical write sets for sent, failed, and dead_letter.
+  - id: AC-2
+    text: No remaining code or tests depend on _integration_routing payload metadata,
+      Session.info based Slack settings lookup, or legacy claimed-row ownership predicates.
+  - id: AC-3
+    text: Rollout notes remain explicit that deployment occurs with SLACK_ENABLED=false,
+      request-path and worker code ship together, and pre-refactor Slack rows are
+      disposable pre-launch state only.
+  deliverables:
+  - Updated Slack regression suite and migration assertions
+  - Any necessary docs or check updates for rollout and rollback clarity
+  - Final refactor state aligned with the PRD acceptance criteria
+  risks:
+  - Signature changes can regress request or worker flows outside the direct Slack
+    tests if affected callers are not rerun.
+  - Rollout assumptions can drift back to mixed-version expectations if the disposable-row
+    rule is not kept explicit.
+  - Test coverage can miss the single-finalization invariant unless write-set assertions
+    are made direct.
+  rollback:
+  - Hold Slack disabled and revert code if final verification exposes regressions,
+    leaving the additive schema intact.
+  - Do not reintroduce payload-metadata or mixed-version compatibility paths as a
+    rollback shortcut.
