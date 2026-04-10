@@ -1145,3 +1145,52 @@ Broader web-route suites remain blocked in this environment by missing installed
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=verifier | cycle=2 | attempt=1 | thread_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_verifier.md
+session_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+---
+Reviewing the follow-up implementation now against the two prior blockers. I’m checking whether the new DM-only schema and DM-mode runtime changes satisfy the phase contract without introducing a new regression, then I’ll update the verifier artifacts.
+
+The previous blockers are resolved in the source tree, and the shared decisions now explicitly document the phase-scoped DM-mode placeholder. I’m running the focused Slack suites once in verifier mode so the artifact close-out reflects independent validation rather than just the producer’s notes.
+
+The verifier test pass is clean, and I don’t see a new blocker in the follow-up changes. I’m updating the artifacts to mark the prior findings resolved and to flip the phase criteria to complete.
+
+Scope considered
+
+Phase-local re-review of the follow-up implementation for `dm-persistence-runtime-foundation`: the DM-only migration/model changes, the DB-backed Slack runtime changes, the new foundation test coverage, and the updated phase artifacts. I did not expand into unrelated dirty files.
+
+What I analyzed
+
+I rechecked the active phase contract, the shared decisions ledger including the new block `9`, the updated implementation notes, and the changed runtime paths in [shared/config.py](/home/marcelo/code/AutoSac/shared/config.py), [shared/slack_dm.py](/home/marcelo/code/AutoSac/shared/slack_dm.py), [shared/integrations.py](/home/marcelo/code/AutoSac/shared/integrations.py), [shared/models.py](/home/marcelo/code/AutoSac/shared/models.py), [20260410_0012_slack_dm_persistence_runtime_foundation.py](/home/marcelo/code/AutoSac/shared/migrations/versions/20260410_0012_slack_dm_persistence_runtime_foundation.py), and [tests/test_slack_dm_foundation.py](/home/marcelo/code/AutoSac/tests/test_slack_dm_foundation.py).
+
+What I reviewed
+
+I independently reran:
+- `python3 -m pytest tests/test_slack_dm_foundation.py tests/test_slack_event_emission.py -q`
+- `python3 -m pytest tests/test_slack_delivery.py tests/test_ai_worker.py tests/test_hardening_validation.py -q`
+
+Both passes succeeded: `25 passed` and `77 passed, 8 skipped`.
+
+Key findings / decisions
+
+- No new findings.
+- The previous blockers are resolved: the schema now enforces `target_kind = 'slack_dm'`, and the DB-backed request-path runtime no longer misclassifies valid Slack DM config as invalid because webhook targets are absent.
+- The phase-scoped `suppressed_no_recipients` placeholder for DB-loaded DM mode is explicitly documented in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt) and is consistent with this phase’s out-of-scope boundary on recipient inserts.
+
+Open issues / next step
+
+I updated [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/dm-persistence-runtime-foundation/feedback.md) with a cycle-2 resolution note and marked all boxes in [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/dm-persistence-runtime-foundation/criteria.md) complete. The next phase can build on this foundation for admin UI and recipient-based DM target insertion.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
