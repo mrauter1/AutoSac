@@ -413,3 +413,114 @@ I updated [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-impleme
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=test | phase=producer | cycle=1 | attempt=1 | thread_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/test_producer.md
+session_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=test | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+---
+Authoring the phase tests now. I’m checking the current Slack foundation coverage against the phase contract and the shared decisions first, then I’ll add only the missing regression tests plus the phase test artifacts.
+
+The current foundation tests cover the main reviewer regressions, but there are still two contract-level helper behaviors worth pinning in this phase: disabled-default load when the singleton row is absent, and token retention/clear semantics on the DB helper itself. I’m adding those rather than broadening into UI or recipient-routing tests that belong to later phases.
+
+I’m editing the Slack foundation test file now. The additions stay at the shared helper layer so they lock in the phase contract without pulling UI or recipient-routing expectations forward.
+
+The new tests are in place. I’m running the Slack foundation suite plus adjacent emission and hardening coverage so the phase artifact can point to verified, deterministic regression signal rather than just file additions.
+
+The new coverage is green. I’m doing one more adjacent pass on the worker-related Slack suites, since this phase also changed how runtime context is loaded on worker cycles and I want the strategy note to reflect checked blast radius, not just the new helper tests.
+
+I’ve finished the regression runs. I’m writing the phase test artifacts now so the next auditor has a compact map from behavior to coverage, plus the specific helper contracts these new tests are meant to lock down.
+
+The new helper tests are green and the phase artifacts are updated. I’m doing one quick readback of the test file and strategy note so the close-out can point to the exact coverage that was added and the deliberate gaps left for later phases.
+
+Scope considered
+
+Phase-local Slack DM foundation test work only: shared helper/runtime behavior, adjacent emission and worker regression surfaces, and the required test-phase artifacts. I did not broaden into later-phase UI, recipient-routing, or Slack Web API delivery tests.
+
+What I analyzed
+
+I reviewed the phase contract, the shared decisions ledger through block `10`, the existing foundation coverage in [tests/test_slack_dm_foundation.py](/home/marcelo/code/AutoSac/tests/test_slack_dm_foundation.py), and the adjacent regression suites in [tests/test_slack_event_emission.py](/home/marcelo/code/AutoSac/tests/test_slack_event_emission.py), [tests/test_slack_delivery.py](/home/marcelo/code/AutoSac/tests/test_slack_delivery.py), [tests/test_ai_worker.py](/home/marcelo/code/AutoSac/tests/test_ai_worker.py), and [tests/test_hardening_validation.py](/home/marcelo/code/AutoSac/tests/test_hardening_validation.py).
+
+What I changed
+
+I extended [tests/test_slack_dm_foundation.py](/home/marcelo/code/AutoSac/tests/test_slack_dm_foundation.py#L66) with three focused helper-level tests:
+- missing `slack_dm_settings` row loads disabled DM defaults instead of falling back to injected `Settings.slack`
+- blank token input preserves the stored ciphertext during `upsert_slack_dm_settings`
+- `clear_slack_dm_token` disables delivery while preserving non-secret workspace metadata
+
+I updated the phase coverage map in [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/dm-persistence-runtime-foundation/test_strategy.md#L10), appended the cycle summary in [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/dm-persistence-runtime-foundation/feedback.md#L10), and recorded the helper-level test focus under the current test-author header in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt).
+
+Key findings / decisions
+
+The new tests lock down the phase-scoped helper contracts that were still unpinned after implementation: DB defaults when the singleton row is absent, token retention on blank updates, and clear-token disable semantics.
+
+Validation passed:
+- `python3 -m pytest tests/test_slack_dm_foundation.py tests/test_slack_event_emission.py -q` -> `28 passed`
+- `python3 -m pytest tests/test_slack_delivery.py tests/test_ai_worker.py -q` -> `67 passed`
+- `python3 -m pytest tests/test_hardening_validation.py -q` -> `10 passed, 8 skipped`
+- `python3 -m compileall tests`
+
+Open issues / next step
+
+Admin save/disconnect UI behavior, recipient-row insertion, and Slack Web API DM send behavior remain intentionally uncovered here because they belong to later phases. The next auditor can use the updated strategy file as the behavior-to-coverage map for this foundation slice.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=test | phase=verifier | cycle=1 | attempt=1 | thread_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/test_verifier.md
+session_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=test | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+---
+Auditing the new foundation tests now. I’m checking whether the added coverage actually protects the phase-scoped Slack DM behaviors and whether the strategy/feedback artifacts accurately describe the regression surface, then I’ll update the audit artifacts.
+
+The strategy and the new helper tests line up with the phase contract. I’m running the focused suites once in audit mode so the criteria close-out is backed by independent signal rather than only the producer’s report.
+
+The audit runs are clean and I don’t have a blocking or non-blocking coverage issue to raise. I’m marking the phase criteria complete and appending a concise no-findings audit note to the test feedback artifact.
+
+Scope considered
+
+Phase-local audit of the Slack DM foundation test slice only: the new helper tests in [tests/test_slack_dm_foundation.py](/home/marcelo/code/AutoSac/tests/test_slack_dm_foundation.py), the adjacent regression suites cited by the test author, and the test-phase artifacts in the active `.autoloop` directory.
+
+What I analyzed
+
+I checked the phase contract, the shared decisions ledger through block `10`, the updated [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/dm-persistence-runtime-foundation/test_strategy.md), the producer’s [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/dm-persistence-runtime-foundation/feedback.md), and the relevant repository tests for schema, DB-backed runtime defaults, token retention or clear semantics, and adjacent worker or emission regressions.
+
+What I reviewed
+
+I independently ran:
+- `python3 -m pytest tests/test_slack_dm_foundation.py tests/test_slack_event_emission.py -q`
+- `python3 -m pytest tests/test_slack_delivery.py tests/test_ai_worker.py tests/test_hardening_validation.py -q`
+
+Both audit runs passed: `28 passed` and `77 passed, 8 skipped`.
+
+Key findings / decisions
+
+- No findings.
+- The added tests cover the phase-scoped helper gaps that mattered most here: missing-row disabled DM defaults, blank-token preservation, and clear-token disable behavior with metadata retention.
+- The strategy artifact accurately maps acceptance criteria to concrete tests and clearly calls out the intended later-phase gaps instead of silently normalizing them.
+
+Open issues / next step
+
+I marked all boxes complete in [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/dm-persistence-runtime-foundation/criteria.md) and appended a no-findings audit note to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/dm-persistence-runtime-foundation/feedback.md). The next phase can build on this foundation for admin UI and recipient-routing coverage.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
