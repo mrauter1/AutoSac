@@ -39,3 +39,7 @@
 {"ts": "2026-04-10T20:58:00.716349+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 39, "event_type": "phase_finished", "pair": "test", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false, "phase_id": "admin-ui-and-user-mapping"}
 {"ts": "2026-04-10T20:58:40.601113+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 40, "event_type": "phase_finished", "pair": "test", "phase": "verifier", "cycle": 1, "attempt": 1, "empty_output": false, "phase_id": "admin-ui-and-user-mapping"}
 {"ts": "2026-04-10T20:58:40.609827+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 41, "event_type": "pair_completed", "pair": "test", "cycle": 1, "attempt": 1, "phase_id": "admin-ui-and-user-mapping"}
+{"ts": "2026-04-10T20:58:40.641681+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 42, "event_type": "phase_completed", "pair": "test", "phase_id": "admin-ui-and-user-mapping", "phase_mode": "single"}
+{"ts": "2026-04-10T20:58:40.644797+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 43, "event_type": "phase_started", "phase_id": "emission-dm-recipient-routing", "phase_mode": "single"}
+{"ts": "2026-04-10T20:58:40.645250+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 44, "event_type": "pair_started", "pair": "implement", "phase_id": "emission-dm-recipient-routing"}
+{"ts": "2026-04-10T20:58:40.645312+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 45, "event_type": "cycle_started", "pair": "implement", "cycle": 1, "attempt": 1, "phase_id": "emission-dm-recipient-routing"}
