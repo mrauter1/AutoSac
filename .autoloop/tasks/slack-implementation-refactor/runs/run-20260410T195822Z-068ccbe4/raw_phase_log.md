@@ -180,3 +180,12 @@ The planning artifacts are complete for this turn. The next step is to proceed t
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_scope_resolved
+---
+phase_mode=single
+phase_ids=dm-persistence-runtime-foundation,admin-ui-and-user-mapping,emission-dm-recipient-routing,worker-dm-delivery-and-regression
+explicit=True
+current_phase_index=0
