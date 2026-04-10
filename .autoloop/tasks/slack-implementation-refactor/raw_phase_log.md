@@ -826,3 +826,54 @@ The only missing implementation detail in the plan is the crypto dependency itse
 Replaced the stale webhook-refactor plan with a DM-specific implementation plan in [plan.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/plan/plan.md) and rewrote [phase_plan.yaml](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/plan/phase_plan.yaml) into four ordered phases: DB-backed Slack DM foundations, admin UI plus user Slack IDs, emission-time recipient routing, and worker DM delivery plus regression/docs. The new plan is anchored to the current FastAPI/SQLAlchemy/worker surfaces and makes the migration posture, token encryption, admin-only permissions, no-backfill routing, and Web API delivery rules explicit.
 
 I also appended the artifact change note to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/plan/feedback.md) and recorded the non-obvious migration/runtime decisions in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt), including explicit supersession of the old startup-time runtime and `SLACK_*` env guidance. No tests were run; this turn only updated planning artifacts.
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=plan | phase=verifier | cycle=1 | attempt=1 | thread_id=019d78f9-6319-7c80-956f-163a1f84d16a
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/plan_verifier.md
+session_id=019d78f9-6319-7c80-956f-163a1f84d16a
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=plan | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d78f9-6319-7c80-956f-163a1f84d16a
+---
+I’m auditing the updated plan against the DM PRD, the active artifacts, and the shared decision history now. I’m focusing first on intent coverage and behavior safety, then on whether the phase plan and feedback history stay coherent for later turns.
+
+I found a few material gaps. They’re not ambiguity in user intent; they’re missing plan coverage for explicit PRD requirements, so I’m recording them directly in the verifier feedback and marking the criteria incomplete.
+
+Scope considered
+
+Verified the active DM-planning artifacts against the immutable request snapshot, the raw run log, the active plan files, and the shared decisions history. I focused on intent fidelity first, then on behavior safety, operational completeness, and phase-plan coherence.
+
+What I analyzed
+
+I checked the DM PRD requirements that materially change current behavior: DB-backed Slack config, admin-only integration UI, admin-managed `users.slack_user_id`, recipient-based routing, no-backfill rules, Slack Web API delivery, delivery-health visibility, and observability requirements. I also checked the current plan for explicit handling of migration, rollback, and previously recorded superseding decisions.
+
+What I reviewed
+
+I reviewed:
+- `plan.md`
+- `phase_plan.yaml`
+- `feedback.md`
+- `criteria.md`
+- `decisions.txt`
+
+I updated `criteria.md` to reflect blocking gaps and appended prioritized verifier findings to `feedback.md`.
+
+Key findings / decisions
+
+- `PLAN-002` blocking: the plan does not yet make the admin-page scope documentation and disconnect persistence contract explicit.
+- `PLAN-003` blocking: the plan omits the mandatory no-actor-suppression routing rule, which leaves room for an unintended self-notification regression.
+- `PLAN-004` blocking: the plan does not explicitly carry the required DM worker observability fields `recipient_user_id` and `recipient_reason` into the delivery logging/test contract.
+- Criteria status is now correctly marked incomplete for intent fidelity, behavioral safety, and completeness.
+
+Open issues / next step
+
+The plan needs a targeted revision to close the three blocking gaps above, then it should be re-verified. No user clarification is required at this point; the missing pieces are already explicit in the PRD.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
