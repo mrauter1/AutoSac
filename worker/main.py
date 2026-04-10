@@ -16,7 +16,7 @@ from shared.models import AIRun, SystemState
 from shared.security import utc_now
 from shared.ticketing import ensure_system_state_defaults
 from worker.queue import claim_oldest_pending_run, recover_stale_runs
-from worker.slack_delivery import delivery_loop as slack_delivery_loop
+from worker.slack_delivery import build_worker_slack_runtime_context, delivery_loop as slack_delivery_loop
 from worker.triage import process_ai_run
 
 
@@ -157,10 +157,11 @@ def start_slack_delivery_thread(
     *,
     worker_identity: WorkerIdentity,
 ) -> threading.Thread:
+    slack_runtime = build_worker_slack_runtime_context(settings)
     thread = threading.Thread(
         target=slack_delivery_loop,
         kwargs={
-            "settings": settings,
+            "slack_runtime": slack_runtime,
             "worker_instance_id": worker_identity.worker_instance_id,
         },
         name="worker-slack-delivery",

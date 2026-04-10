@@ -8,6 +8,7 @@ import re
 import time
 import threading
 from typing import Any
+import uuid
 
 import httpx
 from sqlalchemy import select
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from shared.config import Settings
 from shared.db import session_scope
+from shared.integrations import SlackRuntimeContext, build_slack_runtime_context
 from shared.logging import log_worker_event
 from shared.models import IntegrationEvent, IntegrationEventTarget
 from shared.security import utc_now
@@ -40,7 +42,94 @@ class ClaimedDeliveryTarget:
     target_name: str
     attempt_count: int
     locked_by: str
+    claim_token: uuid.UUID
     payload_json: Any
+
+
+@dataclass(frozen=True)
+class DeliveryOutcome:
+    kind: str
+    last_error: str | None = None
+    http_status: int | None = None
+    failure_class: str | None = None
+    next_attempt_at: Any | None = None
+    terminal_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind == "sent":
+            if self.http_status is None:
+                raise ValueError("sent outcomes require http_status")
+            if any(value is not None for value in (self.last_error, self.failure_class, self.next_attempt_at, self.terminal_reason)):
+                raise ValueError("sent outcomes cannot include failure metadata")
+            return
+        if self.kind == "retryable_failure":
+            if self.last_error is None or self.failure_class is None or self.next_attempt_at is None:
+                raise ValueError("retryable_failure outcomes require last_error, failure_class, and next_attempt_at")
+            if self.terminal_reason is not None:
+                raise ValueError("retryable_failure outcomes cannot include terminal_reason")
+            return
+        if self.kind == "dead_letter_terminal":
+            if self.last_error is None or self.failure_class is None:
+                raise ValueError("dead_letter_terminal outcomes require last_error and failure_class")
+            if self.next_attempt_at is not None:
+                raise ValueError("dead_letter_terminal outcomes cannot include next_attempt_at")
+            if self.terminal_reason not in {"terminal_failure", "retry_exhausted"}:
+                raise ValueError("dead_letter_terminal outcomes require a valid terminal_reason")
+            return
+        raise ValueError(f"unsupported delivery outcome kind {self.kind}")
+
+    @classmethod
+    def sent(cls, *, http_status: int) -> DeliveryOutcome:
+        return cls(kind="sent", http_status=http_status)
+
+    @classmethod
+    def retryable_failure(
+        cls,
+        *,
+        last_error: str,
+        failure_class: str,
+        next_attempt_at,
+        http_status: int | None = None,
+    ) -> DeliveryOutcome:
+        return cls(
+            kind="retryable_failure",
+            last_error=last_error,
+            http_status=http_status,
+            failure_class=failure_class,
+            next_attempt_at=next_attempt_at,
+        )
+
+    @classmethod
+    def dead_letter_terminal(
+        cls,
+        *,
+        last_error: str,
+        failure_class: str,
+        terminal_reason: str,
+        http_status: int | None = None,
+    ) -> DeliveryOutcome:
+        return cls(
+            kind="dead_letter_terminal",
+            last_error=last_error,
+            http_status=http_status,
+            failure_class=failure_class,
+            terminal_reason=terminal_reason,
+        )
+
+
+def _worker_event_logger(_service: str, event: str, *, level: str = "info", **payload: Any) -> None:
+    if level == "info":
+        log_worker_event(event, **payload)
+        return
+    log_worker_event(event, level=level, **payload)
+
+
+def build_worker_slack_runtime_context(settings: Settings) -> SlackRuntimeContext:
+    return build_slack_runtime_context(
+        settings,
+        clock=utc_now,
+        event_logger=_worker_event_logger,
+    )
 
 
 def resolve_delivery_suppression(settings: Settings) -> DeliverySuppression | None:
@@ -60,20 +149,18 @@ def build_retry_delay_seconds(*, attempt_count: int) -> int:
     return min(60 * (2 ** (attempt_count - 1)), 1800)
 
 
-def load_owned_processing_target(
+def load_claimed_processing_target(
     db: Session,
     *,
     target_id,
-    locked_by: str,
-    attempt_count: int,
+    claim_token,
 ) -> IntegrationEventTarget | None:
     statement = (
         select(IntegrationEventTarget)
         .where(
             IntegrationEventTarget.id == target_id,
             IntegrationEventTarget.delivery_status == "processing",
-            IntegrationEventTarget.locked_by == locked_by,
-            IntegrationEventTarget.attempt_count == attempt_count,
+            IntegrationEventTarget.claim_token == claim_token,
         )
         .limit(1)
         .with_for_update()
@@ -81,8 +168,12 @@ def load_owned_processing_target(
     return db.execute(statement).scalar_one_or_none()
 
 
-def recover_stale_delivery_targets(db: Session, *, settings: Settings) -> list[IntegrationEventTarget]:
-    stale_before = utc_now() - timedelta(seconds=settings.slack.delivery_stale_lock_seconds)
+def recover_stale_delivery_targets(
+    db: Session,
+    *,
+    slack_runtime: SlackRuntimeContext,
+) -> list[IntegrationEventTarget]:
+    stale_before = slack_runtime.now() - timedelta(seconds=slack_runtime.settings.slack.delivery_stale_lock_seconds)
     targets = list(
         db.execute(
             select(IntegrationEventTarget)
@@ -94,38 +185,38 @@ def recover_stale_delivery_targets(db: Session, *, settings: Settings) -> list[I
             .with_for_update(skip_locked=True)
         ).scalars()
     )
-    recovered_at = utc_now()
+    recovered_at = slack_runtime.now()
     for target in targets:
         previous_locked_by = target.locked_by
-        target.delivery_status = "failed"
-        target.locked_at = None
-        target.locked_by = None
-        target.last_error = _sanitize_operator_summary(
-            f"event_id={target.event_id} target_name={target.target_name} stale_lock_recovered previous_locked_by={previous_locked_by} attempt_count={target.attempt_count}",
+        _apply_failed_state(
+            target,
+            last_error=_sanitize_operator_summary(
+                f"event_id={target.event_id} target_name={target.target_name} stale_lock_recovered previous_locked_by={previous_locked_by} attempt_count={target.attempt_count}",
+            ),
+            next_attempt_at=recovered_at,
         )
-        target.next_attempt_at = recovered_at
     return targets
 
 
 def claim_delivery_targets(
     db: Session,
     *,
-    settings: Settings,
+    slack_runtime: SlackRuntimeContext,
     locked_by: str,
 ) -> list[ClaimedDeliveryTarget]:
+    claimed_at = slack_runtime.now()
     claimed_targets = list(
         db.execute(
             select(IntegrationEventTarget)
             .where(
                 IntegrationEventTarget.delivery_status.in_(("pending", "failed")),
-                IntegrationEventTarget.next_attempt_at <= utc_now(),
+                IntegrationEventTarget.next_attempt_at <= claimed_at,
             )
             .order_by(IntegrationEventTarget.next_attempt_at.asc(), IntegrationEventTarget.created_at.asc())
-            .limit(settings.slack.delivery_batch_size)
+            .limit(slack_runtime.settings.slack.delivery_batch_size)
             .with_for_update(skip_locked=True)
         ).scalars()
     )
-    claimed_at = utc_now()
     claimed: list[ClaimedDeliveryTarget] = []
     for target in claimed_targets:
         event = db.get(IntegrationEvent, target.event_id)
@@ -135,6 +226,8 @@ def claim_delivery_targets(
         target.attempt_count += 1
         target.locked_at = claimed_at
         target.locked_by = locked_by
+        claim_token = uuid.uuid4()
+        target.claim_token = claim_token
         claimed.append(
             ClaimedDeliveryTarget(
                 target_id=target.id,
@@ -143,6 +236,7 @@ def claim_delivery_targets(
                 target_name=target.target_name,
                 attempt_count=target.attempt_count,
                 locked_by=locked_by,
+                claim_token=claim_token,
                 payload_json=event.payload_json,
             )
         )
@@ -230,32 +324,55 @@ async def _post_slack_webhook_async(
 
 
 def deliver_claimed_target(
-    settings: Settings,
+    slack_runtime: SlackRuntimeContext,
     *,
     claimed_target: ClaimedDeliveryTarget,
     send_webhook=send_slack_webhook,
 ) -> None:
+    outcome = classify_delivery_attempt(
+        slack_runtime,
+        claimed_target=claimed_target,
+        send_webhook=send_webhook,
+    )
+    finalization_result = finalize_delivery_claim(
+        slack_runtime,
+        claimed_target=claimed_target,
+        outcome=outcome,
+    )
+    if finalization_result == "ownership_lost":
+        _log_delivery_ownership_lost(slack_runtime, claimed_target=claimed_target)
+        return
+    _log_delivery_result(
+        slack_runtime,
+        claimed_target=claimed_target,
+        outcome=outcome,
+    )
+
+
+def classify_delivery_attempt(
+    slack_runtime: SlackRuntimeContext,
+    *,
+    claimed_target: ClaimedDeliveryTarget,
+    send_webhook=send_slack_webhook,
+) -> DeliveryOutcome:
+    settings = slack_runtime.settings
     target = settings.slack.get_target(claimed_target.target_name)
     if target is None:
-        _dead_letter_target(
-            settings,
-            claimed_target=claimed_target,
+        return DeliveryOutcome.dead_letter_terminal(
             last_error=_sanitize_operator_summary(
                 f"event_id={claimed_target.event_id} target_name={claimed_target.target_name} attempt_count={claimed_target.attempt_count} terminal_error=missing_target_config",
             ),
             failure_class="missing_target_config",
+            terminal_reason="terminal_failure",
         )
-        return
     if not target.enabled:
-        _dead_letter_target(
-            settings,
-            claimed_target=claimed_target,
+        return DeliveryOutcome.dead_letter_terminal(
             last_error=_sanitize_operator_summary(
                 f"event_id={claimed_target.event_id} target_name={claimed_target.target_name} attempt_count={claimed_target.attempt_count} terminal_error=target_disabled",
             ),
             failure_class="target_disabled",
+            terminal_reason="terminal_failure",
         )
-        return
 
     try:
         rendered_text = render_slack_message(
@@ -263,15 +380,13 @@ def deliver_claimed_target(
             payload_json=claimed_target.payload_json,
         )
     except ValueError as exc:
-        _dead_letter_target(
-            settings,
-            claimed_target=claimed_target,
+        return DeliveryOutcome.dead_letter_terminal(
             last_error=_sanitize_operator_summary(
                 f"event_id={claimed_target.event_id} target_name={claimed_target.target_name} attempt_count={claimed_target.attempt_count} terminal_error={type(exc).__name__}: {exc}",
             ),
             failure_class=type(exc).__name__,
+            terminal_reason="terminal_failure",
         )
-        return
 
     try:
         status_code = send_webhook(
@@ -280,87 +395,109 @@ def deliver_claimed_target(
             timeout_seconds=settings.slack.http_timeout_seconds,
         )
     except httpx.TransportError as exc:
-        _retry_target(
-            settings,
+        return _build_retryable_outcome(
+            slack_runtime,
             claimed_target=claimed_target,
             last_error=_sanitize_operator_summary(
                 f"event_id={claimed_target.event_id} target_name={claimed_target.target_name} attempt_count={claimed_target.attempt_count} retryable_error={type(exc).__name__}: {exc}",
             ),
             failure_class=type(exc).__name__,
         )
-        return
 
     if 200 <= status_code < 300:
-        _mark_target_sent(settings, claimed_target=claimed_target, http_status=status_code)
-        return
+        return DeliveryOutcome.sent(http_status=status_code)
     if status_code in _RETRYABLE_HTTP_STATUS_CODES or 500 <= status_code < 600:
-        _retry_target(
-            settings,
+        return _build_retryable_outcome(
+            slack_runtime,
             claimed_target=claimed_target,
             last_error=_sanitize_operator_summary(
                 f"event_id={claimed_target.event_id} target_name={claimed_target.target_name} attempt_count={claimed_target.attempt_count} retryable_http_status={status_code}",
             ),
             http_status=status_code,
+            failure_class=_retryable_http_failure_class(status_code),
         )
-        return
-    _dead_letter_target(
-        settings,
-        claimed_target=claimed_target,
+    return DeliveryOutcome.dead_letter_terminal(
         last_error=_sanitize_operator_summary(
             f"event_id={claimed_target.event_id} target_name={claimed_target.target_name} attempt_count={claimed_target.attempt_count} terminal_http_status={status_code}",
         ),
         http_status=status_code,
+        failure_class=_terminal_http_failure_class(status_code),
+        terminal_reason="terminal_failure",
     )
 
 
-def run_delivery_cycle(settings: Settings, *, worker_instance_id: str) -> None:
-    suppression = resolve_delivery_suppression(settings)
+def finalize_delivery_claim(
+    slack_runtime: SlackRuntimeContext,
+    *,
+    claimed_target: ClaimedDeliveryTarget,
+    outcome: DeliveryOutcome,
+) -> str:
+    with session_scope(slack_runtime.settings) as db:
+        target = load_claimed_processing_target(
+            db,
+            target_id=claimed_target.target_id,
+            claim_token=claimed_target.claim_token,
+        )
+        if target is None:
+            return "ownership_lost"
+        return _apply_delivery_outcome(
+            target,
+            outcome=outcome,
+            finalized_at=slack_runtime.now(),
+        )
+
+
+def run_delivery_cycle(slack_runtime: SlackRuntimeContext, *, worker_instance_id: str) -> None:
+    suppression = resolve_delivery_suppression(slack_runtime.settings)
     if suppression is not None:
         if suppression.reason == "invalid_config":
-            _log_delivery_suppression(suppression)
+            _log_delivery_suppression(slack_runtime, suppression)
         return
 
-    with session_scope(settings) as db:
-        recover_stale_delivery_targets(db, settings=settings)
+    with session_scope(slack_runtime.settings) as db:
+        recover_stale_delivery_targets(db, slack_runtime=slack_runtime)
 
-    with session_scope(settings) as db:
+    with session_scope(slack_runtime.settings) as db:
         claimed_targets = claim_delivery_targets(
             db,
-            settings=settings,
+            slack_runtime=slack_runtime,
             locked_by=worker_instance_id,
         )
 
     for claimed_target in claimed_targets:
-        log_worker_event(
+        _log_worker_runtime_event(
+            slack_runtime,
             "slack_target_claimed",
             event_id=str(claimed_target.event_id),
             target_name=claimed_target.target_name,
             delivery_status="processing",
             attempt_count=claimed_target.attempt_count,
             locked_by=claimed_target.locked_by,
+            claim_token=str(claimed_target.claim_token),
         )
         deliver_claimed_target(
-            settings,
+            slack_runtime,
             claimed_target=claimed_target,
         )
 
 
 def delivery_loop(
-    settings: Settings,
+    slack_runtime: SlackRuntimeContext,
     *,
     worker_instance_id: str,
     stop_event: threading.Event | None = None,
     interval_seconds: float | None = None,
 ) -> None:
-    resolved_interval_seconds = settings.worker_poll_seconds if interval_seconds is None else interval_seconds
+    resolved_interval_seconds = slack_runtime.settings.worker_poll_seconds if interval_seconds is None else interval_seconds
     while True:
         try:
             run_delivery_cycle(
-                settings,
+                slack_runtime,
                 worker_instance_id=worker_instance_id,
             )
         except Exception as exc:
-            log_worker_event(
+            _log_worker_runtime_event(
+                slack_runtime,
                 "slack_delivery_cycle_error",
                 level="error",
                 error=_sanitize_operator_summary(str(exc)),
@@ -371,149 +508,6 @@ def delivery_loop(
             continue
         if stop_event.wait(resolved_interval_seconds):
             return
-
-
-def _mark_target_sent(
-    settings: Settings,
-    *,
-    claimed_target: ClaimedDeliveryTarget,
-    http_status: int,
-) -> None:
-    target_updated = False
-    with session_scope(settings) as db:
-        target = load_owned_processing_target(
-            db,
-            target_id=claimed_target.target_id,
-            locked_by=claimed_target.locked_by,
-            attempt_count=claimed_target.attempt_count,
-        )
-        if target is None:
-            pass
-        else:
-            target.delivery_status = "sent"
-            target.sent_at = utc_now()
-            target.dead_lettered_at = None
-            target.last_error = None
-            target.locked_at = None
-            target.locked_by = None
-            target_updated = True
-    if not target_updated:
-        _log_delivery_ownership_lost(claimed_target=claimed_target)
-        return
-    log_worker_event(
-        "slack_delivery_sent",
-        event_id=str(claimed_target.event_id),
-        target_name=claimed_target.target_name,
-        delivery_status="sent",
-        attempt_count=claimed_target.attempt_count,
-        locked_by=claimed_target.locked_by,
-        http_status=http_status,
-    )
-
-
-def _retry_target(
-    settings: Settings,
-    *,
-    claimed_target: ClaimedDeliveryTarget,
-    last_error: str,
-    http_status: int | None = None,
-    failure_class: str | None = None,
-) -> None:
-    if claimed_target.attempt_count >= settings.slack.delivery_max_attempts:
-        _dead_letter_target(
-            settings,
-            claimed_target=claimed_target,
-            last_error=last_error,
-            http_status=http_status,
-            failure_class=failure_class,
-            exhausted=True,
-        )
-        return
-
-    next_attempt_at = utc_now() + timedelta(
-        seconds=build_retry_delay_seconds(attempt_count=claimed_target.attempt_count),
-    )
-    target_updated = False
-    with session_scope(settings) as db:
-        target = load_owned_processing_target(
-            db,
-            target_id=claimed_target.target_id,
-            locked_by=claimed_target.locked_by,
-            attempt_count=claimed_target.attempt_count,
-        )
-        if target is None:
-            pass
-        else:
-            target.delivery_status = "failed"
-            target.last_error = last_error
-            target.sent_at = None
-            target.dead_lettered_at = None
-            target.locked_at = None
-            target.locked_by = None
-            target.next_attempt_at = next_attempt_at
-            target_updated = True
-    if not target_updated:
-        _log_delivery_ownership_lost(claimed_target=claimed_target)
-        return
-    payload: dict[str, Any] = {
-        "event_id": str(claimed_target.event_id),
-        "target_name": claimed_target.target_name,
-        "delivery_status": "failed",
-        "attempt_count": claimed_target.attempt_count,
-        "locked_by": claimed_target.locked_by,
-        "next_attempt_at": next_attempt_at.isoformat(),
-    }
-    if http_status is not None:
-        payload["http_status"] = http_status
-    if failure_class is not None:
-        payload["failure_class"] = failure_class
-    log_worker_event("slack_delivery_retry_scheduled", **payload)
-
-
-def _dead_letter_target(
-    settings: Settings,
-    *,
-    claimed_target: ClaimedDeliveryTarget,
-    last_error: str,
-    http_status: int | None = None,
-    failure_class: str | None = None,
-    exhausted: bool = False,
-) -> None:
-    target_updated = False
-    with session_scope(settings) as db:
-        target = load_owned_processing_target(
-            db,
-            target_id=claimed_target.target_id,
-            locked_by=claimed_target.locked_by,
-            attempt_count=claimed_target.attempt_count,
-        )
-        if target is None:
-            pass
-        else:
-            target.delivery_status = "dead_letter"
-            target.dead_lettered_at = utc_now()
-            target.sent_at = None
-            target.last_error = last_error
-            target.locked_at = None
-            target.locked_by = None
-            target_updated = True
-    if not target_updated:
-        _log_delivery_ownership_lost(claimed_target=claimed_target)
-        return
-    payload: dict[str, Any] = {
-        "event_id": str(claimed_target.event_id),
-        "target_name": claimed_target.target_name,
-        "delivery_status": "dead_letter",
-        "attempt_count": claimed_target.attempt_count,
-        "locked_by": claimed_target.locked_by,
-    }
-    if http_status is not None:
-        payload["http_status"] = http_status
-    if failure_class is not None:
-        payload["failure_class"] = failure_class
-    if exhausted:
-        payload["retry_exhausted"] = True
-    log_worker_event("slack_delivery_dead_lettered", **payload)
 
 
 def _require_payload_text(payload_json: dict[str, Any], key: str) -> str:
@@ -534,7 +528,7 @@ def _sanitize_operator_summary(value: str) -> str:
     return _SLACK_WEBHOOK_FRAGMENT_RE.sub("[redacted-url]", sanitized)
 
 
-def _log_delivery_suppression(suppression: DeliverySuppression) -> None:
+def _log_delivery_suppression(slack_runtime: SlackRuntimeContext, suppression: DeliverySuppression) -> None:
     payload: dict[str, Any] = {
         "suppression_reason": suppression.reason,
         "claim_skipped": True,
@@ -543,11 +537,16 @@ def _log_delivery_suppression(suppression: DeliverySuppression) -> None:
     if suppression.reason == "invalid_config":
         payload["config_error_code"] = suppression.config_error_code
         payload["config_error_summary"] = suppression.config_error_summary
-    log_worker_event("slack_delivery_suppressed", **payload)
+    _log_worker_runtime_event(slack_runtime, "slack_delivery_suppressed", **payload)
 
 
-def _log_delivery_ownership_lost(*, claimed_target: ClaimedDeliveryTarget) -> None:
-    log_worker_event(
+def _log_delivery_ownership_lost(
+    slack_runtime: SlackRuntimeContext,
+    *,
+    claimed_target: ClaimedDeliveryTarget,
+) -> None:
+    _log_worker_runtime_event(
+        slack_runtime,
         "slack_delivery_ownership_lost",
         level="warning",
         event_id=str(claimed_target.event_id),
@@ -555,4 +554,164 @@ def _log_delivery_ownership_lost(*, claimed_target: ClaimedDeliveryTarget) -> No
         target_name=claimed_target.target_name,
         claimed_attempt_count=claimed_target.attempt_count,
         claimed_locked_by=claimed_target.locked_by,
+        claim_token=str(claimed_target.claim_token),
     )
+
+
+def _build_retryable_outcome(
+    slack_runtime: SlackRuntimeContext,
+    *,
+    claimed_target: ClaimedDeliveryTarget,
+    last_error: str,
+    failure_class: str,
+    http_status: int | None = None,
+) -> DeliveryOutcome:
+    if claimed_target.attempt_count >= slack_runtime.settings.slack.delivery_max_attempts:
+        return DeliveryOutcome.dead_letter_terminal(
+            last_error=last_error,
+            http_status=http_status,
+            failure_class=failure_class,
+            terminal_reason="retry_exhausted",
+        )
+    next_attempt_at = slack_runtime.now() + timedelta(
+        seconds=build_retry_delay_seconds(attempt_count=claimed_target.attempt_count),
+    )
+    return DeliveryOutcome.retryable_failure(
+        last_error=last_error,
+        http_status=http_status,
+        failure_class=failure_class,
+        next_attempt_at=next_attempt_at,
+    )
+
+
+def _retryable_http_failure_class(status_code: int) -> str:
+    if status_code == 408:
+        return "http_408"
+    if status_code == 429:
+        return "http_429"
+    if 500 <= status_code < 600:
+        return "http_5xx"
+    return "http_retryable_status"
+
+
+def _terminal_http_failure_class(status_code: int) -> str:
+    if 300 <= status_code < 400:
+        return "http_3xx"
+    if 400 <= status_code < 500:
+        return "http_4xx"
+    if 100 <= status_code < 200:
+        return "http_1xx"
+    return "http_non_success_status"
+
+
+def _apply_delivery_outcome(
+    target: IntegrationEventTarget,
+    *,
+    outcome: DeliveryOutcome,
+    finalized_at,
+) -> str:
+    if outcome.kind == "sent":
+        _apply_sent_state(target, sent_at=finalized_at)
+        return "sent"
+    if outcome.kind == "retryable_failure":
+        _apply_failed_state(
+            target,
+            last_error=outcome.last_error,
+            next_attempt_at=outcome.next_attempt_at,
+        )
+        return "failed"
+    _apply_dead_letter_state(
+        target,
+        dead_lettered_at=finalized_at,
+        last_error=outcome.last_error,
+    )
+    return "dead_letter"
+
+
+def _clear_claim_state(target: IntegrationEventTarget) -> None:
+    target.claim_token = None
+    target.locked_at = None
+    target.locked_by = None
+
+
+def _apply_sent_state(target: IntegrationEventTarget, *, sent_at) -> None:
+    target.delivery_status = "sent"
+    target.sent_at = sent_at
+    target.dead_lettered_at = None
+    target.last_error = None
+    _clear_claim_state(target)
+
+
+def _apply_failed_state(
+    target: IntegrationEventTarget,
+    *,
+    last_error: str,
+    next_attempt_at,
+) -> None:
+    target.delivery_status = "failed"
+    target.last_error = last_error
+    target.sent_at = None
+    target.dead_lettered_at = None
+    target.next_attempt_at = next_attempt_at
+    _clear_claim_state(target)
+
+
+def _apply_dead_letter_state(
+    target: IntegrationEventTarget,
+    *,
+    dead_lettered_at,
+    last_error: str,
+) -> None:
+    target.delivery_status = "dead_letter"
+    target.dead_lettered_at = dead_lettered_at
+    target.sent_at = None
+    target.last_error = last_error
+    _clear_claim_state(target)
+
+
+def _log_delivery_result(
+    slack_runtime: SlackRuntimeContext,
+    *,
+    claimed_target: ClaimedDeliveryTarget,
+    outcome: DeliveryOutcome,
+) -> None:
+    payload: dict[str, Any] = {
+        "event_id": str(claimed_target.event_id),
+        "target_name": claimed_target.target_name,
+        "attempt_count": claimed_target.attempt_count,
+        "locked_by": claimed_target.locked_by,
+        "claim_token": str(claimed_target.claim_token),
+    }
+    if outcome.kind == "sent":
+        payload["delivery_status"] = "sent"
+        payload["http_status"] = outcome.http_status
+        _log_worker_runtime_event(slack_runtime, "slack_delivery_sent", **payload)
+        return
+    if outcome.kind == "retryable_failure":
+        payload["delivery_status"] = "failed"
+        payload["next_attempt_at"] = outcome.next_attempt_at.isoformat()
+        if outcome.http_status is not None:
+            payload["http_status"] = outcome.http_status
+        payload["failure_class"] = outcome.failure_class
+        _log_worker_runtime_event(slack_runtime, "slack_delivery_retry_scheduled", **payload)
+        return
+    payload["delivery_status"] = "dead_letter"
+    if outcome.http_status is not None:
+        payload["http_status"] = outcome.http_status
+    payload["failure_class"] = outcome.failure_class
+    if outcome.terminal_reason == "retry_exhausted":
+        payload["retry_exhausted"] = True
+    _log_worker_runtime_event(slack_runtime, "slack_delivery_dead_lettered", **payload)
+
+
+def _log_worker_runtime_event(
+    slack_runtime: SlackRuntimeContext,
+    event: str,
+    *,
+    level: str = "info",
+    **payload: Any,
+) -> None:
+    if level == "info":
+        slack_runtime.event_logger("worker", event, **payload)
+        return
+    slack_runtime.event_logger("worker", event, level=level, **payload)
