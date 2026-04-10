@@ -1025,3 +1025,56 @@ Validation passed for:
 **Open issues / next step**
 The broader web-route suites in `tests/test_auth_requester.py` and `tests/test_ops_workflow.py` are blocked in this environment by missing installed deps (`python-multipart`, `bleach`), so I could not use them as regression signal here.  
 Next phase should build on this foundation for the admin Slack UI and user Slack ID management, then replace webhook-era recipient routing and delivery transport.
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=verifier | cycle=1 | attempt=1 | thread_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_verifier.md
+session_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+---
+I’m auditing the phase implementation against the DM PRD and the accepted phase contract. First I’m reading the active artifacts and the implemented Slack foundation files so I can verify intent coverage, regression risk, and whether any blocking gaps remain before I update the verifier-owned artifacts.
+
+I’ve reviewed the new helper module and the shared decisions. Now I’m checking the migration and runtime integration points for contract mismatches and failure modes, especially places where the phase may have landed temporary compatibility that conflicts with the accepted DM foundation scope.
+
+Reviewing the implementation against the phase contract and shared decisions now. I’m checking whether the migration and runtime changes actually enforce the DM-only foundation this phase was supposed to land, then I’ll update the phase feedback and criteria accordingly.
+
+I’ve narrowed the main question to whether the schema foundation actually enforces DM-only semantics or still leaves webhook-era target rows admissible after the migration clears pre-launch data. I’m checking the remaining routing code once more to separate phase-scoped blockers from later-phase placeholders.
+
+There’s a second area that needs a careful read: the runtime loader is DB-backed, but the emission path still looks structurally wired for webhook targets. I’m verifying whether that’s just an out-of-scope placeholder or a real phase-level correctness gap before I write the review.
+
+I have two blocking issues, both phase-scoped: the migration leaves webhook-era target kinds valid even after explicitly clearing pre-launch Slack rows, and the request-path runtime still interprets DB-backed DM config through webhook target assumptions. I’m updating the verifier artifacts now.
+
+I’ve already isolated the code paths for both blockers from source inspection. I’m running one small reproduction for the second finding so the feedback reflects observed behavior, not just a static read.
+
+Scope considered
+
+Phase-local review only for `dm-persistence-runtime-foundation`: migration/model changes, DB-backed Slack DM runtime loading, token crypto, delivery-health persistence, and the request/worker runtime handoff paths that this phase explicitly touched. I did not review unrelated dirty files.
+
+What I analyzed
+
+I checked the authoritative request snapshot, active phase contract, [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt), [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/dm-persistence-runtime-foundation/implementation_notes.md), the migration in [20260410_0012_slack_dm_persistence_runtime_foundation.py](/home/marcelo/code/AutoSac/shared/migrations/versions/20260410_0012_slack_dm_persistence_runtime_foundation.py), model updates in [shared/models.py](/home/marcelo/code/AutoSac/shared/models.py), DB/runtime helpers in [shared/slack_dm.py](/home/marcelo/code/AutoSac/shared/slack_dm.py), and the request-path/runtime wiring in [shared/integrations.py](/home/marcelo/code/AutoSac/shared/integrations.py) plus [worker/slack_delivery.py](/home/marcelo/code/AutoSac/worker/slack_delivery.py).
+
+What I reviewed
+
+I updated [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/dm-persistence-runtime-foundation/feedback.md) with two blocking findings and left [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/dm-persistence-runtime-foundation/criteria.md) unchecked because the phase does not yet satisfy the acceptance bar. I also reproduced one runtime failure directly: a valid persisted `slack_dm_settings` row currently resolves to `routing_result='suppressed_invalid_config'` with `config_error_code='slack_default_target_not_found'`.
+
+Key findings / decisions
+
+- `IMP-001` blocking: the migration and model still allow `target_kind='slack_webhook'` after explicitly deleting all pre-launch Slack integration rows, which conflicts with the accepted DM-only migration contract and shared decision block `6`.
+- `IMP-002` blocking: the request-path runtime now loads Slack config from PostgreSQL, but [shared/integrations.py](/home/marcelo/code/AutoSac/shared/integrations.py#L259) still evaluates that config through webhook-era `default_target_name` / `targets` assumptions and still creates `slack_webhook` target rows, so valid DM config is misclassified as invalid.
+- The token crypto and persisted health helpers themselves look directionally correct for this phase; the blockers are in the schema/runtime semantics, not the HKDF/Fernet or health-state storage pieces.
+
+Open issues / next step
+
+Fix the two blockers in the implementation, then rerun the targeted Slack foundation/event tests with DM-aware expectations. After that, the verifier artifacts can be updated to mark the phase complete.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
