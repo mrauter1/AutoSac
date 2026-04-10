@@ -14,13 +14,13 @@
       "regression-rollout-verification"
     ],
     "explicit": true,
-    "current_phase_index": 1,
-    "current_phase_id": "delivery-claim-outcome-finalization"
+    "current_phase_index": 2,
+    "current_phase_id": "regression-rollout-verification"
   },
   "phase_status": {
     "schema-emission-runtime-boundary": "completed",
-    "delivery-claim-outcome-finalization": "in_progress",
-    "regression-rollout-verification": "planned"
+    "delivery-claim-outcome-finalization": "completed",
+    "regression-rollout-verification": "in_progress"
   },
   "phase_history": [
     {
@@ -41,6 +41,19 @@
       "run_id": "run-20260410T184024Z-448797a6",
       "status": "in_progress",
       "ts": "2026-04-10T19:04:50.736687+00:00"
+    },
+    {
+      "phase_id": "delivery-claim-outcome-finalization",
+      "run_id": "run-20260410T184024Z-448797a6",
+      "status": "completed",
+      "ts": "2026-04-10T19:16:50.502313+00:00",
+      "pair": "test"
+    },
+    {
+      "phase_id": "regression-rollout-verification",
+      "run_id": "run-20260410T184024Z-448797a6",
+      "status": "in_progress",
+      "ts": "2026-04-10T19:16:50.506922+00:00"
     }
   ]
 }
