@@ -300,12 +300,17 @@ def test_slack_docs_capture_phase1_rollout_posture():
     deployment_source = Path("docs_deployment.md").read_text(encoding="utf-8")
 
     assert "SLACK_ENABLED=false" in env_source
+    assert "same refactor-era build" in env_source
     assert "SLACK_DELIVERY_STALE_LOCK_SECONDS=120" in env_source
     assert "SLACK_ENABLED=false" in readme_source
     assert "SLACK_NOTIFY_*" in readme_source
+    assert "refactor-aware build" in readme_source
+    assert "pre-refactor Slack integration rows" in readme_source
     assert "does not backfill historical ticket activity" in readme_source
     assert "SLACK_ENABLED=false" in deployment_source
     assert "SLACK_TARGETS_JSON" in deployment_source
+    assert "refactor-aware release" in deployment_source
+    assert "disposable pre-launch data" in deployment_source
     assert "does not backfill old ticket activity" in deployment_source
 
 

@@ -165,7 +165,9 @@ Useful endpoints:
 - `UI_DEFAULT_LOCALE=pt-BR` makes Portuguese the server-side fallback when there is no saved language cookie and no matching browser language.
 - Leave `CODEX_API_KEY` empty to rely on existing Codex CLI login in local environments.
 - Phase 1 Slack delivery ships dark by default: keep `SLACK_ENABLED=false` through migration and initial event verification, then enable one named target and the desired `SLACK_NOTIFY_*` flags gradually.
+- Deploy the web request path and worker together as the same refactor-aware build before enabling Slack; mixed-version Slack delivery compatibility is not supported for this pre-launch refactor.
 - Slack rollback is config-only for Phase 1: set `SLACK_ENABLED=false` to stop claims, sends, and stale-lock recovery while preserving the stored integration rows for later inspection or re-enable.
+- If a pre-launch environment still has pre-refactor Slack integration rows, clear that Slack-specific integration state before enabling Slack. Those rows are disposable pre-launch data and do not require ticket, message, status-history, or AI-run cleanup.
 - Re-enabling Slack later does not backfill historical ticket activity; only newly emitted events can create new target rows.
 - Invalid Slack-specific env values do not block web or worker startup; they surface as structured invalid-config state so outbound routing and delivery stay suppressed instead of taking the service down.
 - On Ubuntu 24.04, Codex read-only probing may require an AppArmor profile for `bwrap`; see the Ubuntu internal server guide.

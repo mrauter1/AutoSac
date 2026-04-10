@@ -28,7 +28,7 @@ class _FakeScalarResult:
 
 
 class _FakeSession:
-    def __init__(self, *, next_reference_num: int = 1, settings: Settings | None = None):
+    def __init__(self, *, next_reference_num: int = 1):
         pytest.importorskip("sqlalchemy")
         from shared.models import IntegrationEvent, IntegrationEventTarget
 
@@ -38,9 +38,6 @@ class _FakeSession:
         self.operations = []
         self.existing = {}
         self.next_reference_num = next_reference_num
-        self.info = {}
-        if settings is not None:
-            self.info["settings"] = settings
         self.events_by_dedupe_key: dict[str, object] = {}
         self.targets_by_event_id: dict[uuid.UUID, list[object]] = {}
 
@@ -298,7 +295,7 @@ def test_create_requester_ticket_emits_ticket_created_only(monkeypatch, tmp_path
             notify_status_changed=True,
         ),
     )
-    fake_db = _FakeSession(next_reference_num=17, settings=settings)
+    fake_db = _FakeSession(next_reference_num=17)
     slack_runtime = _make_slack_runtime(settings)
     requester = _make_user(symbols)
 
@@ -358,7 +355,7 @@ def test_ticket_created_suppression_paths_record_event_and_links_without_target_
         tmp_path,
         slack=_make_slack_settings(enabled=slack_enabled, target_enabled=target_enabled),
     )
-    fake_db = _FakeSession(settings=settings)
+    fake_db = _FakeSession()
     observed = []
     slack_runtime = _make_slack_runtime(
         settings,
@@ -401,7 +398,7 @@ def test_ticket_created_suppression_paths_record_event_and_links_without_target_
 def test_add_requester_reply_emits_public_message_and_status_changed(monkeypatch, tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
-    fake_db = _FakeSession(settings=settings)
+    fake_db = _FakeSession()
     slack_runtime = _make_slack_runtime(settings)
     requester = _make_user(symbols)
     ticket = _make_ticket(symbols, status="resolved")
@@ -440,7 +437,7 @@ def test_add_requester_reply_emits_public_message_and_status_changed(monkeypatch
 def test_add_ops_internal_note_creates_no_integration_rows(tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
-    fake_db = _FakeSession(settings=settings)
+    fake_db = _FakeSession()
     actor = _make_user(symbols, role="dev_ti")
     ticket = _make_ticket(symbols, status="waiting_on_dev_ti")
 
@@ -459,7 +456,7 @@ def test_add_ops_internal_note_creates_no_integration_rows(tmp_path):
 def test_create_ai_draft_emits_only_status_changed_for_worker_draft_creation(tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
-    fake_db = _FakeSession(settings=settings)
+    fake_db = _FakeSession()
     slack_runtime = _make_slack_runtime(settings)
     ticket = _make_ticket(symbols, status="ai_triage")
 
@@ -483,7 +480,7 @@ def test_create_ai_draft_emits_only_status_changed_for_worker_draft_creation(tmp
 def test_route_ticket_after_ai_emits_status_changed_without_public_message(tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
-    fake_db = _FakeSession(settings=settings)
+    fake_db = _FakeSession()
     slack_runtime = _make_slack_runtime(settings)
     ticket = _make_ticket(symbols, status="ai_triage")
 
@@ -505,7 +502,7 @@ def test_route_ticket_after_ai_emits_status_changed_without_public_message(tmp_p
 def test_ai_failure_note_flow_emits_status_changed_but_no_public_message(tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
-    fake_db = _FakeSession(settings=settings)
+    fake_db = _FakeSession()
     slack_runtime = _make_slack_runtime(settings)
     ticket = _make_ticket(symbols, status="ai_triage")
 
@@ -532,7 +529,7 @@ def test_ai_failure_note_flow_emits_status_changed_but_no_public_message(tmp_pat
 def test_publish_ai_draft_for_ops_uses_ai_public_message_author_in_payload(tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
-    fake_db = _FakeSession(settings=settings)
+    fake_db = _FakeSession()
     slack_runtime = _make_slack_runtime(settings)
     actor = _make_user(symbols, role="dev_ti")
     ticket = _make_ticket(symbols, status="waiting_on_dev_ti")
@@ -575,7 +572,7 @@ def test_duplicate_reuse_preserves_zero_target_state_and_log_after_routing_chang
         ),
     )
     enabled_settings = _make_settings(tmp_path, slack=_make_slack_settings())
-    fake_db = _FakeSession(settings=disabled_settings)
+    fake_db = _FakeSession()
     ticket = _make_ticket(symbols)
     message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
     observed = []
@@ -631,7 +628,7 @@ def test_duplicate_reuse_preserves_existing_target_row_state_without_creating_se
         tmp_path,
         slack=_make_slack_settings(target_enabled=False),
     )
-    fake_db = _FakeSession(settings=original_settings)
+    fake_db = _FakeSession()
     ticket = _make_ticket(symbols)
     message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
     observed = []
@@ -728,7 +725,7 @@ def test_duplicate_reuse_zero_target_preserves_stored_non_created_routing_snapsh
 ):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
-    fake_db = _FakeSession(settings=settings)
+    fake_db = _FakeSession()
     ticket = _make_ticket(symbols)
     message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
     observed = []
@@ -791,7 +788,7 @@ def test_duplicate_reuse_zero_target_preserves_stored_non_created_routing_snapsh
 def test_duplicate_reuse_zero_target_falls_back_to_suppressed_notify_disabled_for_stale_or_missing_snapshot(tmp_path, routing_result):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
-    fake_db = _FakeSession(settings=settings)
+    fake_db = _FakeSession()
     ticket = _make_ticket(symbols)
     message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
     event = symbols["IntegrationEvent"](
@@ -838,7 +835,7 @@ def test_invalid_config_emission_logs_suppression_without_row_state_fields(monke
             config_error_summary="SLACK_TARGETS_JSON must be a valid JSON object",
         ),
     )
-    fake_db = _FakeSession(settings=settings)
+    fake_db = _FakeSession()
     ticket = _make_ticket(symbols)
     message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
     observed = []
@@ -879,7 +876,7 @@ def test_invalid_config_emission_logs_suppression_without_row_state_fields(monke
 def test_record_ticket_created_event_requires_explicit_runtime_context_even_with_session_settings(tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
-    fake_db = _FakeSession(settings=settings)
+    fake_db = _FakeSession()
     ticket = _make_ticket(symbols)
     message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
 

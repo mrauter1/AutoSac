@@ -24,7 +24,7 @@ On platforms where shared disks across two services are hard, run both in one se
    - `APP_BASE_URL` (use your Render URL, e.g. `https://autosac.onrender.com`)
    - `UI_DEFAULT_LOCALE=pt-BR` if you want Portuguese as the server-side fallback UI language
    - `CODEX_API_KEY` if the deployment will not already have authenticated Codex CLI access. In most cloud runtimes, set it.
-   - Keep `SLACK_ENABLED=false` for the initial Phase 1 rollout. Only enable `SLACK_TARGETS_JSON`, `SLACK_DEFAULT_TARGET_NAME`, and the `SLACK_NOTIFY_*` flags after the migration is live and integration rows look correct in a non-production environment.
+   - Keep `SLACK_ENABLED=false` for the initial Phase 1 rollout. Deploy the web request path and worker together from the same refactor-aware release, then enable `SLACK_TARGETS_JSON`, `SLACK_DEFAULT_TARGET_NAME`, and the `SLACK_NOTIFY_*` flags only after the migration is live and integration rows look correct in a non-production environment.
 5. Deploy.
 
 ## One-time bootstrap after first deploy
@@ -60,7 +60,9 @@ bash scripts/start_all.sh
 
 Then set the same env vars from `.env.example`, plus persistent storage mounted to `/opt/triage`.
 
-Slack rollout posture is the same on Railway: start with `SLACK_ENABLED=false`, verify the new integration tables and rows first, then turn on one target and the desired notify flags gradually.
+Slack rollout posture is the same on Railway: start with `SLACK_ENABLED=false`, deploy the web request path and worker together from the same refactor-aware release, verify the new integration tables and rows first, then turn on one target and the desired notify flags gradually.
+
+If the environment already contains pre-refactor Slack integration rows from earlier dry runs, clear that Slack-specific integration state before enabling Slack. Those rows are disposable pre-launch data and are not a compatibility target for the refactored delivery worker.
 
 Rollback posture is also config-first: set `SLACK_ENABLED=false` to stop delivery without deleting the integration tables or mutating stored event state. Turning Slack back on later still does not backfill old ticket activity; only new events emitted after re-enable can create fresh target rows.
 
