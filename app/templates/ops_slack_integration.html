@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+{% block title %}{{ t("ops.slack.heading") }} | {{ t("brand.name") }}{% endblock %}
+{% block page_class %} page--workspace{% endblock %}
+{% block body %}
+<div class="workspace-view">
+  <section class="page-header page-header--card">
+    <div class="stack stack--tight">
+      <p class="eyebrow">{{ t("eyebrow.access_administration") }}</p>
+      <h1>{{ t("ops.slack.heading") }}</h1>
+      <p class="muted">{{ t("ops.slack.subtitle") }}</p>
+    </div>
+  </section>
+
+  <div class="detail-grid">
+    <section class="panel">
+      <div class="stack stack--tight">
+        <h2>{{ t("ops.slack.form_heading") }}</h2>
+        <p class="muted">{{ t("ops.slack.form_hint") }}</p>
+      </div>
+      <form method="post" action="/ops/integrations/slack" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="checkbox">
+          <input type="checkbox" name="enabled" {% if slack_form.enabled %}checked{% endif %}>
+          <span>{{ t("ops.slack.enabled_label") }}</span>
+        </label>
+        <label class="field">
+          <span>{{ t("field.bot_token") }}</span>
+          <input type="password" name="bot_token" autocomplete="new-password">
+          <small>{{ t("ops.slack.bot_token_hint") }}</small>
+        </label>
+        <div class="stack stack--tight">
+          <label class="checkbox">
+            <input type="checkbox" name="notify_ticket_created" {% if slack_form.notify_ticket_created %}checked{% endif %}>
+            <span>{{ t("ops.slack.notify_ticket_created") }}</span>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" name="notify_public_message_added" {% if slack_form.notify_public_message_added %}checked{% endif %}>
+            <span>{{ t("ops.slack.notify_public_message_added") }}</span>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" name="notify_status_changed" {% if slack_form.notify_status_changed %}checked{% endif %}>
+            <span>{{ t("ops.slack.notify_status_changed") }}</span>
+          </label>
+        </div>
+        <div class="ops-users__form-grid">
+          <label class="field">
+            <span>{{ t("field.message_preview_max_chars") }}</span>
+            <input type="number" name="message_preview_max_chars" min="4" value="{{ slack_form.message_preview_max_chars }}" required>
+          </label>
+          <label class="field">
+            <span>{{ t("field.http_timeout_seconds") }}</span>
+            <input type="number" name="http_timeout_seconds" min="1" max="30" value="{{ slack_form.http_timeout_seconds }}" required>
+          </label>
+          <label class="field">
+            <span>{{ t("field.delivery_batch_size") }}</span>
+            <input type="number" name="delivery_batch_size" min="1" value="{{ slack_form.delivery_batch_size }}" required>
+          </label>
+          <label class="field">
+            <span>{{ t("field.delivery_max_attempts") }}</span>
+            <input type="number" name="delivery_max_attempts" min="1" value="{{ slack_form.delivery_max_attempts }}" required>
+          </label>
+          <label class="field ops-users__field--full">
+            <span>{{ t("field.delivery_stale_lock_seconds") }}</span>
+            <input type="number" name="delivery_stale_lock_seconds" min="1" value="{{ slack_form.delivery_stale_lock_seconds }}" required>
+          </label>
+        </div>
+        <div class="button-row">
+          <button type="submit" class="button">{{ t("button.save_settings") }}</button>
+        </div>
+      </form>
+      {% if slack_settings.has_stored_token %}
+      <section class="panel panel--quiet">
+        <div class="stack stack--tight">
+          <h2>{{ t("ops.slack.disconnect_heading") }}</h2>
+          <p class="muted">{{ t("ops.slack.disconnect_hint") }}</p>
+        </div>
+        <form method="post" action="/ops/integrations/slack/disconnect" class="button-row">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="button button--ghost">{{ t("button.disconnect") }}</button>
+        </form>
+      </section>
+      {% endif %}
+    </section>
+
+    <div class="stack">
+      <section class="panel panel--quiet">
+        <div class="stack stack--tight">
+          <h2>{{ t("ops.slack.status_heading") }}</h2>
+          <dl class="meta-list">
+            <div>
+              <dt>{{ t("ops.slack.enabled_label") }}</dt>
+              <dd>{{ bool_label(slack_settings.enabled) }}</dd>
+            </div>
+            <div>
+              <dt>{{ t("ops.slack.stored_token_label") }}</dt>
+              <dd>{{ bool_label(slack_settings.has_stored_token) }}</dd>
+            </div>
+            <div>
+              <dt>{{ t("ops.slack.runtime_valid_label") }}</dt>
+              <dd>{{ bool_label(slack_settings.is_valid) }}</dd>
+            </div>
+            {% if slack_settings.config_error_code %}
+            <div>
+              <dt>{{ t("ops.slack.config_error_label") }}</dt>
+              <dd><code>{{ slack_settings.config_error_code }}</code></dd>
+            </div>
+            {% endif %}
+            {% if slack_settings.config_error_summary %}
+            <div>
+              <dt>{{ t("ops.slack.config_summary_label") }}</dt>
+              <dd>{{ slack_settings.config_error_summary }}</dd>
+            </div>
+            {% endif %}
+          </dl>
+        </div>
+      </section>
+
+      <section class="panel panel--quiet">
+        <div class="stack stack--tight">
+          <h2>{{ t("ops.slack.workspace_heading") }}</h2>
+          <dl class="meta-list">
+            <div>
+              <dt>{{ t("field.team_name") }}</dt>
+              <dd>{{ slack_settings.team_name or t("common.none_yet") }}</dd>
+            </div>
+            <div>
+              <dt>{{ t("field.team_id") }}</dt>
+              <dd>{{ slack_settings.team_id or t("common.none_yet") }}</dd>
+            </div>
+            <div>
+              <dt>{{ t("field.bot_user_id") }}</dt>
+              <dd>{{ slack_settings.bot_user_id or t("common.none_yet") }}</dd>
+            </div>
+            <div>
+              <dt>{{ t("field.validated_at") }}</dt>
+              <dd>{% if slack_settings.validated_at %}{{ format_datetime_utc(slack_settings.validated_at) }}{% else %}{{ t("common.none_yet") }}{% endif %}</dd>
+            </div>
+            <div>
+              <dt>{{ t("field.updated_at") }}</dt>
+              <dd>{% if slack_settings.updated_at %}{{ format_datetime_utc(slack_settings.updated_at) }}{% else %}{{ t("common.none_yet") }}{% endif %}</dd>
+            </div>
+            <div>
+              <dt>{{ t("field.updated_by") }}</dt>
+              <dd>{% if slack_updated_by_user %}{{ slack_updated_by_user.display_name }}{% elif slack_settings.updated_by_user_id %}{{ unknown_label }}{% else %}{{ t("common.none_yet") }}{% endif %}</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="panel panel--quiet">
+        <div class="stack stack--tight">
+          <h2>{{ t("ops.slack.delivery_health_heading") }}</h2>
+          {% if slack_delivery_health %}
+          <dl class="meta-list">
+            <div>
+              <dt>{{ t("field.status") }}</dt>
+              <dd><code>{{ slack_delivery_health.status }}</code></dd>
+            </div>
+            <div>
+              <dt>{{ t("field.checked_at") }}</dt>
+              <dd>{% if slack_delivery_health.checked_at %}{{ slack_delivery_health.checked_at }}{% else %}{{ t("common.none_yet") }}{% endif %}</dd>
+            </div>
+            <div>
+              <dt>{{ t("field.error_code") }}</dt>
+              <dd>{% if slack_delivery_health.error_code %}<code>{{ slack_delivery_health.error_code }}</code>{% else %}{{ t("common.none_yet") }}{% endif %}</dd>
+            </div>
+            <div>
+              <dt>{{ t("ops.slack.delivery_summary_label") }}</dt>
+              <dd>{{ slack_delivery_health.summary or t("common.none_yet") }}</dd>
+            </div>
+          </dl>
+          {% else %}
+          <p class="muted">{{ t("common.none_yet") }}</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <section class="panel panel--quiet">
+        <div class="stack stack--tight">
+          <h2>{{ t("ops.slack.guidance_heading") }}</h2>
+          <p class="muted">{{ t("ops.slack.guidance_body") }}</p>
+          <ul>
+            <li><code>auth.test</code></li>
+            <li><code>conversations.open</code></li>
+            <li><code>chat.postMessage</code></li>
+          </ul>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -867,12 +867,120 @@ def test_create_user_rejects_short_password():
         )
 
 
+def test_create_user_trims_slack_user_id_when_provided():
+    pytest.importorskip("argon2")
+    from shared.user_admin import create_user
+
+    class _AdminSession:
+        def __init__(self):
+            self.users_by_email = {}
+            self.users_by_slack = {}
+
+        def add(self, item):
+            email = getattr(item, "email", None)
+            slack_user_id = getattr(item, "slack_user_id", None)
+            if email:
+                self.users_by_email[email] = item
+            if slack_user_id:
+                self.users_by_slack[slack_user_id] = item
+
+        def execute(self, statement):
+            class _Result:
+                def __init__(self, user):
+                    self._user = user
+
+                def scalar_one_or_none(self):
+                    return self._user
+
+            query_text = str(statement)
+            params = statement.compile().params
+            value = next(iter(params.values()), None)
+            if "users.email" in query_text:
+                return _Result(self.users_by_email.get(value))
+            return _Result(self.users_by_slack.get(value))
+
+    user = create_user(
+        _AdminSession(),
+        email="requester@example.com",
+        display_name="Requester",
+        password="secret-pass",
+        role="requester",
+        slack_user_id=" U123456 ",
+    )
+
+    assert user.slack_user_id == "U123456"
+
+
+def test_create_user_rejects_whitespace_only_slack_user_id():
+    pytest.importorskip("argon2")
+    from shared.user_admin import create_user
+
+    class _AdminSession:
+        def add(self, item):
+            return None
+
+        def execute(self, statement):
+            class _Result:
+                def scalar_one_or_none(self):
+                    return None
+
+            return _Result()
+
+    with pytest.raises(ValueError, match=r"^Slack user ID cannot be whitespace only\.$"):
+        create_user(
+            _AdminSession(),
+            email="requester@example.com",
+            display_name="Requester",
+            password="secret-pass",
+            role="requester",
+            slack_user_id="   ",
+        )
+
+
+def test_create_user_rejects_duplicate_slack_user_id():
+    pytest.importorskip("argon2")
+    from shared.user_admin import create_user
+
+    existing_user = SimpleNamespace(id=uuid.uuid4(), slack_user_id="U123456")
+
+    class _AdminSession:
+        def add(self, item):
+            return None
+
+        def execute(self, statement):
+            class _Result:
+                def __init__(self, user):
+                    self._user = user
+
+                def scalar_one_or_none(self):
+                    return self._user
+
+            query_text = str(statement)
+            params = statement.compile().params
+            value = next(iter(params.values()), None)
+            if "users.email" in query_text:
+                return _Result(None)
+            return _Result(existing_user if value == existing_user.slack_user_id else None)
+
+    with pytest.raises(ValueError, match=r"^Slack user ID already exists: U123456$"):
+        create_user(
+            _AdminSession(),
+            email="requester@example.com",
+            display_name="Requester",
+            password="secret-pass",
+            role="requester",
+            slack_user_id="U123456",
+        )
+
+
 def test_update_user_rejects_short_password_when_provided():
     from shared.user_admin import update_user
 
     user = SimpleNamespace(
+        id=uuid.uuid4(),
         display_name="Existing User",
         role="requester",
+        slack_user_id=None,
         password_hash="hash",
         updated_at=None,
     )
@@ -883,8 +991,41 @@ def test_update_user_rejects_short_password_when_provided():
             user=user,
             display_name="Existing User",
             role="requester",
+            slack_user_id=None,
             password="short",
         )
+
+
+def test_update_user_clears_slack_user_id_with_blank_input():
+    from shared.user_admin import update_user
+
+    user = SimpleNamespace(
+        id=uuid.uuid4(),
+        display_name="Existing User",
+        role="requester",
+        slack_user_id="U123456",
+        password_hash="hash",
+        updated_at=None,
+    )
+
+    class _AdminSession:
+        def execute(self, statement):
+            class _Result:
+                def scalar_one_or_none(self):
+                    return None
+
+            return _Result()
+
+    updated = update_user(
+        _AdminSession(),
+        user=user,
+        display_name="Existing User",
+        role="requester",
+        slack_user_id="",
+        password=None,
+    )
+
+    assert updated.slack_user_id is None
 
 
 def test_set_password_rejects_blank_password():

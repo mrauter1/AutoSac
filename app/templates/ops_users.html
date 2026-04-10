@@ -3,6 +3,7 @@
 {% block page_class %} page--workspace{% endblock %}
 {% block body %}
 <div class="workspace-view ops-users">
+  {% set user_table_columns = 6 if is_admin_user else 5 %}
   <section class="page-header page-header--card">
     <div class="stack stack--tight">
       <p class="eyebrow">{{ t("eyebrow.access_administration") }}</p>
@@ -50,6 +51,12 @@
             {% endfor %}
           </select>
         </label>
+        {% if is_admin_user %}
+        <label class="field">
+          <span>{{ t("field.slack_user_id") }}</span>
+          <input type="text" name="slack_user_id">
+        </label>
+        {% endif %}
       </div>
       <div class="button-row">
         <button type="submit" class="button">{{ t("button.create_user") }}</button>
@@ -73,6 +80,9 @@
             <th>{{ t("field.display_name") }}</th>
             <th>{{ t("field.role") }}</th>
             <th>{{ t("field.status") }}</th>
+            {% if is_admin_user %}
+            <th>{{ t("field.slack_user_id") }}</th>
+            {% endif %}
             <th>{{ t("common.actions") }}</th>
           </tr>
         </thead>
@@ -95,6 +105,9 @@
                 {% if user.is_active %}{{ t("ops.users.status.active") }}{% else %}{{ t("ops.users.status.inactive") }}{% endif %}
               </span>
             </td>
+            {% if is_admin_user %}
+            <td>{{ user.slack_user_id or t("common.none_yet") }}</td>
+            {% endif %}
             <td>
               <div class="ops-users__actions">
                 {% if can_edit_profile %}
@@ -120,7 +133,7 @@
           </tr>
           {% if can_edit_profile and is_editing %}
           <tr class="ops-users__edit-row">
-            <td colspan="5">
+            <td colspan="{{ user_table_columns }}">
               <form method="post" action="/ops/users/{{ user.id }}/update" class="stack ops-users__inline-form">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <div class="ops-users__form-grid">
@@ -145,6 +158,12 @@
                     <span>{{ t("field.new_password") }}</span>
                     <input type="password" name="password" minlength="8">
                   </label>
+                  {% if is_admin_user %}
+                  <label class="field ops-users__field--full">
+                    <span>{{ t("field.slack_user_id") }}</span>
+                    <input type="text" name="slack_user_id" value="{{ user.slack_user_id or '' }}">
+                  </label>
+                  {% endif %}
                 </div>
                 <p class="muted ops-users__password-hint">{{ t("ops.users.password_hint") }}</p>
                 <div class="button-row">
@@ -157,7 +176,7 @@
           {% endif %}
           {% else %}
           <tr>
-            <td colspan="5" class="muted">{{ t("common.none_yet") }}</td>
+            <td colspan="{{ user_table_columns }}" class="muted">{{ t("common.none_yet") }}</td>
           </tr>
           {% endfor %}
         </tbody>

@@ -481,7 +481,8 @@ def test_requester_routes_source_uses_custom_auth_and_explicit_multipart_limits(
 
 def test_ticket_access_guard_allows_requester_and_ops_roles():
     pytest.importorskip("fastapi")
-    from app.auth import require_requester_user
+    from app.auth import require_admin_user, require_requester_user
+    from fastapi import HTTPException
 
     requester = SimpleNamespace(role="requester")
     dev_ti = SimpleNamespace(role="dev_ti")
@@ -490,25 +491,39 @@ def test_ticket_access_guard_allows_requester_and_ops_roles():
     assert require_requester_user(requester) is requester
     assert require_requester_user(dev_ti) is dev_ti
     assert require_requester_user(admin) is admin
+    assert require_admin_user(admin) is admin
+    with pytest.raises(HTTPException) as excinfo:
+        require_admin_user(dev_ti)
+    assert excinfo.value.status_code == 403
 
 
 def test_ops_user_management_routes_and_role_limits_are_present():
     source = Path("app/routes_ops.py").read_text(encoding="utf-8")
     template_source = Path("app/templates/ops_users.html").read_text(encoding="utf-8")
+    slack_template_source = Path("app/templates/ops_slack_integration.html").read_text(encoding="utf-8")
     base_template_source = Path("app/templates/base.html").read_text(encoding="utf-8")
 
     assert '"/ops/users"' in source
     assert '"/ops/users/create"' in source
     assert '"/ops/users/{user_id}/update"' in source
     assert '"/ops/users/{user_id}/set-active"' in source
+    assert '"/ops/integrations/slack"' in source
+    assert '"/ops/integrations/slack/disconnect"' in source
+    assert "require_admin_user" in source
     assert "if actor.role == \"admin\"" in source
     assert "return (\"requester\",)" in source
     assert 't("ops.users.create_heading")' in template_source
+    assert 'name="slack_user_id"' in template_source
     assert 't("button.edit")' in template_source
     assert 't("button.save_changes")' in template_source
     assert 'class="table ops-users__table"' in template_source
     assert '"/ops/users?create=1"' in template_source
+    assert 't("ops.slack.heading")' in slack_template_source
+    assert 'auth.test' in slack_template_source
+    assert 'conversations.open' in slack_template_source
+    assert 'chat.postMessage' in slack_template_source
     assert "/ops/users" in base_template_source
+    assert "/ops/integrations/slack" in base_template_source
 
 
 def test_login_route_sets_remember_me_cookie(monkeypatch, tmp_path):

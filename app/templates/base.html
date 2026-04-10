@@ -20,6 +20,9 @@
             <a href="/app/tickets">{{ t("base.nav.my_tickets") }}</a>
             <a href="/app/tickets/new">{{ t("base.nav.new_ticket") }}</a>
             <a href="/ops/users">{{ t("base.nav.users") }}</a>
+            {% if is_admin_user %}
+            <a href="/ops/integrations/slack">{{ t("base.nav.slack") }}</a>
+            {% endif %}
             {% else %}
             <a href="/app/tickets">{{ t("base.nav.my_tickets") }}</a>
             <a href="/app/tickets/new">{{ t("base.nav.new_ticket") }}</a>

@@ -1305,3 +1305,78 @@ I marked all boxes complete in [criteria.md](/home/marcelo/code/AutoSac/.autoloo
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=producer | cycle=1 | attempt=1 | thread_id=019d791c-1dca-7c11-80ca-dc992d303697
+---
+provider=codex
+mode=start
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_producer.md
+session_id=019d791c-1dca-7c11-80ca-dc992d303697
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d791c-1dca-7c11-80ca-dc992d303697
+---
+I’m implementing the `admin-ui-and-user-mapping` phase. First I’m reading the phase artifacts and the existing ops/auth/user-management code so I can make the UI and validation changes without drifting from current patterns.
+
+I’ve confirmed the DM foundation is already in place and the worktree has unrelated changes outside this phase. Now I’m tracing the existing ops routes, auth guards, templates, and user-admin helpers to fit the new admin-only Slack controls into the current surface cleanly.
+
+I’ve narrowed the change surface to `app/auth.py`, `app/routes_ops.py`, `shared/user_admin.py`, the ops templates/base nav, i18n, and the ops/UI tests. Next I’m reading the current test coverage so the new admin-only flows and locale behavior land with matching assertions rather than guesswork.
+
+I have the route and test shape now. I’m checking the existing CSS utility classes before I write the template so the new Slack page can reuse current layout primitives instead of inventing new UI structure.
+
+Plan for the edit set:
+1. Add `require_admin_user` and wire new `/ops/integrations/slack` GET, save, and disconnect handlers with DB-backed Slack settings load/save, `auth.test` validation for new tokens, and a render helper that shows stored-token presence, workspace metadata, updater metadata, and last-known delivery health.
+2. Extend `/ops/users` so only admins see or submit `slack_user_id`, with route-layer rejection for non-admin manual submissions and shared validation for trim, clear, whitespace-only rejection, and uniqueness.
+3. Add the Slack template, admin-only nav entry, i18n/error strings, and focused tests covering admin access, save/disconnect behavior, no token echo, locale-switch paths, and Slack ID permissions/validation.
+
+I’ve got enough context to start editing. I’m first wiring the admin guard and shared Slack-ID validation so the route/template changes can stay thin and consistent with the existing ops patterns.
+
+I’m adding the Slack route helpers now. The goal is to keep the page render/save logic explicit: DB-backed form state, no token echo, and route-level admin enforcement before the template changes land.
+
+I’m writing the Slack integration template next. It will reuse the existing panel/grid primitives, keep the token input write-only, and expose the metadata and health state the phase requires without inventing a separate UI system.
+
+The next edit is i18n. I’m adding only the strings and error patterns this phase actually uses so the new admin page stays fully localizable and the existing translation-key parity test remains meaningful.
+
+The data-model and route code is in place. I’m moving to the test surface now to align the existing ops/user-management assertions with the new `slack_user_id` parameter and to add coverage for the new admin Slack screen before I run anything.
+
+I’m tightening the user-surface tests first so the admin-only Slack ID behavior is pinned before I add the dedicated Slack integration page cases. That should catch any accidental permission expansion from the shared `/ops/users` surface.
+
+I’ve finished most of the route coverage. I’m adding a small set of `shared.user_admin` tests now so trimming, blank-clear behavior, whitespace rejection, and uniqueness are pinned at the helper layer instead of only indirectly through the web routes.
+
+The code changes are in place. I’m running compile and focused pytest passes now to catch any template, signature, or translation regressions before I update the phase artifacts.
+
+The compile step passed. The focused pytest run is still executing; I’m polling it now so I can fix anything immediately instead of leaving the phase with partial verification.
+
+The failures are environmental, not from the new code: the app route suites still can’t import without `bleach` and `python-multipart`, which the previous phase already flagged as missing. I’m installing those local test dependencies now so I can rerun the route-level verification instead of stopping at compile-only signal.
+
+The missing runtime deps are installed. I’m rerunning the focused suites now; this pass should give real signal on the new admin routes, templates, and Slack-ID validation instead of failing at import time.
+
+The next import blocker is `Pillow`, pulled in by the requester upload module that the test app imports on startup. I’m installing that too so the route/UI suites can actually execute.
+
+The import blockers are cleared again. I’m rerunning the same focused suites; at this point the failures should narrow to actual code/test issues if any remain.
+
+The remaining failures are test-shape issues, not code issues: two assertions assumed English while the UI resolved to Portuguese, and the new i18n route test accidentally passed a dependency override with the wrong signature. I’m tightening those now and rerunning the same focused suites.
+
+I’ve fixed the remaining test harness issues. I’m running the same focused suites one more time; this should be the final verification pass for the phase work.
+
+The implementation is passing the focused phase suites now. I’m doing the close-out pass: capture the exact changed surface, append the non-obvious decisions to the shared ledger, and update the phase implementation notes with the verification and invariants.
+
+I’m updating the phase artifact now with the exact file/symbol surface, checklist mapping, and the environment note about the local test dependencies I had to install to execute the route suites in this workspace.
+
+The code and artifact updates are done. I’m collecting the key file locations now so the handoff can reference the exact admin guard, Slack routes, template, and Slack-ID validation points instead of giving a vague summary.
+
+**Changes**
+- Added an admin-only Slack integration surface in [app/auth.py](/home/marcelo/code/AutoSac/app/auth.py#L61), [app/routes_ops.py](/home/marcelo/code/AutoSac/app/routes_ops.py#L680), and [app/templates/ops_slack_integration.html](/home/marcelo/code/AutoSac/app/templates/ops_slack_integration.html#L1). It loads DB-backed Slack DM settings, runs `auth.test` for new tokens, preserves stored tokens on blank edits, supports explicit disconnect, never re-renders the token, and shows workspace plus last-known delivery health.
+- Extended ops user management in [shared/user_admin.py](/home/marcelo/code/AutoSac/shared/user_admin.py#L35), [app/routes_ops.py](/home/marcelo/code/AutoSac/app/routes_ops.py#L464), and [app/templates/ops_users.html](/home/marcelo/code/AutoSac/app/templates/ops_users.html#L56) so admins can set, clear, trim, and validate unique `slack_user_id` values. Non-admin crafted submissions are rejected at the route layer.
+- Added the admin-only nav entry and new UI/error strings in [app/templates/base.html](/home/marcelo/code/AutoSac/app/templates/base.html#L24), [app/i18n.py](/home/marcelo/code/AutoSac/app/i18n.py#L122), and expanded coverage in [tests/test_ops_workflow.py](/home/marcelo/code/AutoSac/tests/test_ops_workflow.py#L964), [tests/test_ui_i18n.py](/home/marcelo/code/AutoSac/tests/test_ui_i18n.py#L408), [tests/test_auth_requester.py](/home/marcelo/code/AutoSac/tests/test_auth_requester.py#L484), and [tests/test_foundation_persistence.py](/home/marcelo/code/AutoSac/tests/test_foundation_persistence.py#L870).
+
+**Validation**
+- `python3 -m compileall app shared tests scripts`
+- `python3 -m pytest tests/test_ops_workflow.py tests/test_ui_i18n.py tests/test_auth_requester.py tests/test_foundation_persistence.py -q`
+
+`162 passed, 10 skipped`.
+
+Note: to run the route/UI suites in this workspace, I installed user-local `bleach`, `python-multipart`, and `Pillow`.

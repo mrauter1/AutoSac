@@ -11,7 +11,7 @@ from shared.config import Settings, get_settings
 from shared.contracts import SESSION_COOKIE_NAME
 from shared.db import db_session_dependency
 from shared.models import SessionRecord, User
-from shared.permissions import is_ops_user, is_requester
+from shared.permissions import is_admin_user, is_ops_user, is_requester
 from shared.sessions import create_server_session, get_valid_session_by_token, invalidate_session
 
 
@@ -55,6 +55,12 @@ def require_requester_user(current_user: User = Depends(get_current_user)) -> Us
 def require_ops_user(current_user: User = Depends(get_current_user)) -> User:
     if not is_ops_user(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Ops access required")
+    return current_user
+
+
+def require_admin_user(current_user: User = Depends(get_current_user)) -> User:
+    if not is_admin_user(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
 
 
