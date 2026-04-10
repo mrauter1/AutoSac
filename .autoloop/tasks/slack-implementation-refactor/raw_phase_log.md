@@ -1531,3 +1531,55 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=test | phase=producer | cycle=1 | attempt=1 | thread_id=019d791c-1dca-7c11-80ca-dc992d303697
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/test_producer.md
+session_id=019d791c-1dca-7c11-80ca-dc992d303697
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=test | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d791c-1dca-7c11-80ca-dc992d303697
+---
+I’m checking the current phase test artifacts and the Slack admin test coverage before I add anything. The likely gap is broader regression protection for the new localized Slack settings validation messages, since the implementation already added one route-level case.
+
+The current test corpus already covers the route-level Portuguese failure path once. I’m going to add a small translation-level regression test for all five Slack tuning validation strings so future changes can’t silently reintroduce English-only errors on the admin page.
+
+I’ve settled on a small test-only refinement: keep the existing route-level Slack admin failure test, and add a translation-level regression test that covers every new Slack tuning validation string. I’m updating the UI i18n test, the phase test strategy, the test feedback note, and the current test decision block now.
+
+The added coverage is in place. I’m running the UI i18n suite now because that is the exact surface I changed, and it exercises both the new translation-level assertions and the existing Slack admin route error cases.
+
+The focused test suite is still running clean. I’m waiting for the final result so the phase summary can report the exact pass count for the refined coverage.
+
+The focused suite passed. I’m doing a quick artifact and diff sanity check now so the handoff includes the exact coverage map and avoids whitespace or formatting issues in the new test-phase files.
+
+Scope considered
+- Phase-local test coverage for the admin Slack integration screen and admin-only Slack user ID management.
+- Focus stayed on the changed test surface plus the required phase artifacts in [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/admin-ui-and-user-mapping/test_strategy.md) and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/admin-ui-and-user-mapping/feedback.md).
+
+What I analyzed
+- Existing route and i18n coverage in [tests/test_ui_i18n.py](/home/marcelo/code/AutoSac/tests/test_ui_i18n.py), plus the already-landed ops and auth tests referenced by the phase.
+- The latest shared decisions in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt), especially the Slack admin error-localization decision from the implementation turn.
+
+What I changed
+- Added a parameterized translation-regression test in [tests/test_ui_i18n.py](/home/marcelo/code/AutoSac/tests/test_ui_i18n.py) covering all five Slack tuning validation messages.
+- Filled in the explicit behavior-to-test coverage map, invariants, edge cases, stabilization notes, and known gaps in [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/admin-ui-and-user-mapping/test_strategy.md).
+- Appended a concise summary of the test additions to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/admin-ui-and-user-mapping/feedback.md).
+- Appended the current turn’s non-obvious test decision under the latest header in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt).
+
+Key findings / decisions
+- I paired the existing route-level Slack admin failure test with direct `translate_error_text()` coverage so all five Slack tuning validation strings are locked down without duplicating near-identical route tests.
+- Validation passed: `python3 -m pytest tests/test_ui_i18n.py -q` -> `23 passed`.
+- Diff hygiene passed: `git diff --check -- tests/test_ui_i18n.py .autoloop/tasks/slack-implementation-refactor/test/phases/admin-ui-and-user-mapping/test_strategy.md .autoloop/tasks/slack-implementation-refactor/test/phases/admin-ui-and-user-mapping/feedback.md .autoloop/tasks/slack-implementation-refactor/decisions.txt`.
+
+Open issues / next step
+- No open test-author issue remains for this phase.
+- Next step is test-auditor review against the updated strategy and added translation-regression coverage.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>

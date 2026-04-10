@@ -271,6 +271,26 @@ def test_multipart_errors_translate_to_portuguese():
     assert translate_error_text("Missing boundary in multipart.", "pt-BR") == "Solicitação de upload inválida."
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("message_preview_max_chars must be greater than or equal to 4", "message_preview_max_chars deve ser maior ou igual a 4"),
+        ("http_timeout_seconds must be between 1 and 30 inclusive", "http_timeout_seconds deve ficar entre 1 e 30, inclusive"),
+        ("delivery_batch_size must be greater than or equal to 1", "delivery_batch_size deve ser maior ou igual a 1"),
+        ("delivery_max_attempts must be greater than or equal to 1", "delivery_max_attempts deve ser maior ou igual a 1"),
+        (
+            "delivery_stale_lock_seconds must be greater than http_timeout_seconds",
+            "delivery_stale_lock_seconds deve ser maior que http_timeout_seconds",
+        ),
+    ],
+)
+def test_slack_settings_validation_errors_translate_to_portuguese(message, expected):
+    pytest.importorskip("fastapi")
+    from app.i18n import translate_error_text
+
+    assert translate_error_text(message, "pt-BR") == expected
+
+
 def test_requester_create_error_uses_get_path_for_language_switch(monkeypatch, tmp_path):
     stack = _load_web_stack()
     app = stack["create_app"]()
