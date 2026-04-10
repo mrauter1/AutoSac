@@ -63,6 +63,31 @@ def test_slack_dm_foundation_migration_adds_settings_user_mapping_and_recipient_
     assert '"target_kind IN (\'slack_dm\')"' in migration_source
 
 
+def test_load_slack_dm_settings_defaults_to_disabled_dm_mode_when_row_missing(tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from shared.slack_dm import load_slack_dm_settings
+
+    db = _FakeStateDb()
+    settings = _make_settings(
+        tmp_path,
+        slack=SlackSettings(
+            enabled=True,
+            notify_ticket_created=True,
+            message_preview_max_chars=111,
+        ),
+    )
+
+    loaded = load_slack_dm_settings(db, app_settings=settings)
+
+    assert loaded.enabled is False
+    assert loaded.notify_ticket_created is False
+    assert loaded.message_preview_max_chars == 200
+    assert loaded.has_stored_token is False
+    assert loaded.is_valid is True
+    assert loaded.routing_mode == "dm"
+
+
 def test_encrypt_and_decrypt_slack_bot_token_round_trip(tmp_path):
     from shared.slack_dm import decrypt_slack_bot_token, encrypt_slack_bot_token
 
@@ -104,6 +129,51 @@ def test_upsert_slack_dm_settings_encrypts_token_and_requires_stored_token_when_
     loaded = load_slack_dm_settings(db, app_settings=settings)
     assert loaded.enabled is True
     assert loaded.notify_ticket_created is True
+    assert loaded.has_stored_token is True
+    assert loaded.is_valid is True
+
+
+def test_upsert_slack_dm_settings_preserves_existing_token_when_blank_input_is_submitted(tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from shared.slack_dm import (
+        SlackDMSettingsInput,
+        decrypt_slack_bot_token,
+        load_slack_dm_settings,
+        upsert_slack_dm_settings,
+    )
+
+    db = _FakeStateDb()
+    settings = _make_settings(tmp_path)
+
+    original = upsert_slack_dm_settings(
+        db,
+        app_settings=settings,
+        values=SlackDMSettingsInput(
+            enabled=False,
+            notify_ticket_created=True,
+            bot_token="xoxb-initial-token",
+        ),
+        updated_by_user_id=uuid.uuid4(),
+    )
+
+    updated = upsert_slack_dm_settings(
+        db,
+        app_settings=settings,
+        values=SlackDMSettingsInput(
+            enabled=True,
+            notify_public_message_added=True,
+            bot_token="   ",
+        ),
+        updated_by_user_id=uuid.uuid4(),
+    )
+    loaded = load_slack_dm_settings(db, app_settings=settings)
+
+    assert updated.bot_token_ciphertext == original.bot_token_ciphertext
+    assert decrypt_slack_bot_token(settings.app_secret_key, updated.bot_token_ciphertext or "") == "xoxb-initial-token"
+    assert loaded.enabled is True
+    assert loaded.notify_ticket_created is False
+    assert loaded.notify_public_message_added is True
     assert loaded.has_stored_token is True
     assert loaded.is_valid is True
 
@@ -163,6 +233,43 @@ def test_valid_db_loaded_slack_runtime_uses_dm_routing_without_webhook_targets(t
     assert decision.routing_result == "suppressed_no_recipients"
     assert decision.target_name is None
     assert decision.config_error_code is None
+
+
+def test_clear_slack_dm_token_disables_delivery_and_preserves_workspace_metadata(tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from shared.models import SlackDMSettings
+    from shared.slack_dm import clear_slack_dm_token, encrypt_slack_bot_token, load_slack_dm_settings
+
+    db = _FakeStateDb()
+    db.add(
+        SlackDMSettings(
+            singleton_key="default",
+            enabled=True,
+            bot_token_ciphertext=encrypt_slack_bot_token("test-secret", "xoxb-test-token"),
+            team_id="T123",
+            team_name="AutoSac",
+            bot_user_id="U123",
+            notify_ticket_created=True,
+        )
+    )
+    settings = _make_settings(tmp_path)
+
+    cleared = clear_slack_dm_token(db, updated_by_user_id=uuid.uuid4())
+    loaded = load_slack_dm_settings(db, app_settings=settings)
+
+    assert cleared.enabled is False
+    assert cleared.bot_token_ciphertext is None
+    assert cleared.team_id == "T123"
+    assert cleared.team_name == "AutoSac"
+    assert cleared.bot_user_id == "U123"
+    assert loaded.enabled is False
+    assert loaded.has_stored_token is False
+    assert loaded.team_id == "T123"
+    assert loaded.team_name == "AutoSac"
+    assert loaded.bot_user_id == "U123"
+    assert loaded.is_valid is True
+    assert loaded.routing_mode == "dm"
 
 
 def test_persist_slack_delivery_health_upserts_system_state(tmp_path):
