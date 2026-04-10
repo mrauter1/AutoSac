@@ -1380,3 +1380,53 @@ The code and artifact updates are done. I’m collecting the key file locations 
 `162 passed, 10 skipped`.
 
 Note: to run the route/UI suites in this workspace, I installed user-local `bleach`, `python-multipart`, and `Pillow`.
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=verifier | cycle=1 | attempt=1 | thread_id=019d791c-1dca-7c11-80ca-dc992d303697
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_verifier.md
+session_id=019d791c-1dca-7c11-80ca-dc992d303697
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d791c-1dca-7c11-80ca-dc992d303697
+---
+I’m reviewing the phase implementation against the active criteria, the shared decisions ledger, and the touched code paths. First I’m reading the reviewer-owned phase artifacts and the actual diffs so I can check intent fidelity before I mark criteria or write findings.
+
+Reviewing the phase artifacts against the actual code paths now. I’m checking the admin gate, Slack settings route behavior, and `slack_user_id` enforcement before I update the criteria and feedback files.
+
+I have the core surfaces in view. Next I’m checking the POST handlers and the surrounding tests to make sure the admin-only restriction and token-handling behavior are actually enforced end to end.
+
+The route layer looks aligned with the intended gatekeeping and error translation path. I’m checking the targeted tests now for gaps around blank-token preservation, disconnect behavior, and forged non-admin submissions.
+
+The route tests cover the critical paths. I’m doing one last pass through the Slack settings helper to verify the disconnect and “invalid stored token” semantics the route is relying on.
+
+I found one area that needs a closer look before I mark this complete: whether the new Slack settings validation errors are fully locale-aware, not just the auth-related ones. I’m checking the i18n mappings against the exact error strings raised by the helper.
+
+I found one blocking gap in the reviewed implementation: the new Slack settings numeric validation failures are not wired into the existing i18n error translation system, so a localized admin flow still falls back to English for part of the new screen. I’m updating the verifier artifacts with that finding and leaving the phase incomplete for one follow-up fix.
+
+The verifier artifacts are updated. I’m doing a quick readback to make sure the criteria state and the blocking finding are precise before I close the review loop.
+
+Scope considered
+- Phase-local review for admin Slack integration and ops user Slack mapping, limited to request-relevant code and the verifier artifacts in [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/admin-ui-and-user-mapping/criteria.md) and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/admin-ui-and-user-mapping/feedback.md).
+
+What I analyzed
+- The request and phase contract, the latest shared decisions, and the changed paths around `require_admin_user`, `/ops/integrations/slack`, `/ops/users`, Slack settings persistence helpers, templates, i18n wiring, and the targeted tests.
+
+What I reviewed
+- Updated [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/admin-ui-and-user-mapping/criteria.md) to leave the phase not yet complete.
+- Appended one blocking finding to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/admin-ui-and-user-mapping/feedback.md).
+
+Key findings / decisions
+- `IMP-001` blocking: the new Slack settings numeric validation errors raised from [shared/slack_dm.py](/home/marcelo/code/AutoSac/shared/slack_dm.py#L97) are not translated by the i18n error-mapping in [app/i18n.py](/home/marcelo/code/AutoSac/app/i18n.py#L748), so a `pt-BR` admin still gets English-only errors on part of the new Slack admin screen reached through [app/routes_ops.py](/home/marcelo/code/AutoSac/app/routes_ops.py#L697).
+- No other blocking issues were identified in the reviewed scope.
+
+Open issues / next step
+- Add localized mappings for all new Slack settings validation messages and add a route test for a localized numeric-validation failure, then rerun this verifier pass.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
