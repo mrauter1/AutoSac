@@ -902,3 +902,62 @@ I’ve written the fixes. I’m doing a short consistency pass now to confirm th
 Updated the planning artifacts to close the verifier’s blocking gaps. [plan.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/plan/plan.md) now makes the admin-page scope guidance explicit, defines disconnect as “disable delivery + clear `bot_token_ciphertext` + preserve non-secret workspace/audit metadata by default,” states the no-actor-suppression routing rule, and requires worker delivery logs/tests to carry `recipient_user_id` and `recipient_reason`.
 
 I also updated [phase_plan.yaml](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/plan/phase_plan.yaml) so the admin, routing, and worker phases each encode those requirements in scope and acceptance criteria, appended a closure note to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/plan/feedback.md), and recorded the non-obvious decisions under this turn’s header in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt). I did not edit the verifier-owned [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/plan/criteria.md). No tests were run; this turn only revised planning artifacts.
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=plan | phase=verifier | cycle=2 | attempt=1 | thread_id=019d78f9-6319-7c80-956f-163a1f84d16a
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/plan_verifier.md
+session_id=019d78f9-6319-7c80-956f-163a1f84d16a
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=plan | phase=verifier | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d78f9-6319-7c80-956f-163a1f84d16a
+---
+I’m re-verifying the revised plan against the DM PRD and the latest feedback now. The focus is on whether the three blocking gaps are actually closed in both the narrative plan and the phase contract, and whether the criteria can be restored to complete without introducing new drift.
+
+The revised plan now covers the previously missing admin, routing, and observability requirements in both artifacts. I’m restoring the criteria to complete and appending a final re-review note to the feedback history so the closure is explicit for later turns.
+
+I’ve made the verifier-side closure edits. I’m doing one last check on `criteria.md` and `feedback.md` only, to ensure the gate is internally consistent before I mark the plan complete.
+
+Scope considered
+
+Re-verified the active DM planning artifacts against the immutable request snapshot, the raw run log, the revised producer outputs, and the shared decision history. The re-review focused on the previously blocking admin-surface, routing-safety, and delivery-observability gaps.
+
+What I analyzed
+
+I checked whether the revised plan now explicitly covers:
+- required Slack bot scope or capability guidance on `/ops/integrations/slack`
+- explicit disconnect semantics for disabling delivery and clearing stored ciphertext
+- the no-actor-suppression recipient-routing rule
+- DM-specific worker observability with `recipient_user_id` and `recipient_reason`
+- consistency between the narrative plan, the machine-readable phase contract, and the shared decisions history
+
+What I reviewed
+
+I reviewed:
+- `plan.md`
+- `phase_plan.yaml`
+- `feedback.md`
+- `criteria.md`
+- `decisions.txt`
+
+I updated `criteria.md` to all checked and appended a final re-review note to `feedback.md`.
+
+Key findings / decisions
+
+- No blocking findings remain.
+- The revised plan now explicitly covers the previously missing admin guidance and disconnect contract.
+- The no-actor-suppression routing rule is now stated in both the narrative plan and the phase plan.
+- Worker observability now explicitly carries `recipient_user_id` and `recipient_reason`, and the regression coverage reflects that requirement.
+- Criteria and feedback history are now internally consistent with a complete verification pass.
+
+Open issues / next step
+
+The planning artifacts are complete for this turn. The next step is to proceed to implementation against the revised plan and re-use the recorded decisions to prevent drift during code changes.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
