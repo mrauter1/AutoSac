@@ -23,3 +23,7 @@
 {"ts": "2026-04-10T20:35:28.175807+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 23, "event_type": "phase_finished", "pair": "test", "phase": "producer", "cycle": 1, "attempt": 1, "empty_output": false, "phase_id": "dm-persistence-runtime-foundation"}
 {"ts": "2026-04-10T20:36:18.716455+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 24, "event_type": "phase_finished", "pair": "test", "phase": "verifier", "cycle": 1, "attempt": 1, "empty_output": false, "phase_id": "dm-persistence-runtime-foundation"}
 {"ts": "2026-04-10T20:36:18.725369+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 25, "event_type": "pair_completed", "pair": "test", "cycle": 1, "attempt": 1, "phase_id": "dm-persistence-runtime-foundation"}
+{"ts": "2026-04-10T20:36:18.752737+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 26, "event_type": "phase_completed", "pair": "test", "phase_id": "dm-persistence-runtime-foundation", "phase_mode": "single"}
+{"ts": "2026-04-10T20:36:18.755414+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 27, "event_type": "phase_started", "phase_id": "admin-ui-and-user-mapping", "phase_mode": "single"}
+{"ts": "2026-04-10T20:36:18.755838+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 28, "event_type": "pair_started", "pair": "implement", "phase_id": "admin-ui-and-user-mapping"}
+{"ts": "2026-04-10T20:36:18.755890+00:00", "run_id": "run-20260410T195822Z-068ccbe4", "seq": 29, "event_type": "cycle_started", "pair": "implement", "cycle": 1, "attempt": 1, "phase_id": "admin-ui-and-user-mapping"}

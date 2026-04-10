@@ -15,15 +15,15 @@
       "worker-dm-delivery-and-regression"
     ],
     "explicit": true,
-    "current_phase_index": 0,
-    "current_phase_id": "dm-persistence-runtime-foundation"
+    "current_phase_index": 1,
+    "current_phase_id": "admin-ui-and-user-mapping"
   },
   "phase_status": {
     "schema-emission-runtime-boundary": "completed",
     "delivery-claim-outcome-finalization": "completed",
     "regression-rollout-verification": "completed",
-    "dm-persistence-runtime-foundation": "in_progress",
-    "admin-ui-and-user-mapping": "planned",
+    "dm-persistence-runtime-foundation": "completed",
+    "admin-ui-and-user-mapping": "in_progress",
     "emission-dm-recipient-routing": "planned",
     "worker-dm-delivery-and-regression": "planned"
   },
@@ -72,6 +72,19 @@
       "run_id": "run-20260410T195822Z-068ccbe4",
       "status": "in_progress",
       "ts": "2026-04-10T20:10:46.105519+00:00"
+    },
+    {
+      "phase_id": "dm-persistence-runtime-foundation",
+      "run_id": "run-20260410T195822Z-068ccbe4",
+      "status": "completed",
+      "ts": "2026-04-10T20:36:18.752492+00:00",
+      "pair": "test"
+    },
+    {
+      "phase_id": "admin-ui-and-user-mapping",
+      "run_id": "run-20260410T195822Z-068ccbe4",
+      "status": "in_progress",
+      "ts": "2026-04-10T20:36:18.754572+00:00"
     }
   ]
 }
