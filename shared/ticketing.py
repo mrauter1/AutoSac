@@ -12,6 +12,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from shared.config import Settings
+from shared.integrations import (
+    record_ticket_created_event,
+    record_ticket_public_message_added_event,
+    record_ticket_status_changed_event,
+)
 from shared.models import AIDraft, AIRun, SystemState, Ticket, TicketAttachment, TicketMessage, TicketStatusHistory, TicketView, TICKET_STATUSES, User
 from shared.security import utc_now
 
@@ -64,6 +69,7 @@ def record_status_change(
     event_time = changed_at or utc_now()
     from_status = ticket.status if from_status_override is _STATUS_SENTINEL else from_status_override
     history = TicketStatusHistory(
+        id=uuid.uuid4(),
         ticket_id=ticket.id,
         from_status=from_status,
         to_status=to_status,
@@ -76,6 +82,7 @@ def record_status_change(
     ticket.status = to_status
     ticket.resolved_at = event_time if to_status == "resolved" else None
     ticket.updated_at = event_time
+    record_ticket_status_changed_event(db, ticket=ticket, history=history)
     return history
 
 
@@ -389,6 +396,12 @@ def create_requester_ticket(
         from_status_override=None,
     )
     upsert_ticket_view(db, user_id=requester.id, ticket_id=ticket.id, viewed_at=created_at)
+    record_ticket_created_event(
+        db,
+        settings=settings,
+        ticket=ticket,
+        initial_message=message,
+    )
     return ticket, message, persisted_attachments, run
 
 
@@ -443,6 +456,12 @@ def add_requester_reply(
         requested_by_user_id=requester.id,
     )
     upsert_ticket_view(db, user_id=requester.id, ticket_id=ticket.id, viewed_at=created_at)
+    record_ticket_public_message_added_event(
+        db,
+        settings=settings,
+        ticket=ticket,
+        message=message,
+    )
     return message, persisted_attachments, run
 
 
@@ -525,6 +544,11 @@ def publish_ai_public_reply(
         to_status=next_status,
         last_ai_action=last_ai_action,
         changed_at=published_at,
+    )
+    record_ticket_public_message_added_event(
+        db,
+        ticket=ticket,
+        message=message,
     )
     return message
 
@@ -645,6 +669,11 @@ def add_ops_public_reply(
             forced_route_target_id=forced_route_target_id,
             forced_specialist_id=forced_specialist_id,
         )
+        record_ticket_public_message_added_event(
+            db,
+            ticket=ticket,
+            message=message,
+        )
         return message
     if ticket.status != next_status:
         record_status_change(
@@ -658,6 +687,11 @@ def add_ops_public_reply(
     else:
         touch_ticket(ticket, created_at)
     upsert_ticket_view(db, user_id=actor.id, ticket_id=ticket.id, viewed_at=created_at)
+    record_ticket_public_message_added_event(
+        db,
+        ticket=ticket,
+        message=message,
+    )
     return message
 
 
@@ -820,6 +854,11 @@ def publish_ai_draft_for_ops(
     else:
         touch_ticket(ticket, published_at)
     upsert_ticket_view(db, user_id=actor.id, ticket_id=ticket.id, viewed_at=published_at)
+    record_ticket_public_message_added_event(
+        db,
+        ticket=ticket,
+        message=message,
+    )
     return message
 
 

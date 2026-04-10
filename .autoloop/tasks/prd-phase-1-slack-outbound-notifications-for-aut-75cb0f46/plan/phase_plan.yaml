@@ -1,0 +1,127 @@
+version: 1
+task_id: prd-phase-1-slack-outbound-notifications-for-aut-75cb0f46
+request_snapshot_ref: /home/marcelo/code/AutoSac/.autoloop/tasks/prd-phase-1-slack-outbound-notifications-for-aut-75cb0f46/runs/run-20260410T131621Z-1c9c1f3e/request.md
+phases:
+  - phase_id: schema-and-config-foundation
+    title: Schema and Config Foundation
+    objective: Add the persisted integration tables and soft Slack configuration parsing without changing current ticket behavior.
+    status: planned
+    in_scope:
+      - Add the Alembic migration for integration_events, integration_event_links, and integration_event_targets with the required constraints and indexes.
+      - Extend shared/models.py with the new ORM models and Phase 1 enum/constant sets.
+      - Extend shared/config.py with Slack env parsing, named target definitions, notify flags, scalar tunables, and soft invalid-config reporting.
+      - Update .env.example, README.md, and docs_deployment.md for the new runtime knobs and rollout posture.
+    out_of_scope:
+      - Emitting integration rows from ticket mutations
+      - Outbound Slack HTTP delivery
+      - Any UI change
+    dependencies: []
+    acceptance_criteria:
+      - id: AC-1
+        text: The migration source defines all three integration tables with the PRD-required uniqueness, eligibility, and lookup indexes.
+      - id: AC-2
+        text: Slack-specific misconfiguration is represented as structured invalid-config state instead of a startup-fatal SettingsError.
+      - id: AC-3
+        text: Operator docs and .env.example list the new Slack env vars and the initial SLACK_ENABLED=false rollout.
+    deliverables:
+      - Alembic migration for the integration schema
+      - ORM model additions in shared/models.py
+      - Structured Slack config parsing and docs updates
+    risks:
+      - Hard-failing Slack validation would violate the non-fatal misconfiguration invariant.
+      - Constraint/index mismatches would force churn across migration and model tests.
+    rollback:
+      - Revert the migration before deployment if the schema is not yet in use.
+      - Leave SLACK_ENABLED=false after deploy if only the schema/config foundation has shipped.
+  - phase_id: transactional-event-emission
+    title: Transactional Event Emission
+    objective: Record immutable event snapshots, required links, and optional target rows inside the same transaction as eligible ticket mutations.
+    status: planned
+    in_scope:
+      - Add a shared integration helper module for payload building, dedupe-safe persistence, routing outcomes, and sanitized emission logging.
+      - Hook create_requester_ticket, add_requester_reply, add_ops_public_reply, publish_ai_public_reply, publish_ai_draft_for_ops, and record_status_change through that helper.
+      - Preserve non-emitting behavior for internal note rows and draft rejection while still emitting ticket.status_changed for AI failure, internal route-only, and draft-creation flows when they commit a distinct non-initial status transition.
+      - Preserve reused event state on duplicate dedupe_key collisions.
+    out_of_scope:
+      - Slack HTTP delivery and retry logic
+      - Worker stale-lock recovery for integration targets
+    dependencies:
+      - schema-and-config-foundation
+    acceptance_criteria:
+      - id: AC-1
+        text: Eligible ticket mutations create the correct integration_events and integration_event_links rows and only create integration_event_targets for the created routing outcome.
+      - id: AC-2
+        text: Initial ticket creation does not emit ticket.public_message_added or ticket.status_changed for the initial null->new status history row.
+      - id: AC-3
+        text: Duplicate emission attempts reuse the prior event row and do not repair or rewrite prior target state after config changes.
+    deliverables:
+      - Shared event-emission helper module
+      - Ticketing and worker mutation hooks for Phase 1 event types
+      - Emission-path logs and focused emission tests
+    risks:
+      - Emitting from the wrong mutation boundary could create duplicate or missing events.
+      - Inlining too much persistence logic into shared/ticketing.py would create broad unit-test churn.
+    rollback:
+      - Keep SLACK_ENABLED=false and SLACK_NOTIFY_* flags false to neutralize new target creation while retaining append-only event rows.
+      - Revert the integration helper hooks if transactional behavior deviates from existing ticket invariants.
+  - phase_id: async-delivery-runtime
+    title: Async Delivery Runtime
+    objective: Deliver pending Slack targets asynchronously from the worker with claim, retry, dead-letter, and stale-lock-recovery behavior that matches the PRD.
+    status: planned
+    in_scope:
+      - Add a dedicated worker delivery module and thread startup in worker/main.py.
+      - Implement suppression checks, stale-lock recovery, batched claims, payload-only rendering, webhook POST, and row-state transitions.
+      - Emit structured worker logs for claim, send success, retry scheduling, dead-letter, and invalid-config suppression.
+      - Enforce no HTTP send for missing/disabled targets and other pre-send terminal failures.
+    out_of_scope:
+      - Multi-target fan-out
+      - Inbound Slack features
+      - Any requester-visible notification UX
+    dependencies:
+      - transactional-event-emission
+    acceptance_criteria:
+      - id: AC-1
+        text: The worker delivery loop runs independently of the synchronous request path and AI-run claim/processing transactions.
+      - id: AC-2
+        text: Success, retryable failure, terminal failure, retry exhaustion, and stale-lock recovery update integration_event_targets exactly as the PRD requires, including attempt_count handling.
+      - id: AC-3
+        text: While Slack is disabled or globally invalid, the runtime skips claim, send, and stale-lock recovery and leaves existing target rows unchanged.
+    deliverables:
+      - worker delivery module and worker/main.py thread wiring
+      - Slack renderer/sender and target-state transition helpers
+      - Delivery-runtime tests
+    risks:
+      - Locking mistakes could duplicate sends or strand rows in processing.
+      - Sharing sessions or sequencing with AI-run work could delay notification delivery or disturb AI-run polling.
+    rollback:
+      - Set SLACK_ENABLED=false to halt delivery without deleting stored rows.
+      - Remove the delivery thread startup if runtime behavior is unstable while preserving persisted event history.
+  - phase_id: regression-hardening-and-rollout-readiness
+    title: Regression Hardening and Rollout Readiness
+    objective: Close the minimum PRD coverage set and verify rollout/rollback behavior before Slack is enabled anywhere.
+    status: planned
+    in_scope:
+      - Add or update tests for migration source, config handling, emission rules, rendering, delivery transitions, suppression behavior, and docs/env vars.
+      - Verify that existing requester, ops, and AI-run invariants remain covered after the integration hooks land.
+      - Document rollout and rollback expectations around SLACK_ENABLED=false, non-backfill behavior, and operator observability.
+    out_of_scope:
+      - Production enablement itself
+      - Historical backfill tooling
+    dependencies:
+      - async-delivery-runtime
+    acceptance_criteria:
+      - id: AC-1
+        text: The repository has focused automated coverage for the PRD minimums around schema, routing outcomes, preview building, rendering sanitization, delivery transitions, stale recovery, and suppression behavior.
+      - id: AC-2
+        text: Existing Stage 1 ticket and AI-run semantics remain covered and unchanged from a requester/dev-TI perspective.
+      - id: AC-3
+        text: Docs and rollout notes make it possible to ship the feature safely with SLACK_ENABLED=false first and enable targets later without backfill.
+    deliverables:
+      - Regression tests across persistence, config, worker runtime, and docs
+      - Finalized operator-facing rollout and rollback notes
+    risks:
+      - Missing coverage on suppression or logging behavior could leave subtle regressions undetected.
+      - Incomplete docs/env updates would break deployment expectations and hardening tests.
+    rollback:
+      - Revert the test/doc changes with the feature branch if rollout readiness is not met.
+      - Keep Slack disabled in all environments until the verification set passes.

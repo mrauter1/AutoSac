@@ -16,6 +16,7 @@ from shared.models import AIRun, SystemState
 from shared.security import utc_now
 from shared.ticketing import ensure_system_state_defaults
 from worker.queue import claim_oldest_pending_run, recover_stale_runs
+from worker.slack_delivery import delivery_loop as slack_delivery_loop
 from worker.triage import process_ai_run
 
 
@@ -151,6 +152,24 @@ def start_heartbeat_thread(
     return thread
 
 
+def start_slack_delivery_thread(
+    settings,
+    *,
+    worker_identity: WorkerIdentity,
+) -> threading.Thread:
+    thread = threading.Thread(
+        target=slack_delivery_loop,
+        kwargs={
+            "settings": settings,
+            "worker_instance_id": worker_identity.worker_instance_id,
+        },
+        name="worker-slack-delivery",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def build_worker_identity() -> WorkerIdentity:
     return WorkerIdentity(worker_pid=os.getpid(), worker_instance_id=f"worker-{uuid.uuid4()}")
 
@@ -171,6 +190,10 @@ def main() -> None:
         settings,
         worker_identity=worker_identity,
         active_run_tracker=active_run_tracker,
+    )
+    start_slack_delivery_thread(
+        settings,
+        worker_identity=worker_identity,
     )
     while True:
         claimed_run_id = None

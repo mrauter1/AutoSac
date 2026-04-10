@@ -44,6 +44,12 @@ AI_RUN_STEP_STATUSES = AI_RUN_STATUSES
 REQUEUE_TRIGGERS = ("requester_reply", "manual_rerun", "reopen")
 AI_DRAFT_KINDS = ("public_reply",)
 AI_DRAFT_STATUSES = ("pending_approval", "approved", "rejected", "superseded", "published")
+INTEGRATION_EVENT_TYPES = ("ticket.created", "ticket.public_message_added", "ticket.status_changed")
+INTEGRATION_AGGREGATE_TYPES = ("ticket",)
+INTEGRATION_EVENT_LINK_ENTITY_TYPES = ("ticket", "ticket_message", "ticket_status_history")
+INTEGRATION_EVENT_LINK_RELATION_KINDS = ("primary", "message", "status_history")
+INTEGRATION_TARGET_KINDS = ("slack_webhook",)
+INTEGRATION_DELIVERY_STATUSES = ("pending", "processing", "sent", "failed", "dead_letter")
 
 TICKET_REFERENCE_NUM_SEQUENCE = Sequence("ticket_reference_num_seq")
 
@@ -210,6 +216,94 @@ class TicketView(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), primary_key=True)
     ticket_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tickets.id"), primary_key=True)
     last_viewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+
+
+class IntegrationEvent(Base):
+    __tablename__ = "integration_events"
+    __table_args__ = (
+        CheckConstraint(f"event_type IN {_enum_sql(INTEGRATION_EVENT_TYPES)}", name="integration_events_event_type"),
+        CheckConstraint(f"aggregate_type IN {_enum_sql(INTEGRATION_AGGREGATE_TYPES)}", name="integration_events_aggregate_type"),
+        Index("ix_integration_events_event_type_created_at", "event_type", "created_at"),
+        Index("ix_integration_events_aggregate_type_aggregate_id_created_at", "aggregate_type", "aggregate_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_system: Mapped[str] = mapped_column(Text, nullable=False, default="autosac", server_default=text("'autosac'"))
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    aggregate_type: Mapped[str] = mapped_column(Text, nullable=False)
+    aggregate_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    dedupe_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+
+
+class IntegrationEventLink(Base):
+    __tablename__ = "integration_event_links"
+    __table_args__ = (
+        CheckConstraint(
+            f"entity_type IN {_enum_sql(INTEGRATION_EVENT_LINK_ENTITY_TYPES)}",
+            name="integration_event_links_entity_type",
+        ),
+        CheckConstraint(
+            f"relation_kind IN {_enum_sql(INTEGRATION_EVENT_LINK_RELATION_KINDS)}",
+            name="integration_event_links_relation_kind",
+        ),
+        Index(
+            "uq_integration_event_links_event_id_entity_type_entity_id_relation_kind",
+            "event_id",
+            "entity_type",
+            "entity_id",
+            "relation_kind",
+            unique=True,
+        ),
+        Index("ix_integration_event_links_event_id", "event_id"),
+        Index("ix_integration_event_links_entity_type_entity_id", "entity_type", "entity_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("integration_events.id"), nullable=False)
+    entity_type: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    relation_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+
+
+class IntegrationEventTarget(Base):
+    __tablename__ = "integration_event_targets"
+    __table_args__ = (
+        CheckConstraint(f"target_kind IN {_enum_sql(INTEGRATION_TARGET_KINDS)}", name="integration_event_targets_target_kind"),
+        CheckConstraint(
+            f"delivery_status IN {_enum_sql(INTEGRATION_DELIVERY_STATUSES)}",
+            name="integration_event_targets_delivery_status",
+        ),
+        CheckConstraint("attempt_count >= 0", name="integration_event_targets_attempt_count_non_negative"),
+        CheckConstraint("(delivery_status = 'sent') = (sent_at IS NOT NULL)", name="integration_event_targets_sent_at_matches_status"),
+        CheckConstraint(
+            "(delivery_status = 'dead_letter') = (dead_lettered_at IS NOT NULL)",
+            name="integration_event_targets_dead_lettered_at_matches_status",
+        ),
+        CheckConstraint(
+            "NOT (sent_at IS NOT NULL AND dead_lettered_at IS NOT NULL)",
+            name="integration_event_targets_terminal_timestamps",
+        ),
+        Index("uq_integration_event_targets_event_id_target_name", "event_id", "target_name", unique=True),
+        Index("ix_integration_event_targets_delivery_status_next_attempt_at", "delivery_status", "next_attempt_at"),
+        Index("ix_integration_event_targets_locked_at", "locked_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("integration_events.id"), nullable=False)
+    target_name: Mapped[str] = mapped_column(Text, nullable=False)
+    target_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    delivery_status: Mapped[str] = mapped_column(Text, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    locked_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dead_lettered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
 
 
 class AIRun(Base):

@@ -30,8 +30,15 @@ def get_engine(settings: Settings | None = None) -> Engine:
 
 @lru_cache(maxsize=1)
 def get_session_factory(settings: Settings | None = None) -> sessionmaker[Session]:
-    engine = get_engine(settings)
-    return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
+    resolved = settings or get_settings()
+    engine = get_engine(resolved)
+    return sessionmaker(
+        bind=engine,
+        autoflush=False,
+        expire_on_commit=False,
+        future=True,
+        info={"settings": resolved},
+    )
 
 
 def get_db_session() -> Session:

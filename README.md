@@ -51,6 +51,8 @@ Unauthenticated browser navigation to protected HTML pages redirects to `/login`
 
    Optional:
    - `CODEX_API_KEY` if this runtime is not already authenticated via Codex CLI login.
+   - Leave `SLACK_ENABLED=false` for the initial Phase 1 rollout until the migration is applied and integration rows are verified.
+   - Configure `SLACK_TARGETS_JSON`, `SLACK_DEFAULT_TARGET_NAME`, and the `SLACK_NOTIFY_*` flags only when you are ready to start outbound Slack delivery.
 
    Runtime scripts load `.env` automatically from the repository root.
 
@@ -162,6 +164,10 @@ Useful endpoints:
 - `APP_BASE_URL=https://...` automatically enables secure cookies.
 - `UI_DEFAULT_LOCALE=pt-BR` makes Portuguese the server-side fallback when there is no saved language cookie and no matching browser language.
 - Leave `CODEX_API_KEY` empty to rely on existing Codex CLI login in local environments.
+- Phase 1 Slack delivery ships dark by default: keep `SLACK_ENABLED=false` through migration and initial event verification, then enable one named target and the desired `SLACK_NOTIFY_*` flags gradually.
+- Slack rollback is config-only for Phase 1: set `SLACK_ENABLED=false` to stop claims, sends, and stale-lock recovery while preserving the stored integration rows for later inspection or re-enable.
+- Re-enabling Slack later does not backfill historical ticket activity; only newly emitted events can create new target rows.
+- Invalid Slack-specific env values do not block web or worker startup; they surface as structured invalid-config state so outbound routing and delivery stay suppressed instead of taking the service down.
 - On Ubuntu 24.04, Codex read-only probing may require an AppArmor profile for `bwrap`; see the Ubuntu internal server guide.
 - `scripts/setup_postgres_local.sh` is intended for local localhost PostgreSQL only; it is not part of the cloud deployment path.
 - `WORKER_HEARTBEAT_SECONDS`, `AI_RUN_STALE_TIMEOUT_SECONDS`, and `AI_RUN_MAX_RECOVERY_ATTEMPTS` control stale-run detection and automatic recovery.
