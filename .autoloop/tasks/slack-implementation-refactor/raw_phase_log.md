@@ -970,3 +970,58 @@ phase_mode=single
 phase_ids=dm-persistence-runtime-foundation,admin-ui-and-user-mapping,emission-dm-recipient-routing,worker-dm-delivery-and-regression
 explicit=True
 current_phase_index=0
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=producer | cycle=1 | attempt=1 | thread_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+---
+provider=codex
+mode=start
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_producer.md
+session_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d7904-baf7-7a92-a9b6-e01aa9c3b48c
+---
+I’m implementing the phase-scoped Slack DM persistence/runtime foundation. First I’m reading the phase artifacts and the current Slack models/runtime paths so I can change the DB contract and runtime loading without pulling unrelated work into scope.
+
+I’ve confirmed the phase starts from the old webhook/env contract. Next I’m tracing the concrete code paths for models, migrations, config loading, and the worker/runtime boundary so I can replace the authoritative Slack path cleanly in one slice.
+
+I’ve identified the main blast radius: `shared/models.py`, the two Slack runtime modules, and the worker entrypoints. I’m reading the rest of those definitions now so the migration and new DB-backed runtime line up with existing constraints and logging patterns instead of inventing parallel state.
+
+The runtime loader is used in both request transactions and worker flows, so I need to change those call sites together. I’m checking the route and test harness patterns now to keep the new DB-backed loader compatible with existing session lifecycles and to avoid creating a second ambient-settings path.
+
+I’ve got the implementation shape now: keep `Settings` for app env primitives only, add a shared Slack DM module for DB-backed config/token/health, and make request and worker code load Slack config from the current DB session or cycle instead of startup env state. I’m patching the schema and model layer first, then I’ll swap the runtime constructors over to the new loader.
+
+The schema and runtime loader changes are in. I’m on the regression surface now: converting the config tests and the worker/request call sites so the repo consistently treats `SLACK_*` as non-authoritative while still letting unit tests inject Slack settings directly when needed.
+
+I’m at the validation stage. I’m checking for any remaining production call sites that still build Slack runtime from plain `Settings` instead of the current DB session or cycle, then I’ll run targeted tests around the new migration, token crypto, and runtime loaders.
+
+One targeted test set has a failure; the rest of the first batch is clearing. I’m pulling the traceback now and will patch the issue before I run the phase-focused set again.
+
+The foundation-specific tests are passing. I’m doing one more regression pass over the areas touched indirectly by the runtime loader change: settings validation, requester/ops workflow units, and Slack emission units that still inject test Slack settings manually.
+
+I’ve verified the foundation slice itself: migration, crypto, DB-backed loaders, and the worker/request runtime constructors. I’m doing the final housekeeping now: reviewing the diff, recording the non-obvious phase decisions, and updating the phase implementation notes with the validation results and the one environment blocker from the broader web-route suites.
+
+**Scope considered**
+Phase-local Slack DM foundation only: schema, DB-backed runtime loading, token crypto, and persisted delivery-health primitives. I left unrelated dirty files such as `README.md` and `tasks/slack_dm_integration_PRD.md` out of scope.
+
+**What I analyzed**
+I traced the current Slack path through [shared/config.py](/home/marcelo/code/AutoSac/shared/config.py), [shared/integrations.py](/home/marcelo/code/AutoSac/shared/integrations.py), [worker/slack_delivery.py](/home/marcelo/code/AutoSac/worker/slack_delivery.py), [worker/main.py](/home/marcelo/code/AutoSac/worker/main.py), the request/ops routes, the existing migrations, and the system-state bootstrap path.
+
+**What I changed**
+I added the phase migration in [20260410_0012_slack_dm_persistence_runtime_foundation.py](/home/marcelo/code/AutoSac/shared/migrations/versions/20260410_0012_slack_dm_persistence_runtime_foundation.py), updated [shared/models.py](/home/marcelo/code/AutoSac/shared/models.py) for `slack_dm_settings`, `users.slack_user_id`, and DM recipient fields, and introduced [shared/slack_dm.py](/home/marcelo/code/AutoSac/shared/slack_dm.py) for DB load/save, HKDF+Fernet token crypto, delivery-health persistence, and Slack Web API helpers.  
+I removed authoritative `SLACK_*` parsing from [shared/config.py](/home/marcelo/code/AutoSac/shared/config.py), changed [shared/integrations.py](/home/marcelo/code/AutoSac/shared/integrations.py) so runtime contexts can load Slack config from the current DB session, and rewired request/worker call sites in [app/routes_requester.py](/home/marcelo/code/AutoSac/app/routes_requester.py), [app/routes_ops.py](/home/marcelo/code/AutoSac/app/routes_ops.py), [worker/queue.py](/home/marcelo/code/AutoSac/worker/queue.py), [worker/triage.py](/home/marcelo/code/AutoSac/worker/triage.py), [worker/slack_delivery.py](/home/marcelo/code/AutoSac/worker/slack_delivery.py), and [worker/main.py](/home/marcelo/code/AutoSac/worker/main.py) so production paths no longer depend on startup env-backed Slack state.
+
+**Key findings / decisions**
+`Settings.slack` now acts only as defaults/test injection; PostgreSQL is the authoritative Slack DM runtime source for production request and worker flows.  
+I kept `integration_event_targets.target_kind` additive in this phase (`slack_webhook`, `slack_dm`) while adding recipient-coupling constraints, so the foundation can land cleanly without forcing partial recipient-routing or DM-send behavior early.  
+Validation passed for:
+- `python3 -m compileall shared app worker tests`
+- `python3 -m pytest tests/test_slack_dm_foundation.py tests/test_slack_delivery.py tests/test_ai_worker.py -q` -> `72 passed`
+- `python3 -m pytest tests/test_slack_event_emission.py tests/test_hardening_validation.py -q` -> `29 passed, 8 skipped`
+
+**Open issues / next step**
+The broader web-route suites in `tests/test_auth_requester.py` and `tests/test_ops_workflow.py` are blocked in this environment by missing installed deps (`python-multipart`, `bleach`), so I could not use them as regression signal here.  
+Next phase should build on this foundation for the admin Slack UI and user Slack ID management, then replace webhook-era recipient routing and delivery transport.

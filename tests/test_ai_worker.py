@@ -2427,11 +2427,13 @@ def test_emit_worker_heartbeat_initializes_system_state_defaults(monkeypatch, tm
 
     bootstrap_state = fake_db.objects[("SystemState", "bootstrap_version")]
     heartbeat_state = fake_db.objects[("SystemState", "worker_heartbeat")]
+    slack_health_state = fake_db.objects[("SystemState", "slack_dm_delivery_health")]
     assert fake_db.flush_calls == 1
     assert bootstrap_state.value_json == {"version": "stage1-v5"}
     assert heartbeat_state.value_json["status"] == "alive"
     assert heartbeat_state.value_json["worker_pid"] == 2222
     assert heartbeat_state.value_json["worker_instance_id"] == "worker-test"
+    assert slack_health_state.value_json == {"status": "unknown"}
 
 
 def test_emit_worker_heartbeat_updates_stale_bootstrap_version(monkeypatch, tmp_path):

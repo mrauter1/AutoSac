@@ -89,8 +89,8 @@ def recover_stale_runs(settings: Settings) -> int:
     stale_before = utc_now() - timedelta(seconds=settings.ai_run_stale_timeout_seconds)
     manifest_run_ids: list = []
     recovered_count = 0
-    slack_runtime = build_slack_runtime_context(settings)
     with session_scope(settings) as db:
+        slack_runtime = build_slack_runtime_context(settings, db=db)
         stale_runs = list(
             db.execute(
                 select(AIRun)

@@ -14,7 +14,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shared.config import Settings
+from shared.config import Settings, SlackSettings
 from shared.db import session_scope
 from shared.integrations import SlackRuntimeContext, build_slack_runtime_context
 from shared.logging import log_worker_event
@@ -124,16 +124,22 @@ def _worker_event_logger(_service: str, event: str, *, level: str = "info", **pa
     log_worker_event(event, level=level, **payload)
 
 
-def build_worker_slack_runtime_context(settings: Settings) -> SlackRuntimeContext:
+def build_worker_slack_runtime_context(
+    settings: Settings,
+    *,
+    db: Session | None = None,
+    slack: SlackSettings | None = None,
+) -> SlackRuntimeContext:
     return build_slack_runtime_context(
         settings,
+        db=db,
+        slack=slack,
         clock=utc_now,
         event_logger=_worker_event_logger,
     )
 
 
-def resolve_delivery_suppression(settings: Settings) -> DeliverySuppression | None:
-    slack = settings.slack
+def resolve_delivery_suppression(slack: SlackSettings) -> DeliverySuppression | None:
     if not slack.enabled:
         return DeliverySuppression(reason="slack_disabled")
     if not slack.is_valid:
@@ -173,7 +179,7 @@ def recover_stale_delivery_targets(
     *,
     slack_runtime: SlackRuntimeContext,
 ) -> list[IntegrationEventTarget]:
-    stale_before = slack_runtime.now() - timedelta(seconds=slack_runtime.settings.slack.delivery_stale_lock_seconds)
+    stale_before = slack_runtime.now() - timedelta(seconds=slack_runtime.slack.delivery_stale_lock_seconds)
     targets = list(
         db.execute(
             select(IntegrationEventTarget)
@@ -213,7 +219,7 @@ def claim_delivery_targets(
                 IntegrationEventTarget.next_attempt_at <= claimed_at,
             )
             .order_by(IntegrationEventTarget.next_attempt_at.asc(), IntegrationEventTarget.created_at.asc())
-            .limit(slack_runtime.settings.slack.delivery_batch_size)
+            .limit(slack_runtime.slack.delivery_batch_size)
             .with_for_update(skip_locked=True)
         ).scalars()
     )
@@ -355,8 +361,7 @@ def classify_delivery_attempt(
     claimed_target: ClaimedDeliveryTarget,
     send_webhook=send_slack_webhook,
 ) -> DeliveryOutcome:
-    settings = slack_runtime.settings
-    target = settings.slack.get_target(claimed_target.target_name)
+    target = slack_runtime.slack.get_target(claimed_target.target_name)
     if target is None:
         return DeliveryOutcome.dead_letter_terminal(
             last_error=_sanitize_operator_summary(
@@ -392,7 +397,7 @@ def classify_delivery_attempt(
         status_code = send_webhook(
             webhook_url=target.webhook_url,
             text=rendered_text,
-            timeout_seconds=settings.slack.http_timeout_seconds,
+            timeout_seconds=slack_runtime.slack.http_timeout_seconds,
         )
     except httpx.TransportError as exc:
         return _build_retryable_outcome(
@@ -447,8 +452,8 @@ def finalize_delivery_claim(
         )
 
 
-def run_delivery_cycle(slack_runtime: SlackRuntimeContext, *, worker_instance_id: str) -> None:
-    suppression = resolve_delivery_suppression(slack_runtime.settings)
+def _run_delivery_cycle_with_runtime(slack_runtime: SlackRuntimeContext, *, worker_instance_id: str) -> None:
+    suppression = resolve_delivery_suppression(slack_runtime.slack)
     if suppression is not None:
         if suppression.reason == "invalid_config":
             _log_delivery_suppression(slack_runtime, suppression)
@@ -481,14 +486,24 @@ def run_delivery_cycle(slack_runtime: SlackRuntimeContext, *, worker_instance_id
         )
 
 
+def run_delivery_cycle(slack_runtime: SlackRuntimeContext | Settings, *, worker_instance_id: str) -> None:
+    if isinstance(slack_runtime, SlackRuntimeContext):
+        _run_delivery_cycle_with_runtime(slack_runtime, worker_instance_id=worker_instance_id)
+        return
+    with session_scope(slack_runtime) as db:
+        cycle_runtime = build_worker_slack_runtime_context(slack_runtime, db=db)
+    _run_delivery_cycle_with_runtime(cycle_runtime, worker_instance_id=worker_instance_id)
+
+
 def delivery_loop(
-    slack_runtime: SlackRuntimeContext,
+    slack_runtime: SlackRuntimeContext | Settings,
     *,
     worker_instance_id: str,
     stop_event: threading.Event | None = None,
     interval_seconds: float | None = None,
 ) -> None:
-    resolved_interval_seconds = slack_runtime.settings.worker_poll_seconds if interval_seconds is None else interval_seconds
+    resolved_settings = slack_runtime.settings if isinstance(slack_runtime, SlackRuntimeContext) else slack_runtime
+    resolved_interval_seconds = resolved_settings.worker_poll_seconds if interval_seconds is None else interval_seconds
     while True:
         try:
             run_delivery_cycle(
@@ -566,7 +581,7 @@ def _build_retryable_outcome(
     failure_class: str,
     http_status: int | None = None,
 ) -> DeliveryOutcome:
-    if claimed_target.attempt_count >= slack_runtime.settings.slack.delivery_max_attempts:
+    if claimed_target.attempt_count >= slack_runtime.slack.delivery_max_attempts:
         return DeliveryOutcome.dead_letter_terminal(
             last_error=last_error,
             http_status=http_status,

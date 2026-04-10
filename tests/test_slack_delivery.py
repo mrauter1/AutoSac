@@ -1195,7 +1195,7 @@ def test_start_slack_delivery_thread_wires_worker_instance_id(monkeypatch, tmp_p
     assert isinstance(thread, _FakeThread)
     assert observed["target"] is not None
     assert observed["kwargs"]["worker_instance_id"] == "worker-test"
-    assert observed["kwargs"]["slack_runtime"].settings == settings
+    assert observed["kwargs"]["slack_runtime"] == settings
     assert observed["name"] == "worker-slack-delivery"
     assert observed["daemon"] is True
     assert observed["started"] is True

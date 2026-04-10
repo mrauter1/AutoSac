@@ -80,8 +80,8 @@ def build_requester_visible_fingerprint(context: LoadedTicketContext) -> str:
 
 
 def _prepare_run(settings: Settings, *, run_id, worker_instance_id: str) -> PreparedRunContext | None:
-    slack_runtime = build_slack_runtime_context(settings)
     with session_scope(settings) as db:
+        slack_runtime = build_slack_runtime_context(settings, db=db)
         run = load_owned_running_run(
             db,
             run_id=run_id,
@@ -294,9 +294,9 @@ def _apply_success_result(
     worker_instance_id: str,
     pipeline_result: PipelineExecutionResult,
 ) -> None:
-    slack_runtime = build_slack_runtime_context(settings)
     should_write_manifest = False
     with session_scope(settings) as db:
+        slack_runtime = build_slack_runtime_context(settings, db=db)
         run = load_owned_running_run(
             db,
             run_id=run_id,
@@ -423,9 +423,9 @@ def _failure_note_body(error_text: str) -> str:
 
 
 def _mark_failed(settings: Settings, *, run_id, worker_instance_id: str, error_text: str) -> None:
-    slack_runtime = build_slack_runtime_context(settings)
     should_write_manifest = False
     with session_scope(settings) as db:
+        slack_runtime = build_slack_runtime_context(settings, db=db)
         run = load_owned_running_run(
             db,
             run_id=run_id,

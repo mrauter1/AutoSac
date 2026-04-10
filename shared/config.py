@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import lru_cache
-import json
 from pathlib import Path
-import re
 from urllib.parse import urlparse
 import os
+import uuid
 
 from dotenv import load_dotenv
 
@@ -21,10 +21,6 @@ from shared.agent_specs import WORKSPACE_SKILLS_RELATIVE_DIR
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env", override=False)
-
-_SLACK_TARGET_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
-_ENV_TRUE_VALUES = {"1", "true", "yes", "on"}
-_ENV_FALSE_VALUES = {"0", "false", "no", "off"}
 
 SLACK_MESSAGE_PREVIEW_MAX_CHARS_DEFAULT = 200
 SLACK_HTTP_TIMEOUT_SECONDS_DEFAULT = 10
@@ -110,6 +106,15 @@ class SlackSettings:
     delivery_batch_size: int = SLACK_DELIVERY_BATCH_SIZE_DEFAULT
     delivery_max_attempts: int = SLACK_DELIVERY_MAX_ATTEMPTS_DEFAULT
     delivery_stale_lock_seconds: int = SLACK_DELIVERY_STALE_LOCK_SECONDS_DEFAULT
+    has_stored_token: bool = False
+    bot_token_ciphertext: str | None = field(default=None, repr=False)
+    team_id: str | None = None
+    team_name: str | None = None
+    bot_user_id: str | None = None
+    validated_at: datetime | None = None
+    updated_by_user_id: uuid.UUID | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
     is_valid: bool = True
     config_error_code: str | None = None
     config_error_summary: str | None = None
@@ -129,205 +134,6 @@ class SlackSettings:
             if target.name == target_name:
                 return target
         return None
-
-
-def _env_soft_bool(name: str, default: bool) -> tuple[bool, str | None, str | None]:
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return default, None, None
-    lowered = raw.strip().lower()
-    if lowered in _ENV_TRUE_VALUES:
-        return True, None, None
-    if lowered in _ENV_FALSE_VALUES:
-        return False, None, None
-    return default, f"{name.lower()}_invalid", f"{name} must be a boolean value"
-
-
-def _env_soft_int(
-    name: str,
-    default: int,
-    *,
-    minimum: int | None = None,
-    maximum: int | None = None,
-) -> tuple[int, str | None, str | None]:
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return default, None, None
-    try:
-        value = int(raw)
-    except ValueError:
-        return default, f"{name.lower()}_invalid", f"{name} must be an integer"
-    if minimum is not None and value < minimum:
-        return default, f"{name.lower()}_invalid", f"{name} must be greater than or equal to {minimum}"
-    if maximum is not None and value > maximum:
-        return default, f"{name.lower()}_invalid", f"{name} must be less than or equal to {maximum}"
-    return value, None, None
-
-
-def _is_valid_slack_webhook_url(value: str) -> bool:
-    if value == "" or value.isspace():
-        return False
-    if any(character.isspace() for character in value):
-        return False
-    parsed = urlparse(value)
-    if parsed.scheme.lower() != "https":
-        return False
-    if not parsed.netloc or not parsed.hostname:
-        return False
-    if parsed.username is not None or parsed.password is not None:
-        return False
-    if parsed.fragment:
-        return False
-    return True
-
-
-def _load_slack_settings() -> SlackSettings:
-    error_code: str | None = None
-    error_summary: str | None = None
-
-    def record_error(code: str | None, summary: str | None) -> None:
-        nonlocal error_code, error_summary
-        if code is None or summary is None or error_code is not None:
-            return
-        error_code = code
-        error_summary = summary
-
-    enabled, code, summary = _env_soft_bool("SLACK_ENABLED", False)
-    record_error(code, summary)
-    notify_ticket_created, code, summary = _env_soft_bool("SLACK_NOTIFY_TICKET_CREATED", False)
-    record_error(code, summary)
-    notify_public_message_added, code, summary = _env_soft_bool("SLACK_NOTIFY_PUBLIC_MESSAGE_ADDED", False)
-    record_error(code, summary)
-    notify_status_changed, code, summary = _env_soft_bool("SLACK_NOTIFY_STATUS_CHANGED", False)
-    record_error(code, summary)
-
-    message_preview_max_chars, code, summary = _env_soft_int(
-        "SLACK_MESSAGE_PREVIEW_MAX_CHARS",
-        SLACK_MESSAGE_PREVIEW_MAX_CHARS_DEFAULT,
-        minimum=4,
-    )
-    record_error(code, summary)
-    http_timeout_seconds, code, summary = _env_soft_int(
-        "SLACK_HTTP_TIMEOUT_SECONDS",
-        SLACK_HTTP_TIMEOUT_SECONDS_DEFAULT,
-        minimum=1,
-        maximum=30,
-    )
-    record_error(code, summary)
-    delivery_batch_size, code, summary = _env_soft_int(
-        "SLACK_DELIVERY_BATCH_SIZE",
-        SLACK_DELIVERY_BATCH_SIZE_DEFAULT,
-        minimum=1,
-    )
-    record_error(code, summary)
-    delivery_max_attempts, code, summary = _env_soft_int(
-        "SLACK_DELIVERY_MAX_ATTEMPTS",
-        SLACK_DELIVERY_MAX_ATTEMPTS_DEFAULT,
-        minimum=1,
-    )
-    record_error(code, summary)
-    delivery_stale_lock_seconds, code, summary = _env_soft_int(
-        "SLACK_DELIVERY_STALE_LOCK_SECONDS",
-        SLACK_DELIVERY_STALE_LOCK_SECONDS_DEFAULT,
-        minimum=1,
-    )
-    record_error(code, summary)
-
-    if delivery_stale_lock_seconds <= http_timeout_seconds:
-        record_error(
-            "slack_delivery_stale_lock_seconds_invalid",
-            "SLACK_DELIVERY_STALE_LOCK_SECONDS must be greater than SLACK_HTTP_TIMEOUT_SECONDS",
-        )
-
-    targets_payload: dict[str, object] = {}
-    raw_targets = os.environ.get("SLACK_TARGETS_JSON")
-    if raw_targets is None or raw_targets.strip() == "":
-        if enabled:
-            record_error(
-                "slack_targets_json_missing",
-                "SLACK_TARGETS_JSON is required when SLACK_ENABLED=true",
-            )
-    else:
-        try:
-            parsed_targets = json.loads(raw_targets)
-        except json.JSONDecodeError:
-            record_error("slack_targets_json_parse_error", "SLACK_TARGETS_JSON must be a valid JSON object")
-        else:
-            if not isinstance(parsed_targets, dict):
-                record_error("slack_targets_json_not_object", "SLACK_TARGETS_JSON must decode to a JSON object")
-            else:
-                targets_payload = parsed_targets
-
-    parsed_targets_list: list[SlackTargetSettings] = []
-    for target_name, target_value in targets_payload.items():
-        if not isinstance(target_name, str) or _SLACK_TARGET_NAME_RE.fullmatch(target_name) is None:
-            record_error("slack_target_name_invalid", "SLACK_TARGETS_JSON contains an invalid target name")
-            continue
-        if not isinstance(target_value, dict):
-            record_error("slack_target_entry_invalid", f"Slack target {target_name} must be a JSON object")
-            continue
-        target_enabled = target_value.get("enabled")
-        if not isinstance(target_enabled, bool):
-            record_error("slack_target_enabled_invalid", f"Slack target {target_name} must define boolean enabled")
-            continue
-        webhook_url = target_value.get("webhook_url")
-        if not isinstance(webhook_url, str) or not _is_valid_slack_webhook_url(webhook_url):
-            record_error(
-                "slack_target_webhook_url_invalid",
-                f"Slack target {target_name} must define a valid absolute HTTPS webhook_url",
-            )
-            continue
-        parsed_targets_list.append(
-            SlackTargetSettings(
-                name=target_name,
-                enabled=target_enabled,
-                webhook_url=webhook_url,
-            )
-        )
-
-    default_target_name_raw = os.environ.get("SLACK_DEFAULT_TARGET_NAME")
-    default_target_name = None
-    if default_target_name_raw is not None and default_target_name_raw.strip() != "":
-        default_target_name = default_target_name_raw
-
-    any_notify_enabled = (
-        notify_ticket_created
-        or notify_public_message_added
-        or notify_status_changed
-    )
-    if enabled and any_notify_enabled:
-        if default_target_name_raw is None or default_target_name_raw.strip() == "":
-            record_error(
-                "slack_default_target_missing",
-                "SLACK_DEFAULT_TARGET_NAME is required when Slack delivery and any SLACK_NOTIFY_* flag are enabled",
-            )
-        elif _SLACK_TARGET_NAME_RE.fullmatch(default_target_name_raw) is None:
-            record_error(
-                "slack_default_target_invalid",
-                "SLACK_DEFAULT_TARGET_NAME must match ^[a-z0-9_-]+$",
-            )
-        elif not any(target.name == default_target_name_raw for target in parsed_targets_list):
-            record_error(
-                "slack_default_target_not_found",
-                "SLACK_DEFAULT_TARGET_NAME must reference a target defined in SLACK_TARGETS_JSON",
-            )
-
-    return SlackSettings(
-        enabled=enabled,
-        default_target_name=default_target_name,
-        targets=tuple(parsed_targets_list),
-        notify_ticket_created=notify_ticket_created,
-        notify_public_message_added=notify_public_message_added,
-        notify_status_changed=notify_status_changed,
-        message_preview_max_chars=message_preview_max_chars,
-        http_timeout_seconds=http_timeout_seconds,
-        delivery_batch_size=delivery_batch_size,
-        delivery_max_attempts=delivery_max_attempts,
-        delivery_stale_lock_seconds=delivery_stale_lock_seconds,
-        is_valid=error_code is None,
-        config_error_code=error_code,
-        config_error_summary=error_summary,
-    )
 
 
 @dataclass(frozen=True)
@@ -423,7 +229,7 @@ def get_settings() -> Settings:
         ai_run_stale_timeout_seconds=_env_int("AI_RUN_STALE_TIMEOUT_SECONDS", 300),
         ai_run_max_recovery_attempts=_env_int("AI_RUN_MAX_RECOVERY_ATTEMPTS", 3),
         default_ui_locale=get_default_ui_locale(),
-        slack=_load_slack_settings(),
+        slack=SlackSettings(),
     )
     settings.validate_contracts()
     return settings

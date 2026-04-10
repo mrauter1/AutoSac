@@ -287,7 +287,7 @@ async def requester_ticket_create(
         )
 
     saved_paths: list[Path] = []
-    slack_runtime = build_slack_runtime_context(settings)
+    slack_runtime = build_slack_runtime_context(settings, db=db)
     try:
         ticket, _, persisted_attachments, _ = create_requester_ticket(
             db,
@@ -389,7 +389,7 @@ async def requester_ticket_reply(
         )
 
     saved_paths: list[Path] = []
-    slack_runtime = build_slack_runtime_context(settings)
+    slack_runtime = build_slack_runtime_context(settings, db=db)
     try:
         _, persisted_attachments, _ = add_requester_reply(
             db,
@@ -428,7 +428,7 @@ def requester_ticket_resolve(
     ticket = _load_requester_ticket_or_404(db, reference=reference, requester_id=current_user.id)
     resolve_ticket_for_requester(
         db,
-        slack_runtime=build_slack_runtime_context(settings),
+        slack_runtime=build_slack_runtime_context(settings, db=db),
         ticket=ticket,
         requester=current_user,
     )

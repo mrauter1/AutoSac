@@ -776,7 +776,7 @@ def ops_set_ticket_status(
     try:
         set_ticket_status_for_ops(
             db,
-            slack_runtime=build_slack_runtime_context(settings),
+            slack_runtime=build_slack_runtime_context(settings, db=db),
             ticket=ticket,
             actor=current_user,
             next_status=next_status.strip(),
@@ -807,7 +807,7 @@ def ops_reply_public(
     try:
         add_ops_public_reply(
             db,
-            slack_runtime=build_slack_runtime_context(settings),
+            slack_runtime=build_slack_runtime_context(settings, db=db),
             ticket=ticket,
             actor=current_user,
             body_markdown=body.strip(),
@@ -854,7 +854,7 @@ def ops_rerun_ai(
     route_target_value, forced_specialist_id = _resolve_manual_rerun_specialist_override(forced_route_target_id)
     request_manual_rerun(
         db,
-        slack_runtime=build_slack_runtime_context(settings),
+        slack_runtime=build_slack_runtime_context(settings, db=db),
         ticket=ticket,
         actor=current_user,
         forced_route_target_id=route_target_value,
@@ -882,7 +882,7 @@ def ops_approve_publish_draft(
     try:
         publish_ai_draft_for_ops(
             db,
-            slack_runtime=build_slack_runtime_context(settings),
+            slack_runtime=build_slack_runtime_context(settings, db=db),
             ticket=ticket,
             draft=draft,
             actor=current_user,

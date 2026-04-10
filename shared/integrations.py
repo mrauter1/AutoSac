@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from shared.config import Settings
+from shared.config import Settings, SlackSettings
 from shared.logging import log_event
 from shared.models import (
     IntegrationEvent,
@@ -20,6 +20,7 @@ from shared.models import (
     TicketMessage,
     TicketStatusHistory,
 )
+from shared.slack_dm import load_slack_dm_settings
 from shared.security import utc_now
 
 INTEGRATION_ROUTING_RESULTS = (
@@ -31,9 +32,9 @@ INTEGRATION_ROUTING_RESULTS = (
 )
 
 _EVENT_TYPE_TO_NOTIFY_ENABLED = {
-    "ticket.created": lambda settings: settings.slack.notify_ticket_created,
-    "ticket.public_message_added": lambda settings: settings.slack.notify_public_message_added,
-    "ticket.status_changed": lambda settings: settings.slack.notify_status_changed,
+    "ticket.created": lambda slack: slack.notify_ticket_created,
+    "ticket.public_message_added": lambda slack: slack.notify_public_message_added,
+    "ticket.status_changed": lambda slack: slack.notify_status_changed,
 }
 _WHITESPACE_RE = re.compile(r"\s+", re.UNICODE)
 
@@ -49,6 +50,7 @@ class RoutingDecision:
 @dataclass(frozen=True)
 class SlackRuntimeContext:
     settings: Settings
+    slack: SlackSettings
     clock: Callable[[], object] = utc_now
     event_logger: Callable[..., None] = log_event
 
@@ -69,11 +71,17 @@ class EmissionResult:
 def build_slack_runtime_context(
     settings: Settings,
     *,
+    db: Session | None = None,
+    slack: SlackSettings | None = None,
     clock: Callable[[], object] = utc_now,
     event_logger: Callable[..., None] = log_event,
 ) -> SlackRuntimeContext:
+    resolved_slack = slack or (
+        load_slack_dm_settings(db, app_settings=settings) if db is not None and hasattr(db, "get") else settings.slack
+    )
     return SlackRuntimeContext(
         settings=settings,
+        slack=resolved_slack,
         clock=clock,
         event_logger=event_logger,
     )
@@ -112,7 +120,9 @@ def build_ticket_public_message_payload(
     *,
     ticket: Ticket,
     message: TicketMessage,
+    slack: SlackSettings | None = None,
 ) -> dict[str, str]:
+    resolved_slack = slack or settings.slack
     payload = _build_common_payload(settings, ticket=ticket, occurred_at=message.created_at)
     payload.update(
         message_id=str(message.id),
@@ -120,7 +130,7 @@ def build_ticket_public_message_payload(
         message_source=message.source,
         message_preview=build_message_preview(
             message.body_text,
-            max_chars=settings.slack.message_preview_max_chars,
+            max_chars=resolved_slack.message_preview_max_chars,
         ),
     )
     return payload
@@ -184,6 +194,7 @@ def record_ticket_public_message_added_event(
             slack_runtime.settings,
             ticket=ticket,
             message=message,
+            slack=slack_runtime.slack,
         ),
         links=(
             ("ticket", ticket.id, "primary"),
@@ -245,8 +256,7 @@ def load_integration_event_targets(db: Session, *, event_id) -> list[Integration
     return []
 
 
-def resolve_routing_decision(settings: Settings, *, event_type: str) -> RoutingDecision:
-    slack = settings.slack
+def resolve_routing_decision(slack: SlackSettings, *, event_type: str) -> RoutingDecision:
     if not slack.enabled:
         return RoutingDecision(routing_result="suppressed_slack_disabled")
     if not slack.is_valid:
@@ -255,7 +265,7 @@ def resolve_routing_decision(settings: Settings, *, event_type: str) -> RoutingD
             config_error_code=slack.config_error_code,
             config_error_summary=slack.config_error_summary,
         )
-    notify_enabled = _EVENT_TYPE_TO_NOTIFY_ENABLED[event_type](settings)
+    notify_enabled = _EVENT_TYPE_TO_NOTIFY_ENABLED[event_type](slack)
     if not notify_enabled:
         return RoutingDecision(routing_result="suppressed_notify_disabled")
     target = slack.get_target(slack.default_target_name)
@@ -300,7 +310,7 @@ def _record_integration_event(
     payload_json: dict[str, object],
     links: tuple[tuple[str, uuid.UUID, str], ...],
 ) -> EmissionResult:
-    routing = resolve_routing_decision(slack_runtime.settings, event_type=event_type)
+    routing = resolve_routing_decision(slack_runtime.slack, event_type=event_type)
     existing_event = load_integration_event_by_dedupe_key(db, dedupe_key=dedupe_key)
     if existing_event is not None:
         result = _build_duplicate_result(db, event=existing_event)
