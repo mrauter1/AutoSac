@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from shared.config import Settings
 from shared.integrations import (
+    SlackRuntimeContext,
     record_ticket_created_event,
     record_ticket_public_message_added_event,
     record_ticket_status_changed_event,
@@ -58,6 +59,7 @@ def touch_ticket(ticket: Ticket, when=None) -> None:
 def record_status_change(
     db: Session,
     *,
+    slack_runtime: SlackRuntimeContext,
     ticket: Ticket,
     to_status: str,
     changed_by_type: str,
@@ -82,7 +84,12 @@ def record_status_change(
     ticket.status = to_status
     ticket.resolved_at = event_time if to_status == "resolved" else None
     ticket.updated_at = event_time
-    record_ticket_status_changed_event(db, ticket=ticket, history=history)
+    record_ticket_status_changed_event(
+        db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        history=history,
+    )
     return history
 
 
@@ -284,6 +291,7 @@ def _create_public_message(
 def _apply_ai_status(
     db: Session,
     *,
+    slack_runtime: SlackRuntimeContext,
     ticket: Ticket,
     to_status: str,
     last_ai_action: str,
@@ -292,6 +300,7 @@ def _apply_ai_status(
     if ticket.status != to_status:
         record_status_change(
             db,
+            slack_runtime=slack_runtime,
             ticket=ticket,
             to_status=to_status,
             changed_by_type="ai",
@@ -339,6 +348,7 @@ def create_requester_ticket(
     db: Session,
     *,
     settings: Settings,
+    slack_runtime: SlackRuntimeContext,
     requester: User,
     title: str,
     description_markdown: str,
@@ -388,6 +398,7 @@ def create_requester_ticket(
     )
     record_status_change(
         db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         to_status="new",
         changed_by_type="requester",
@@ -398,7 +409,7 @@ def create_requester_ticket(
     upsert_ticket_view(db, user_id=requester.id, ticket_id=ticket.id, viewed_at=created_at)
     record_ticket_created_event(
         db,
-        settings=settings,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         initial_message=message,
     )
@@ -409,6 +420,7 @@ def add_requester_reply(
     db: Session,
     *,
     settings: Settings,
+    slack_runtime: SlackRuntimeContext,
     ticket: Ticket,
     requester: User,
     body_markdown: str,
@@ -439,6 +451,7 @@ def add_requester_reply(
     if ticket.status != "ai_triage":
         record_status_change(
             db,
+            slack_runtime=slack_runtime,
             ticket=ticket,
             to_status="ai_triage",
             changed_by_type="requester",
@@ -458,7 +471,7 @@ def add_requester_reply(
     upsert_ticket_view(db, user_id=requester.id, ticket_id=ticket.id, viewed_at=created_at)
     record_ticket_public_message_added_event(
         db,
-        settings=settings,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         message=message,
     )
@@ -516,6 +529,7 @@ def publish_ai_failure_note(
 def publish_ai_public_reply(
     db: Session,
     *,
+    slack_runtime: SlackRuntimeContext,
     ticket: Ticket,
     ai_run_id: uuid.UUID,
     body_markdown: str,
@@ -540,6 +554,7 @@ def publish_ai_public_reply(
         ticket.clarification_rounds += 1
     _apply_ai_status(
         db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         to_status=next_status,
         last_ai_action=last_ai_action,
@@ -547,6 +562,7 @@ def publish_ai_public_reply(
     )
     record_ticket_public_message_added_event(
         db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         message=message,
     )
@@ -556,6 +572,7 @@ def publish_ai_public_reply(
 def create_ai_draft(
     db: Session,
     *,
+    slack_runtime: SlackRuntimeContext,
     ticket: Ticket,
     ai_run_id: uuid.UUID,
     body_markdown: str,
@@ -578,6 +595,7 @@ def create_ai_draft(
     supersede_pending_drafts(db, ticket.id, keep_draft_id=draft.id)
     _apply_ai_status(
         db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         to_status=next_status,
         last_ai_action=last_ai_action,
@@ -589,6 +607,7 @@ def create_ai_draft(
 def route_ticket_after_ai(
     db: Session,
     *,
+    slack_runtime: SlackRuntimeContext,
     ticket: Ticket,
     next_status: str,
     last_ai_action: str,
@@ -597,6 +616,7 @@ def route_ticket_after_ai(
     routed_at = created_at or utc_now()
     _apply_ai_status(
         db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         to_status=next_status,
         last_ai_action=last_ai_action,
@@ -624,11 +644,18 @@ def process_deferred_requeue(db: Session, *, ticket: Ticket) -> AIRun | None:
     return run
 
 
-def resolve_ticket_for_requester(db: Session, *, ticket: Ticket, requester: User) -> None:
+def resolve_ticket_for_requester(
+    db: Session,
+    *,
+    slack_runtime: SlackRuntimeContext,
+    ticket: Ticket,
+    requester: User,
+) -> None:
     resolved_at = utc_now()
     if ticket.status != "resolved":
         record_status_change(
             db,
+            slack_runtime=slack_runtime,
             ticket=ticket,
             to_status="resolved",
             changed_by_type="requester",
@@ -641,6 +668,7 @@ def resolve_ticket_for_requester(db: Session, *, ticket: Ticket, requester: User
 def add_ops_public_reply(
     db: Session,
     *,
+    slack_runtime: SlackRuntimeContext,
     ticket: Ticket,
     actor: User,
     body_markdown: str,
@@ -664,6 +692,7 @@ def add_ops_public_reply(
     if next_status == "ai_triage":
         request_manual_rerun(
             db,
+            slack_runtime=slack_runtime,
             ticket=ticket,
             actor=actor,
             forced_route_target_id=forced_route_target_id,
@@ -671,6 +700,7 @@ def add_ops_public_reply(
         )
         record_ticket_public_message_added_event(
             db,
+            slack_runtime=slack_runtime,
             ticket=ticket,
             message=message,
         )
@@ -678,6 +708,7 @@ def add_ops_public_reply(
     if ticket.status != next_status:
         record_status_change(
             db,
+            slack_runtime=slack_runtime,
             ticket=ticket,
             to_status=next_status,
             changed_by_type="dev_ti",
@@ -689,6 +720,7 @@ def add_ops_public_reply(
     upsert_ticket_view(db, user_id=actor.id, ticket_id=ticket.id, viewed_at=created_at)
     record_ticket_public_message_added_event(
         db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         message=message,
     )
@@ -736,6 +768,7 @@ def assign_ticket_for_ops(
 def set_ticket_status_for_ops(
     db: Session,
     *,
+    slack_runtime: SlackRuntimeContext,
     ticket: Ticket,
     actor: User,
     next_status: str,
@@ -744,12 +777,13 @@ def set_ticket_status_for_ops(
     if next_status not in TICKET_STATUSES:
         raise ValueError(f"Invalid ticket status: {next_status}")
     if next_status == "ai_triage":
-        request_manual_rerun(db, ticket=ticket, actor=actor)
+        request_manual_rerun(db, slack_runtime=slack_runtime, ticket=ticket, actor=actor)
         return
     changed_at = utc_now()
     if ticket.status != next_status:
         record_status_change(
             db,
+            slack_runtime=slack_runtime,
             ticket=ticket,
             to_status=next_status,
             changed_by_type="dev_ti",
@@ -763,6 +797,7 @@ def set_ticket_status_for_ops(
 def request_manual_rerun(
     db: Session,
     *,
+    slack_runtime: SlackRuntimeContext,
     ticket: Ticket,
     actor: User,
     forced_route_target_id: str | None = None,
@@ -801,6 +836,7 @@ def request_manual_rerun(
     if ticket.status != "ai_triage":
         record_status_change(
             db,
+            slack_runtime=slack_runtime,
             ticket=ticket,
             to_status="ai_triage",
             changed_by_type="dev_ti",
@@ -816,6 +852,7 @@ def request_manual_rerun(
 def publish_ai_draft_for_ops(
     db: Session,
     *,
+    slack_runtime: SlackRuntimeContext,
     ticket: Ticket,
     draft: AIDraft,
     actor: User,
@@ -845,6 +882,7 @@ def publish_ai_draft_for_ops(
     if ticket.status != next_status:
         record_status_change(
             db,
+            slack_runtime=slack_runtime,
             ticket=ticket,
             to_status=next_status,
             changed_by_type="dev_ti",
@@ -856,6 +894,7 @@ def publish_ai_draft_for_ops(
     upsert_ticket_view(db, user_id=actor.id, ticket_id=ticket.id, viewed_at=published_at)
     record_ticket_public_message_added_event(
         db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         message=message,
     )

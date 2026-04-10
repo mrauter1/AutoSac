@@ -234,6 +234,10 @@ class IntegrationEvent(Base):
     aggregate_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     dedupe_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    routing_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    routing_target_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    routing_config_error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    routing_config_error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
 
 
@@ -300,6 +304,7 @@ class IntegrationEventTarget(Base):
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     locked_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     dead_lettered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

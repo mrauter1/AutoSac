@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from contextlib import nullcontext
 import re
@@ -29,7 +30,6 @@ INTEGRATION_ROUTING_RESULTS = (
     "suppressed_target_disabled",
 )
 
-_PRESERVED_ROUTING_PAYLOAD_KEY = "_integration_routing"
 _EVENT_TYPE_TO_NOTIFY_ENABLED = {
     "ticket.created": lambda settings: settings.slack.notify_ticket_created,
     "ticket.public_message_added": lambda settings: settings.slack.notify_public_message_added,
@@ -47,6 +47,16 @@ class RoutingDecision:
 
 
 @dataclass(frozen=True)
+class SlackRuntimeContext:
+    settings: Settings
+    clock: Callable[[], object] = utc_now
+    event_logger: Callable[..., None] = log_event
+
+    def now(self):
+        return self.clock()
+
+
+@dataclass(frozen=True)
 class EmissionResult:
     event: IntegrationEvent
     routing_result: str
@@ -56,15 +66,17 @@ class EmissionResult:
     event_reused: bool = False
 
 
-def resolve_integration_settings(db: Session, settings: Settings | None = None) -> Settings | None:
-    if settings is not None:
-        return settings
-    info = getattr(db, "info", None)
-    if isinstance(info, dict):
-        resolved = info.get("settings")
-        if isinstance(resolved, Settings):
-            return resolved
-    return None
+def build_slack_runtime_context(
+    settings: Settings,
+    *,
+    clock: Callable[[], object] = utc_now,
+    event_logger: Callable[..., None] = log_event,
+) -> SlackRuntimeContext:
+    return SlackRuntimeContext(
+        settings=settings,
+        clock=clock,
+        event_logger=event_logger,
+    )
 
 
 def normalize_app_base_url(app_base_url: str) -> str:
@@ -131,21 +143,18 @@ def build_ticket_status_changed_payload(
 def record_ticket_created_event(
     db: Session,
     *,
-    settings: Settings | None,
+    slack_runtime: SlackRuntimeContext,
     ticket: Ticket,
     initial_message: TicketMessage,
-) -> EmissionResult | None:
-    resolved_settings = resolve_integration_settings(db, settings)
-    if resolved_settings is None:
-        return None
+) -> EmissionResult:
     return _record_integration_event(
         db,
-        settings=resolved_settings,
+        slack_runtime=slack_runtime,
         event_type="ticket.created",
         ticket=ticket,
         dedupe_key=f"ticket.created:{ticket.id}",
         payload_json=build_ticket_created_payload(
-            resolved_settings,
+            slack_runtime.settings,
             ticket=ticket,
             occurred_at=ticket.created_at,
         ),
@@ -159,23 +168,20 @@ def record_ticket_created_event(
 def record_ticket_public_message_added_event(
     db: Session,
     *,
-    settings: Settings | None = None,
+    slack_runtime: SlackRuntimeContext,
     ticket: Ticket,
     message: TicketMessage,
 ) -> EmissionResult | None:
     if message.visibility != "public" or message.source == "ticket_create":
         return None
-    resolved_settings = resolve_integration_settings(db, settings)
-    if resolved_settings is None:
-        return None
     return _record_integration_event(
         db,
-        settings=resolved_settings,
+        slack_runtime=slack_runtime,
         event_type="ticket.public_message_added",
         ticket=ticket,
         dedupe_key=f"ticket.public_message_added:{message.id}",
         payload_json=build_ticket_public_message_payload(
-            resolved_settings,
+            slack_runtime.settings,
             ticket=ticket,
             message=message,
         ),
@@ -189,23 +195,20 @@ def record_ticket_public_message_added_event(
 def record_ticket_status_changed_event(
     db: Session,
     *,
-    settings: Settings | None = None,
+    slack_runtime: SlackRuntimeContext,
     ticket: Ticket,
     history: TicketStatusHistory,
 ) -> EmissionResult | None:
     if history.from_status is None or history.from_status == history.to_status:
         return None
-    resolved_settings = resolve_integration_settings(db, settings)
-    if resolved_settings is None:
-        return None
     return _record_integration_event(
         db,
-        settings=resolved_settings,
+        slack_runtime=slack_runtime,
         event_type="ticket.status_changed",
         ticket=ticket,
         dedupe_key=f"ticket.status_changed:{history.id}",
         payload_json=build_ticket_status_changed_payload(
-            resolved_settings,
+            slack_runtime.settings,
             ticket=ticket,
             history=history,
         ),
@@ -290,19 +293,19 @@ def _build_common_payload(
 def _record_integration_event(
     db: Session,
     *,
-    settings: Settings,
+    slack_runtime: SlackRuntimeContext,
     event_type: str,
     ticket: Ticket,
     dedupe_key: str,
     payload_json: dict[str, object],
     links: tuple[tuple[str, uuid.UUID, str], ...],
 ) -> EmissionResult:
-    routing = resolve_routing_decision(settings, event_type=event_type)
-    persisted_payload = _with_preserved_routing_metadata(payload_json, routing=routing)
+    routing = resolve_routing_decision(slack_runtime.settings, event_type=event_type)
     existing_event = load_integration_event_by_dedupe_key(db, dedupe_key=dedupe_key)
     if existing_event is not None:
-        result = _build_duplicate_result(db, event=existing_event, routing=routing)
+        result = _build_duplicate_result(db, event=existing_event)
         _log_emission(
+            slack_runtime,
             result,
             ticket=ticket,
             event_type=event_type,
@@ -310,6 +313,7 @@ def _record_integration_event(
         )
         return result
 
+    recorded_at = slack_runtime.now()
     event = IntegrationEvent(
         id=uuid.uuid4(),
         source_system="autosac",
@@ -317,8 +321,12 @@ def _record_integration_event(
         aggregate_type="ticket",
         aggregate_id=ticket.id,
         dedupe_key=dedupe_key,
-        payload_json=persisted_payload,
-        created_at=utc_now(),
+        payload_json=payload_json,
+        routing_result=routing.routing_result,
+        routing_target_name=routing.target_name,
+        routing_config_error_code=routing.config_error_code,
+        routing_config_error_summary=routing.config_error_summary,
+        created_at=recorded_at,
     )
     try:
         nested_transaction = db.begin_nested() if hasattr(db, "begin_nested") else nullcontext()
@@ -331,8 +339,9 @@ def _record_integration_event(
         existing_event = load_integration_event_by_dedupe_key(db, dedupe_key=dedupe_key)
         if existing_event is None:
             raise
-        result = _build_duplicate_result(db, event=existing_event, routing=routing)
+        result = _build_duplicate_result(db, event=existing_event)
         _log_emission(
+            slack_runtime,
             result,
             ticket=ticket,
             event_type=event_type,
@@ -348,7 +357,7 @@ def _record_integration_event(
                 entity_type=entity_type,
                 entity_id=entity_id,
                 relation_kind=relation_kind,
-                created_at=utc_now(),
+                created_at=recorded_at,
             )
         )
     if routing.routing_result == "created" and routing.target_name is not None:
@@ -360,8 +369,8 @@ def _record_integration_event(
                 target_kind="slack_webhook",
                 delivery_status="pending",
                 attempt_count=0,
-                next_attempt_at=utc_now(),
-                created_at=utc_now(),
+                next_attempt_at=recorded_at,
+                created_at=recorded_at,
             )
         )
 
@@ -374,6 +383,7 @@ def _record_integration_event(
         event_reused=False,
     )
     _log_emission(
+        slack_runtime,
         result,
         ticket=ticket,
         event_type=event_type,
@@ -386,7 +396,6 @@ def _build_duplicate_result(
     db: Session,
     *,
     event: IntegrationEvent,
-    routing: RoutingDecision,
 ) -> EmissionResult:
     existing_targets = load_integration_event_targets(db, event_id=event.id)
     if existing_targets:
@@ -396,8 +405,10 @@ def _build_duplicate_result(
             target_name=existing_targets[0].target_name,
             event_reused=True,
         )
-    preserved_routing = _extract_preserved_routing(event)
-    selected_routing = _safe_zero_target_duplicate_routing(preserved_routing or routing)
+    preserved_routing = _routing_decision_from_event(event)
+    selected_routing = _safe_zero_target_duplicate_routing(
+        preserved_routing or RoutingDecision(routing_result="suppressed_notify_disabled")
+    )
     return EmissionResult(
         event=event,
         routing_result=selected_routing.routing_result,
@@ -413,41 +424,17 @@ def _is_dedupe_integrity_error(exc: IntegrityError) -> bool:
     return "dedupe_key" in message or "uq_integration_events_dedupe_key" in message
 
 
-def _with_preserved_routing_metadata(
-    payload_json: dict[str, object],
-    *,
-    routing: RoutingDecision,
-) -> dict[str, object]:
-    metadata: dict[str, object] = {"routing_result": routing.routing_result}
-    if routing.target_name is not None:
-        metadata["target_name"] = routing.target_name
-    if routing.config_error_code is not None:
-        metadata["config_error_code"] = routing.config_error_code
-    if routing.config_error_summary is not None:
-        metadata["config_error_summary"] = routing.config_error_summary
-    return {
-        **payload_json,
-        _PRESERVED_ROUTING_PAYLOAD_KEY: metadata,
-    }
-
-
-def _extract_preserved_routing(event: IntegrationEvent) -> RoutingDecision | None:
-    payload_json = getattr(event, "payload_json", None)
-    if not isinstance(payload_json, dict):
-        return None
-    metadata = payload_json.get(_PRESERVED_ROUTING_PAYLOAD_KEY)
-    if not isinstance(metadata, dict):
-        return None
-    routing_result = metadata.get("routing_result")
+def _routing_decision_from_event(event: IntegrationEvent) -> RoutingDecision | None:
+    routing_result = getattr(event, "routing_result", None)
     if routing_result not in INTEGRATION_ROUTING_RESULTS:
         return None
-    target_name = metadata.get("target_name")
+    target_name = getattr(event, "routing_target_name", None)
     if target_name is not None and not isinstance(target_name, str):
         return None
-    config_error_code = metadata.get("config_error_code")
+    config_error_code = getattr(event, "routing_config_error_code", None)
     if config_error_code is not None and not isinstance(config_error_code, str):
         return None
-    config_error_summary = metadata.get("config_error_summary")
+    config_error_summary = getattr(event, "routing_config_error_summary", None)
     if config_error_summary is not None and not isinstance(config_error_summary, str):
         return None
     return RoutingDecision(
@@ -465,6 +452,7 @@ def _safe_zero_target_duplicate_routing(routing: RoutingDecision) -> RoutingDeci
 
 
 def _log_emission(
+    slack_runtime: SlackRuntimeContext,
     result: EmissionResult,
     *,
     ticket: Ticket,
@@ -486,4 +474,4 @@ def _log_emission(
         payload["config_error_summary"] = result.config_error_summary
     if result.event_reused:
         payload["event_reused"] = True
-    log_event("integration", "integration_event_recorded", **payload)
+    slack_runtime.event_logger("integration", "integration_event_recorded", **payload)

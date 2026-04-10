@@ -2671,7 +2671,7 @@ def test_recover_stale_runs_routes_ticket_when_retry_budget_is_exhausted(monkeyp
     )
     monkeypatch.setattr(
         "worker.queue.record_status_change",
-        lambda db, ticket, to_status, changed_by_type, changed_at: observed["status_changes"].append((ticket.status, to_status, changed_by_type)) or setattr(ticket, "status", to_status),
+        lambda db, ticket, to_status, changed_by_type, changed_at, **kwargs: observed["status_changes"].append((ticket.status, to_status, changed_by_type)) or setattr(ticket, "status", to_status),
     )
     monkeypatch.setattr("worker.queue.write_run_manifest_snapshot", lambda *args, **kwargs: None)
 

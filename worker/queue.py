@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from shared.config import Settings
 from shared.db import session_scope
+from shared.integrations import build_slack_runtime_context
 from shared.logging import log_worker_event
 from shared.models import AIRun, AIRunStep, Ticket
 from shared.security import utc_now
@@ -88,6 +89,7 @@ def recover_stale_runs(settings: Settings) -> int:
     stale_before = utc_now() - timedelta(seconds=settings.ai_run_stale_timeout_seconds)
     manifest_run_ids: list = []
     recovered_count = 0
+    slack_runtime = build_slack_runtime_context(settings)
     with session_scope(settings) as db:
         stale_runs = list(
             db.execute(
@@ -139,6 +141,7 @@ def recover_stale_runs(settings: Settings) -> int:
                 if ticket.status != "waiting_on_dev_ti":
                     record_status_change(
                         db,
+                        slack_runtime=slack_runtime,
                         ticket=ticket,
                         to_status="waiting_on_dev_ti",
                         changed_by_type="system",

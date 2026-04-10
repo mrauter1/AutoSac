@@ -9,6 +9,7 @@ import uuid
 from shared.agent_specs import PIPELINE_VERSION
 from shared.config import Settings
 from shared.db import session_scope
+from shared.integrations import build_slack_runtime_context
 from shared.logging import log_worker_event
 from shared.models import AIRun, Ticket
 from shared.permissions import ADMIN_ROLE, DEV_TI_ROLE
@@ -79,6 +80,7 @@ def build_requester_visible_fingerprint(context: LoadedTicketContext) -> str:
 
 
 def _prepare_run(settings: Settings, *, run_id, worker_instance_id: str) -> PreparedRunContext | None:
+    slack_runtime = build_slack_runtime_context(settings)
     with session_scope(settings) as db:
         run = load_owned_running_run(
             db,
@@ -108,6 +110,7 @@ def _prepare_run(settings: Settings, *, run_id, worker_instance_id: str) -> Prep
         if context.ticket.status != "ai_triage":
             record_status_change(
                 db,
+                slack_runtime=slack_runtime,
                 ticket=context.ticket,
                 to_status="ai_triage",
                 changed_by_type="system",
@@ -291,6 +294,7 @@ def _apply_success_result(
     worker_instance_id: str,
     pipeline_result: PipelineExecutionResult,
 ) -> None:
+    slack_runtime = build_slack_runtime_context(settings)
     should_write_manifest = False
     with session_scope(settings) as db:
         run = load_owned_running_run(
@@ -369,6 +373,7 @@ def _apply_success_result(
             if outcome.effective_publication_mode == "auto_publish":
                 publish_ai_public_reply(
                     db,
+                    slack_runtime=slack_runtime,
                     ticket=context.ticket,
                     ai_run_id=run.id,
                     body_markdown=outcome.public_reply_markdown,
@@ -379,6 +384,7 @@ def _apply_success_result(
             elif outcome.public_reply_markdown:
                 create_ai_draft(
                     db,
+                    slack_runtime=slack_runtime,
                     ticket=context.ticket,
                     ai_run_id=run.id,
                     body_markdown=outcome.public_reply_markdown,
@@ -389,6 +395,7 @@ def _apply_success_result(
             else:
                 route_ticket_after_ai(
                     db,
+                    slack_runtime=slack_runtime,
                     ticket=context.ticket,
                     next_status=outcome.next_status,
                     last_ai_action=outcome.last_ai_action,
@@ -416,6 +423,7 @@ def _failure_note_body(error_text: str) -> str:
 
 
 def _mark_failed(settings: Settings, *, run_id, worker_instance_id: str, error_text: str) -> None:
+    slack_runtime = build_slack_runtime_context(settings)
     should_write_manifest = False
     with session_scope(settings) as db:
         run = load_owned_running_run(
@@ -446,6 +454,7 @@ def _mark_failed(settings: Settings, *, run_id, worker_instance_id: str, error_t
             if ticket.status != "waiting_on_dev_ti":
                 record_status_change(
                     db,
+                    slack_runtime=slack_runtime,
                     ticket=ticket,
                     to_status="waiting_on_dev_ti",
                     changed_by_type="system",

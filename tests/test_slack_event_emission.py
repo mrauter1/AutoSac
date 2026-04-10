@@ -149,6 +149,23 @@ def _make_settings(tmp_path: Path, *, app_base_url: str = "https://autosac.examp
     )
 
 
+def _make_slack_runtime(
+    settings: Settings,
+    *,
+    event_logger=None,
+    clock=None,
+):
+    from shared.integrations import build_slack_runtime_context
+    from shared.logging import log_event
+    from shared.security import utc_now
+
+    return build_slack_runtime_context(
+        settings,
+        event_logger=event_logger or log_event,
+        clock=clock or utc_now,
+    )
+
+
 def _load_symbols():
     pytest.importorskip("sqlalchemy")
     from shared.integrations import (
@@ -282,6 +299,7 @@ def test_create_requester_ticket_emits_ticket_created_only(monkeypatch, tmp_path
         ),
     )
     fake_db = _FakeSession(next_reference_num=17, settings=settings)
+    slack_runtime = _make_slack_runtime(settings)
     requester = _make_user(symbols)
 
     monkeypatch.setattr("shared.ticketing.create_pending_ai_run", lambda *args, **kwargs: None)
@@ -289,6 +307,7 @@ def test_create_requester_ticket_emits_ticket_created_only(monkeypatch, tmp_path
     ticket, initial_message, _attachments, _run = symbols["create_requester_ticket"](
         fake_db,
         settings=settings,
+        slack_runtime=slack_runtime,
         requester=requester,
         title="",
         description_markdown="  Falha\tna abertura\n do sistema  ",
@@ -305,6 +324,11 @@ def test_create_requester_ticket_emits_ticket_created_only(monkeypatch, tmp_path
     assert events[0].payload_json["ticket_id"] == str(ticket.id)
     assert events[0].payload_json["ticket_reference"] == ticket.reference
     assert events[0].payload_json["ticket_status"] == "new"
+    assert "_integration_routing" not in events[0].payload_json
+    assert events[0].routing_result == "created"
+    assert events[0].routing_target_name == "ops_primary"
+    assert events[0].routing_config_error_code is None
+    assert events[0].routing_config_error_summary is None
     assert {(link.entity_type, link.entity_id, link.relation_kind) for link in links} == {
         ("ticket", ticket.id, "primary"),
         ("ticket_message", initial_message.id, "message"),
@@ -335,18 +359,17 @@ def test_ticket_created_suppression_paths_record_event_and_links_without_target_
         slack=_make_slack_settings(enabled=slack_enabled, target_enabled=target_enabled),
     )
     fake_db = _FakeSession(settings=settings)
+    observed = []
+    slack_runtime = _make_slack_runtime(
+        settings,
+        event_logger=lambda service, event, **payload: observed.append((service, event, payload)),
+    )
     ticket = _make_ticket(symbols)
     message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
-    observed = []
-
-    monkeypatch.setattr(
-        "shared.integrations.log_event",
-        lambda service, event, **payload: observed.append((service, event, payload)),
-    )
 
     result = symbols["record_ticket_created_event"](
         fake_db,
-        settings=settings,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         initial_message=message,
     )
@@ -362,12 +385,16 @@ def test_ticket_created_suppression_paths_record_event_and_links_without_target_
     }
     assert targets == []
     assert result.routing_result == expected_routing_result
+    assert events[0].routing_result == expected_routing_result
+    assert "_integration_routing" not in events[0].payload_json
     assert observed[0][2]["routing_result"] == expected_routing_result
     if expect_target_name:
         assert result.target_name == "ops_primary"
+        assert events[0].routing_target_name == "ops_primary"
         assert observed[0][2]["target_name"] == "ops_primary"
     else:
         assert result.target_name is None
+        assert events[0].routing_target_name is None
         assert "target_name" not in observed[0][2]
 
 
@@ -375,6 +402,7 @@ def test_add_requester_reply_emits_public_message_and_status_changed(monkeypatch
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
     fake_db = _FakeSession(settings=settings)
+    slack_runtime = _make_slack_runtime(settings)
     requester = _make_user(symbols)
     ticket = _make_ticket(symbols, status="resolved")
 
@@ -383,6 +411,7 @@ def test_add_requester_reply_emits_public_message_and_status_changed(monkeypatch
     message, _attachments, _run = symbols["add_requester_reply"](
         fake_db,
         settings=settings,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         requester=requester,
         body_markdown=" Ainda\tacontece\n o erro ao salvar. ",
@@ -431,10 +460,12 @@ def test_create_ai_draft_emits_only_status_changed_for_worker_draft_creation(tmp
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
     fake_db = _FakeSession(settings=settings)
+    slack_runtime = _make_slack_runtime(settings)
     ticket = _make_ticket(symbols, status="ai_triage")
 
     draft = symbols["create_ai_draft"](
         fake_db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         ai_run_id=uuid.uuid4(),
         body_markdown="Need a human to review this answer.",
@@ -453,10 +484,12 @@ def test_route_ticket_after_ai_emits_status_changed_without_public_message(tmp_p
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
     fake_db = _FakeSession(settings=settings)
+    slack_runtime = _make_slack_runtime(settings)
     ticket = _make_ticket(symbols, status="ai_triage")
 
     symbols["route_ticket_after_ai"](
         fake_db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         next_status="waiting_on_dev_ti",
         last_ai_action="manual_only",
@@ -473,6 +506,7 @@ def test_ai_failure_note_flow_emits_status_changed_but_no_public_message(tmp_pat
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
     fake_db = _FakeSession(settings=settings)
+    slack_runtime = _make_slack_runtime(settings)
     ticket = _make_ticket(symbols, status="ai_triage")
 
     symbols["publish_ai_failure_note"](
@@ -483,6 +517,7 @@ def test_ai_failure_note_flow_emits_status_changed_but_no_public_message(tmp_pat
     )
     symbols["record_status_change"](
         fake_db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         to_status="waiting_on_dev_ti",
         changed_by_type="system",
@@ -498,6 +533,7 @@ def test_publish_ai_draft_for_ops_uses_ai_public_message_author_in_payload(tmp_p
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
     fake_db = _FakeSession(settings=settings)
+    slack_runtime = _make_slack_runtime(settings)
     actor = _make_user(symbols, role="dev_ti")
     ticket = _make_ticket(symbols, status="waiting_on_dev_ti")
     draft = symbols["AIDraft"](
@@ -513,6 +549,7 @@ def test_publish_ai_draft_for_ops_uses_ai_public_message_author_in_payload(tmp_p
 
     symbols["publish_ai_draft_for_ops"](
         fake_db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         draft=draft,
         actor=actor,
@@ -543,20 +580,21 @@ def test_duplicate_reuse_preserves_zero_target_state_and_log_after_routing_chang
     message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
     observed = []
 
-    monkeypatch.setattr(
-        "shared.integrations.log_event",
-        lambda service, event, **payload: observed.append((service, event, payload)),
-    )
-
     first = symbols["record_ticket_created_event"](
         fake_db,
-        settings=disabled_settings,
+        slack_runtime=_make_slack_runtime(
+            disabled_settings,
+            event_logger=lambda service, event, **payload: observed.append((service, event, payload)),
+        ),
         ticket=ticket,
         initial_message=message,
     )
     second = symbols["record_ticket_created_event"](
         fake_db,
-        settings=enabled_settings,
+        slack_runtime=_make_slack_runtime(
+            enabled_settings,
+            event_logger=lambda service, event, **payload: observed.append((service, event, payload)),
+        ),
         ticket=ticket,
         initial_message=message,
     )
@@ -568,7 +606,8 @@ def test_duplicate_reuse_preserves_zero_target_state_and_log_after_routing_chang
     assert targets == []
     assert first.event.id == second.event.id
     assert second.event_reused is True
-    assert first.event.payload_json["_integration_routing"]["routing_result"] == "suppressed_notify_disabled"
+    assert "_integration_routing" not in first.event.payload_json
+    assert first.event.routing_result == "suppressed_notify_disabled"
     assert second.routing_result == "suppressed_notify_disabled"
     assert observed[1] == (
         "integration",
@@ -597,14 +636,12 @@ def test_duplicate_reuse_preserves_existing_target_row_state_without_creating_se
     message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
     observed = []
 
-    monkeypatch.setattr(
-        "shared.integrations.log_event",
-        lambda service, event, **payload: observed.append((service, event, payload)),
-    )
-
     first = symbols["record_ticket_created_event"](
         fake_db,
-        settings=original_settings,
+        slack_runtime=_make_slack_runtime(
+            original_settings,
+            event_logger=lambda service, event, **payload: observed.append((service, event, payload)),
+        ),
         ticket=ticket,
         initial_message=message,
     )
@@ -620,7 +657,10 @@ def test_duplicate_reuse_preserves_existing_target_row_state_without_creating_se
 
     second = symbols["record_ticket_created_event"](
         fake_db,
-        settings=changed_settings,
+        slack_runtime=_make_slack_runtime(
+            changed_settings,
+            event_logger=lambda service, event, **payload: observed.append((service, event, payload)),
+        ),
         ticket=ticket,
         initial_message=message,
     )
@@ -656,6 +696,47 @@ def test_duplicate_reuse_preserves_existing_target_row_state_without_creating_se
     )
 
 
+@pytest.mark.parametrize("routing_result", ["created", None])
+def test_duplicate_reuse_zero_target_falls_back_to_suppressed_notify_disabled_for_stale_or_missing_snapshot(tmp_path, routing_result):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path, slack=_make_slack_settings())
+    fake_db = _FakeSession(settings=settings)
+    ticket = _make_ticket(symbols)
+    message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
+    event = symbols["IntegrationEvent"](
+        id=uuid.uuid4(),
+        source_system="autosac",
+        event_type="ticket.created",
+        aggregate_type="ticket",
+        aggregate_id=ticket.id,
+        dedupe_key=f"ticket.created:{ticket.id}",
+        payload_json=symbols["build_ticket_created_payload"](
+            settings,
+            ticket=ticket,
+            occurred_at=ticket.created_at,
+        ),
+        routing_result=routing_result,
+        routing_target_name="ops_primary" if routing_result == "created" else None,
+        routing_config_error_code=None,
+        routing_config_error_summary=None,
+        created_at=datetime(2026, 4, 10, 12, 0, tzinfo=timezone.utc),
+    )
+    fake_db.add(event)
+
+    result = symbols["record_ticket_created_event"](
+        fake_db,
+        slack_runtime=_make_slack_runtime(settings),
+        ticket=ticket,
+        initial_message=message,
+    )
+
+    assert result.event.id == event.id
+    assert result.event_reused is True
+    assert result.routing_result == "suppressed_notify_disabled"
+    assert result.target_name is None
+    assert _integration_rows(fake_db, symbols, "IntegrationEventTarget") == []
+
+
 def test_invalid_config_emission_logs_suppression_without_row_state_fields(monkeypatch, tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(
@@ -671,14 +752,12 @@ def test_invalid_config_emission_logs_suppression_without_row_state_fields(monke
     message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
     observed = []
 
-    monkeypatch.setattr(
-        "shared.integrations.log_event",
-        lambda service, event, **payload: observed.append((service, event, payload)),
-    )
-
     symbols["record_ticket_created_event"](
         fake_db,
-        settings=settings,
+        slack_runtime=_make_slack_runtime(
+            settings,
+            event_logger=lambda service, event, **payload: observed.append((service, event, payload)),
+        ),
         ticket=ticket,
         initial_message=message,
     )
@@ -704,3 +783,18 @@ def test_invalid_config_emission_logs_suppression_without_row_state_fields(monke
             },
         )
     ]
+
+
+def test_record_ticket_created_event_requires_explicit_runtime_context_even_with_session_settings(tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path, slack=_make_slack_settings())
+    fake_db = _FakeSession(settings=settings)
+    ticket = _make_ticket(symbols)
+    message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
+
+    with pytest.raises(TypeError):
+        symbols["record_ticket_created_event"](
+            fake_db,
+            ticket=ticket,
+            initial_message=message,
+        )

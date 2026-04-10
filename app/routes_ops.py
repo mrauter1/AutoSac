@@ -23,7 +23,9 @@ from app.auth import get_required_auth_session, require_ops_user, validate_csrf_
 from app.render import render_markdown_to_html
 from app.timeline import build_author_label, load_ticket_status_history, load_users_by_ids, merge_timeline_items, serialize_status_changes
 from app.ui import build_template_context, is_htmx_request, templates
+from shared.config import Settings, get_settings
 from shared.db import db_session_dependency
+from shared.integrations import build_slack_runtime_context
 from shared.models import AIDraft, AIRun, AIRunStep, Ticket, TicketAttachment, TicketMessage, TicketView, User
 from shared.permissions import is_ops_user
 from shared.routing_registry import RoutingRegistryError, load_routing_registry
@@ -764,6 +766,7 @@ def ops_set_ticket_status(
     reference: str,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
     csrf_token: str = Form(...),
     next_status: str = Form(...),
     db: Session = Depends(db_session_dependency),
@@ -771,7 +774,13 @@ def ops_set_ticket_status(
     validate_csrf_token(auth_session, csrf_token)
     ticket = _load_ops_ticket_or_404(db, reference=reference)
     try:
-        set_ticket_status_for_ops(db, ticket=ticket, actor=current_user, next_status=next_status.strip())
+        set_ticket_status_for_ops(
+            db,
+            slack_runtime=build_slack_runtime_context(settings),
+            ticket=ticket,
+            actor=current_user,
+            next_status=next_status.strip(),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     db.commit()
@@ -783,6 +792,7 @@ def ops_reply_public(
     reference: str,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
     csrf_token: str = Form(...),
     body: str = Form(...),
     next_status: str = Form(...),
@@ -797,6 +807,7 @@ def ops_reply_public(
     try:
         add_ops_public_reply(
             db,
+            slack_runtime=build_slack_runtime_context(settings),
             ticket=ticket,
             actor=current_user,
             body_markdown=body.strip(),
@@ -833,6 +844,7 @@ def ops_rerun_ai(
     reference: str,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
     csrf_token: str = Form(...),
     forced_route_target_id: str = Form(default=""),
     db: Session = Depends(db_session_dependency),
@@ -842,6 +854,7 @@ def ops_rerun_ai(
     route_target_value, forced_specialist_id = _resolve_manual_rerun_specialist_override(forced_route_target_id)
     request_manual_rerun(
         db,
+        slack_runtime=build_slack_runtime_context(settings),
         ticket=ticket,
         actor=current_user,
         forced_route_target_id=route_target_value,
@@ -856,6 +869,7 @@ def ops_approve_publish_draft(
     draft_id: str,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
     csrf_token: str = Form(...),
     next_status: str = Form(...),
     db: Session = Depends(db_session_dependency),
@@ -868,6 +882,7 @@ def ops_approve_publish_draft(
     try:
         publish_ai_draft_for_ops(
             db,
+            slack_runtime=build_slack_runtime_context(settings),
             ticket=ticket,
             draft=draft,
             actor=current_user,

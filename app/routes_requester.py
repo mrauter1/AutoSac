@@ -33,6 +33,7 @@ from app.uploads import (
 )
 from shared.config import Settings, get_settings
 from shared.db import db_session_dependency
+from shared.integrations import build_slack_runtime_context
 from shared.models import SessionRecord, Ticket, TicketAttachment, TicketMessage, TicketView, User
 from shared.permissions import can_access_all_tickets
 from shared.ticketing import (
@@ -286,10 +287,12 @@ async def requester_ticket_create(
         )
 
     saved_paths: list[Path] = []
+    slack_runtime = build_slack_runtime_context(settings)
     try:
         ticket, _, persisted_attachments, _ = create_requester_ticket(
             db,
             settings=settings,
+            slack_runtime=slack_runtime,
             requester=current_user,
             title=title,
             description_markdown=description,
@@ -386,10 +389,12 @@ async def requester_ticket_reply(
         )
 
     saved_paths: list[Path] = []
+    slack_runtime = build_slack_runtime_context(settings)
     try:
         _, persisted_attachments, _ = add_requester_reply(
             db,
             settings=settings,
+            slack_runtime=slack_runtime,
             ticket=ticket,
             requester=current_user,
             body_markdown=body,
@@ -415,12 +420,18 @@ def requester_ticket_resolve(
     reference: str,
     current_user: User = Depends(require_requester_user),
     auth_session: SessionRecord = Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
     csrf_token: str = Form(...),
     db: Session = Depends(db_session_dependency),
 ):
     validate_csrf_token(auth_session, csrf_token)
     ticket = _load_requester_ticket_or_404(db, reference=reference, requester_id=current_user.id)
-    resolve_ticket_for_requester(db, ticket=ticket, requester=current_user)
+    resolve_ticket_for_requester(
+        db,
+        slack_runtime=build_slack_runtime_context(settings),
+        ticket=ticket,
+        requester=current_user,
+    )
     db.commit()
     return RedirectResponse(
         _ticket_detail_path(current_user=current_user, reference=ticket.reference),

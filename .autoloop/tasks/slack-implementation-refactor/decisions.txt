@@ -2,3 +2,6 @@
 Keep the refactor inside shared/integrations.py, shared/ticketing.py, and worker/slack_delivery.py with small typed helpers and context objects rather than introducing a new Slack package or DI framework.
 Thread explicit Slack runtime through Slack-emitting ticketing helpers, especially record_status_change, publish_ai_public_reply, add_ops_public_reply, and publish_ai_draft_for_ops, because those paths currently depend on ambient session settings.
 Do not plan any compatibility bridge for payload _integration_routing metadata or processing rows with claim_token unset; deployment relies on SLACK_ENABLED=false and disposable pre-launch Slack integration rows instead.
+<autoloop-decisions-header version="1" block_seq="2" owner="implementer" phase_id="schema-emission-runtime-boundary" pair="implement" turn_seq="1" run_id="run-20260410T184024Z-448797a6" ts="2026-04-10T18:46:33.985041+00:00" />
+Require an explicit SlackRuntimeContext on Slack-emitting ticketing and integration helpers, then construct it once per route or worker flow from the already-resolved Settings instead of letting helpers infer settings from the SQLAlchemy session.
+Read duplicate-routing outcomes only from integration_events routing columns and existing target rows; zero-target duplicates degrade to suppressed_notify_disabled whenever the stored snapshot is missing or still says created.

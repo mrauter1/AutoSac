@@ -8,6 +8,8 @@ import uuid
 
 import pytest
 
+from shared.config import Settings
+
 
 def _load_symbols():
     pytest.importorskip("sqlalchemy")
@@ -41,15 +43,56 @@ def _load_symbols():
     }
 
 
+def _make_settings() -> Settings:
+    workspace_dir = Path("/tmp/autosac-ops-workflow/workspace")
+    return Settings(
+        app_base_url="https://autosac.example.local",
+        app_secret_key="secret",
+        database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
+        uploads_dir=Path("/tmp/autosac-ops-workflow/uploads"),
+        triage_workspace_dir=workspace_dir,
+        repo_mount_dir=workspace_dir / "app",
+        manuals_mount_dir=workspace_dir / "manuals",
+        codex_bin="codex",
+        codex_api_key="key",
+        codex_model="",
+        codex_timeout_seconds=3600,
+        worker_poll_seconds=10,
+        auto_support_reply_min_confidence=0.85,
+        auto_confirm_intent_min_confidence=0.90,
+        max_images_per_message=3,
+        max_image_bytes=5 * 1024 * 1024,
+        session_default_hours=12,
+        session_remember_days=30,
+    )
+
+
+def _make_slack_runtime(settings: Settings | None = None):
+    from shared.integrations import build_slack_runtime_context
+
+    return build_slack_runtime_context(settings or _make_settings())
+
+
 class _FakeSession:
     def __init__(self):
+        pytest.importorskip("sqlalchemy")
+        from shared.models import IntegrationEvent, IntegrationEventTarget
+
+        self._integration_event_type = IntegrationEvent
+        self._integration_event_target_type = IntegrationEventTarget
         self.added = []
         self.objects = {}
         self.commit_calls = 0
         self.flush_calls = 0
+        self.events_by_dedupe_key: dict[str, object] = {}
+        self.targets_by_event_id: dict[uuid.UUID, list[object]] = {}
 
     def add(self, item):
         self.added.append(item)
+        if isinstance(item, self._integration_event_type):
+            self.events_by_dedupe_key[item.dedupe_key] = item
+        elif isinstance(item, self._integration_event_target_type):
+            self.targets_by_event_id.setdefault(item.event_id, []).append(item)
         key = getattr(item, "user_id", None), getattr(item, "ticket_id", None)
         if key != (None, None):
             self.objects[key] = item
@@ -78,6 +121,7 @@ def _make_ops_user(symbols, *, role: str = "dev_ti"):
 def test_add_ops_public_reply_records_status_history_and_view():
     symbols = _load_symbols()
     fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
     actor = _make_ops_user(symbols)
     ticket = symbols["Ticket"](
         id=uuid.uuid4(),
@@ -93,6 +137,7 @@ def test_add_ops_public_reply_records_status_history_and_view():
 
     message = symbols["add_ops_public_reply"](
         fake_db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         actor=actor,
         body_markdown="Please confirm the affected user account.",
@@ -113,6 +158,7 @@ def test_add_ops_public_reply_records_status_history_and_view():
 def test_add_ops_public_reply_rejects_invalid_next_status():
     symbols = _load_symbols()
     fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
     actor = _make_ops_user(symbols)
     ticket = symbols["Ticket"](
         id=uuid.uuid4(),
@@ -127,6 +173,7 @@ def test_add_ops_public_reply_rejects_invalid_next_status():
     with pytest.raises(ValueError):
         symbols["add_ops_public_reply"](
             fake_db,
+            slack_runtime=slack_runtime,
             ticket=ticket,
             actor=actor,
             body_markdown="This should fail.",
@@ -137,6 +184,7 @@ def test_add_ops_public_reply_rejects_invalid_next_status():
 def test_add_ops_public_reply_ai_triage_delegates_to_manual_rerun(monkeypatch):
     symbols = _load_symbols()
     fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
     actor = _make_ops_user(symbols, role="admin")
     ticket = symbols["Ticket"](
         id=uuid.uuid4(),
@@ -151,7 +199,7 @@ def test_add_ops_public_reply_ai_triage_delegates_to_manual_rerun(monkeypatch):
 
     monkeypatch.setattr(
         "shared.ticketing.request_manual_rerun",
-        lambda db, ticket, actor, forced_route_target_id=None, forced_specialist_id=None: observed.update(
+        lambda db, slack_runtime, ticket, actor, forced_route_target_id=None, forced_specialist_id=None: observed.update(
             {
                 "manual_rerun": observed["manual_rerun"] + 1,
                 "forced_route_target_id": forced_route_target_id,
@@ -162,6 +210,7 @@ def test_add_ops_public_reply_ai_triage_delegates_to_manual_rerun(monkeypatch):
 
     message = symbols["add_ops_public_reply"](
         fake_db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         actor=actor,
         body_markdown="Please continue and answer directly.",
@@ -237,6 +286,7 @@ def test_assign_ticket_for_ops_touches_ticket_and_view_only_when_assignment_chan
 def test_set_ticket_status_for_ops_records_resolve_history_and_rejects_invalid_status():
     symbols = _load_symbols()
     fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
     actor = _make_ops_user(symbols)
     ticket = symbols["Ticket"](
         id=uuid.uuid4(),
@@ -248,7 +298,13 @@ def test_set_ticket_status_for_ops_records_resolve_history_and_rejects_invalid_s
         urgent=False,
     )
 
-    symbols["set_ticket_status_for_ops"](fake_db, ticket=ticket, actor=actor, next_status="resolved")
+    symbols["set_ticket_status_for_ops"](
+        fake_db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        actor=actor,
+        next_status="resolved",
+    )
     history = [item for item in fake_db.added if isinstance(item, symbols["TicketStatusHistory"])]
 
     assert ticket.status == "resolved"
@@ -256,12 +312,19 @@ def test_set_ticket_status_for_ops_records_resolve_history_and_rejects_invalid_s
     assert history[0].to_status == "resolved"
 
     with pytest.raises(ValueError):
-        symbols["set_ticket_status_for_ops"](fake_db, ticket=ticket, actor=actor, next_status="not-a-status")
+        symbols["set_ticket_status_for_ops"](
+            fake_db,
+            slack_runtime=slack_runtime,
+            ticket=ticket,
+            actor=actor,
+            next_status="not-a-status",
+        )
 
 
 def test_set_ticket_status_for_ops_ai_triage_delegates_to_manual_rerun(monkeypatch):
     symbols = _load_symbols()
     fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
     actor = _make_ops_user(symbols)
     ticket = symbols["Ticket"](
         id=uuid.uuid4(),
@@ -276,10 +339,16 @@ def test_set_ticket_status_for_ops_ai_triage_delegates_to_manual_rerun(monkeypat
 
     monkeypatch.setattr(
         "shared.ticketing.request_manual_rerun",
-        lambda db, ticket, actor: observed.__setitem__("manual_rerun", observed["manual_rerun"] + 1),
+        lambda db, slack_runtime, ticket, actor: observed.__setitem__("manual_rerun", observed["manual_rerun"] + 1),
     )
 
-    symbols["set_ticket_status_for_ops"](fake_db, ticket=ticket, actor=actor, next_status="ai_triage")
+    symbols["set_ticket_status_for_ops"](
+        fake_db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        actor=actor,
+        next_status="ai_triage",
+    )
 
     history = [item for item in fake_db.added if isinstance(item, symbols["TicketStatusHistory"])]
 
@@ -290,6 +359,7 @@ def test_set_ticket_status_for_ops_ai_triage_delegates_to_manual_rerun(monkeypat
 def test_request_manual_rerun_requeues_when_run_is_active(monkeypatch):
     symbols = _load_symbols()
     fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
     actor = _make_ops_user(symbols)
     ticket = symbols["Ticket"](
         id=uuid.uuid4(),
@@ -302,7 +372,12 @@ def test_request_manual_rerun_requeues_when_run_is_active(monkeypatch):
     )
     monkeypatch.setattr("shared.ticketing.has_active_ai_run", lambda db, ticket_id: True)
 
-    run = symbols["request_manual_rerun"](fake_db, ticket=ticket, actor=actor)
+    run = symbols["request_manual_rerun"](
+        fake_db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        actor=actor,
+    )
 
     history = [item for item in fake_db.added if isinstance(item, symbols["TicketStatusHistory"])]
 
@@ -317,6 +392,7 @@ def test_request_manual_rerun_requeues_when_run_is_active(monkeypatch):
 def test_request_manual_rerun_requeues_with_forced_specialist_override(monkeypatch):
     symbols = _load_symbols()
     fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
     actor = _make_ops_user(symbols)
     ticket = symbols["Ticket"](
         id=uuid.uuid4(),
@@ -331,6 +407,7 @@ def test_request_manual_rerun_requeues_with_forced_specialist_override(monkeypat
 
     run = symbols["request_manual_rerun"](
         fake_db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         actor=actor,
         forced_route_target_id="software_architect",
@@ -348,6 +425,7 @@ def test_request_manual_rerun_requeues_with_forced_specialist_override(monkeypat
 def test_request_manual_rerun_creates_pending_run_and_moves_ticket_to_ai_triage(monkeypatch):
     symbols = _load_symbols()
     fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
     actor = _make_ops_user(symbols)
     ticket = symbols["Ticket"](
         id=uuid.uuid4(),
@@ -362,7 +440,12 @@ def test_request_manual_rerun_creates_pending_run_and_moves_ticket_to_ai_triage(
     monkeypatch.setattr("shared.ticketing.has_active_ai_run", lambda db, ticket_id: False)
     monkeypatch.setattr("shared.ticketing.create_pending_ai_run", lambda *args, **kwargs: expected_run)
 
-    run = symbols["request_manual_rerun"](fake_db, ticket=ticket, actor=actor)
+    run = symbols["request_manual_rerun"](
+        fake_db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        actor=actor,
+    )
     history = [item for item in fake_db.added if isinstance(item, symbols["TicketStatusHistory"])]
 
     assert run is expected_run
@@ -374,6 +457,7 @@ def test_request_manual_rerun_creates_pending_run_and_moves_ticket_to_ai_triage(
 def test_request_manual_rerun_passes_forced_specialist_override_to_new_run(monkeypatch):
     symbols = _load_symbols()
     fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
     actor = _make_ops_user(symbols)
     ticket = symbols["Ticket"](
         id=uuid.uuid4(),
@@ -398,6 +482,7 @@ def test_request_manual_rerun_passes_forced_specialist_override_to_new_run(monke
 
     run = symbols["request_manual_rerun"](
         fake_db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         actor=actor,
         forced_route_target_id="software_architect",
@@ -453,6 +538,7 @@ def test_process_deferred_requeue_transfers_forced_specialist_override(monkeypat
 def test_publish_ai_draft_for_ops_creates_ai_message_and_status_change():
     symbols = _load_symbols()
     fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
     actor = _make_ops_user(symbols)
     ticket = symbols["Ticket"](
         id=uuid.uuid4(),
@@ -475,6 +561,7 @@ def test_publish_ai_draft_for_ops_creates_ai_message_and_status_change():
 
     message = symbols["publish_ai_draft_for_ops"](
         fake_db,
+        slack_runtime=slack_runtime,
         ticket=ticket,
         draft=draft,
         actor=actor,
@@ -490,7 +577,7 @@ def test_publish_ai_draft_for_ops_creates_ai_message_and_status_change():
     assert draft.published_message_id == message.id
     assert ticket.status == "waiting_on_user"
     assert history[0].to_status == "waiting_on_user"
-    assert fake_db.flush_calls == 1
+    assert fake_db.flush_calls == 3
 
 
 def test_reject_ai_draft_for_ops_marks_review_metadata_without_status_change():
@@ -529,6 +616,7 @@ def test_reject_ai_draft_for_ops_marks_review_metadata_without_status_change():
 def test_publish_ai_draft_for_ops_rejects_non_pending_draft():
     symbols = _load_symbols()
     fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
     actor = _make_ops_user(symbols)
     ticket = symbols["Ticket"](
         id=uuid.uuid4(),
@@ -552,6 +640,7 @@ def test_publish_ai_draft_for_ops_rejects_non_pending_draft():
     with pytest.raises(ValueError):
         symbols["publish_ai_draft_for_ops"](
             fake_db,
+            slack_runtime=slack_runtime,
             ticket=ticket,
             draft=draft,
             actor=actor,
@@ -1413,6 +1502,7 @@ def test_ops_reply_public_allows_forced_specialist_route_target(monkeypatch):
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
+    settings = _make_settings()
     ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
     auth_session = SimpleNamespace(csrf_token="csrf-token")
     ticket = SimpleNamespace(reference="T-000012R", id=uuid.uuid4())
@@ -1422,7 +1512,7 @@ def test_ops_reply_public_allows_forced_specialist_route_target(monkeypatch):
     monkeypatch.setattr(
         stack["routes_ops"],
         "add_ops_public_reply",
-        lambda db, ticket, actor, body_markdown, next_status, forced_route_target_id=None, forced_specialist_id=None: observed.update(
+        lambda db, slack_runtime, ticket, actor, body_markdown, next_status, forced_route_target_id=None, forced_specialist_id=None: observed.update(
             {
                 "body_markdown": body_markdown,
                 "next_status": next_status,
@@ -1435,6 +1525,7 @@ def test_ops_reply_public_allows_forced_specialist_route_target(monkeypatch):
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
     app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
 
     with stack["TestClient"](app) as client:
         response = client.post(
@@ -1463,6 +1554,7 @@ def test_ops_reply_public_rejects_invalid_forced_route_target(monkeypatch):
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
+    settings = _make_settings()
     ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
     auth_session = SimpleNamespace(csrf_token="csrf-token")
     ticket = SimpleNamespace(reference="T-000012S", id=uuid.uuid4())
@@ -1472,6 +1564,7 @@ def test_ops_reply_public_rejects_invalid_forced_route_target(monkeypatch):
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
     app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
 
     with stack["TestClient"](app) as client:
         response = client.post(
@@ -1492,6 +1585,7 @@ def test_ops_set_ticket_status_ai_triage_triggers_manual_rerun(monkeypatch):
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
+    settings = _make_settings()
     ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
     auth_session = SimpleNamespace(csrf_token="csrf-token")
     ticket = SimpleNamespace(reference="T-000012", id=uuid.uuid4())
@@ -1501,12 +1595,13 @@ def test_ops_set_ticket_status_ai_triage_triggers_manual_rerun(monkeypatch):
     monkeypatch.setattr(
         stack["routes_ops"],
         "set_ticket_status_for_ops",
-        lambda db, ticket, actor, next_status, note=None: observed.__setitem__("next_status", next_status),
+        lambda db, slack_runtime, ticket, actor, next_status, note=None: observed.__setitem__("next_status", next_status),
     )
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
     app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
 
     with stack["TestClient"](app) as client:
         response = client.post(
@@ -1525,6 +1620,7 @@ def test_ops_rerun_ai_allows_forced_specialist_route_target(monkeypatch):
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
+    settings = _make_settings()
     ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
     auth_session = SimpleNamespace(csrf_token="csrf-token")
     ticket = SimpleNamespace(reference="T-000012A", id=uuid.uuid4())
@@ -1534,7 +1630,7 @@ def test_ops_rerun_ai_allows_forced_specialist_route_target(monkeypatch):
     monkeypatch.setattr(
         stack["routes_ops"],
         "request_manual_rerun",
-        lambda db, ticket, actor, forced_route_target_id=None, forced_specialist_id=None: observed.update(
+        lambda db, slack_runtime, ticket, actor, forced_route_target_id=None, forced_specialist_id=None: observed.update(
             {
                 "forced_route_target_id": forced_route_target_id,
                 "forced_specialist_id": forced_specialist_id,
@@ -1545,6 +1641,7 @@ def test_ops_rerun_ai_allows_forced_specialist_route_target(monkeypatch):
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
     app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
 
     with stack["TestClient"](app) as client:
         response = client.post(
@@ -1566,6 +1663,7 @@ def test_ops_rerun_ai_rejects_invalid_forced_route_target(monkeypatch):
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
+    settings = _make_settings()
     ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
     auth_session = SimpleNamespace(csrf_token="csrf-token")
     ticket = SimpleNamespace(reference="T-000012B", id=uuid.uuid4())
@@ -1575,6 +1673,7 @@ def test_ops_rerun_ai_rejects_invalid_forced_route_target(monkeypatch):
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
     app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
 
     with stack["TestClient"](app) as client:
         response = client.post(

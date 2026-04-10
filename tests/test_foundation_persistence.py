@@ -95,6 +95,12 @@ def _make_settings(tmp_path: Path) -> Settings:
     )
 
 
+def _make_slack_runtime() -> object:
+    from shared.integrations import build_slack_runtime_context
+
+    return build_slack_runtime_context(_make_settings(Path("/tmp/autosac-foundation")))
+
+
 def _load_ticketing_dependencies():
     pytest.importorskip("sqlalchemy")
     from sqlalchemy.exc import IntegrityError
@@ -214,6 +220,7 @@ def test_record_status_change_supports_initial_null_transition():
 
     history = record_status_change(
         session,
+        slack_runtime=_make_slack_runtime(),
         ticket=ticket,
         to_status="new",
         changed_by_type="system",
@@ -364,6 +371,20 @@ def test_slack_integration_foundation_migration_adds_required_tables_and_indexes
     assert '"ix_integration_events_aggregate_type_aggregate_id_created_at"' in migration_source
     assert '"ix_integration_event_targets_delivery_status_next_attempt_at"' in migration_source
     assert '"ix_integration_event_targets_locked_at"' in migration_source
+
+
+def test_slack_routing_runtime_refactor_migration_adds_routing_snapshot_and_claim_token_columns():
+    migration_source = Path(
+        "shared/migrations/versions/20260410_0011_slack_routing_runtime_refactor.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260410_0011"' in migration_source
+    assert 'down_revision = "20260410_0010"' in migration_source
+    assert 'op.add_column("integration_events", sa.Column("routing_result", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("integration_events", sa.Column("routing_target_name", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("integration_events", sa.Column("routing_config_error_code", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("integration_events", sa.Column("routing_config_error_summary", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("integration_event_targets", sa.Column("claim_token", postgresql.UUID(as_uuid=True), nullable=True))' in migration_source
 
 
 def test_route_target_compatibility_persistence_backfills_and_allows_selector_steps(tmp_path):
