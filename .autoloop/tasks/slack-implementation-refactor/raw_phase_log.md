@@ -234,3 +234,58 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T184024Z-448797a6 | entry=session_turn | pair=test | phase=producer | cycle=1 | attempt=1 | thread_id=019d78b7-a407-7690-a7cc-38bec431ba99
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/test_producer.md
+session_id=019d78b7-a407-7690-a7cc-38bec431ba99
+
+
+---
+run_id=run-20260410T184024Z-448797a6 | entry=phase_output | pair=test | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d78b7-a407-7690-a7cc-38bec431ba99
+---
+I’m treating this as a coverage pass over the refactor, not a reimplementation. I’m checking the existing tests against the acceptance criteria and looking for the most meaningful gaps before I add anything.
+
+The current suite already covers the main acceptance criteria, but it leaves one useful hole: duplicate reuse of zero-target rows for the other stored suppression outcomes. I’m adding that now so the first-class routing columns stay locked down across all non-created cases, not just notify-disabled.
+
+I’ve added the missing zero-target duplicate cases. I’m running the focused Slack emission suite now to make sure the new assertions line up with the actual logging and reuse behavior.
+
+The new coverage is green. I’m recording the behavior map and the test-phase feedback now so the audit step can trace exactly what’s protected and what remains intentionally out of scope.
+
+I’ve finished the repo-side test changes and the phase test artifacts. I’m doing a readback now so the final handoff matches the recorded strategy and feedback exactly.
+
+Scope considered
+- Phase `schema-emission-runtime-boundary` test scope only: schema additions, explicit Slack runtime boundary, first-class routing snapshot persistence, and duplicate reuse behavior.
+- I kept delivery claim-token finalization coverage out of scope, per the phase contract.
+
+What I analyzed
+- Existing refactor tests in `tests/test_slack_event_emission.py`, `tests/test_foundation_persistence.py`, `tests/test_auth_requester.py`, `tests/test_ops_workflow.py`, and `tests/test_ai_worker.py`.
+- Active test artifacts in `.autoloop/tasks/slack-implementation-refactor/test/phases/schema-emission-runtime-boundary/`.
+- Coverage gaps relative to AC-1/AC-2/AC-3, especially around duplicate reuse from persisted non-created routing snapshots.
+
+What I changed
+- Added focused Slack emission coverage in `tests/test_slack_event_emission.py` for zero-target duplicate reuse when stored routing is:
+  - `suppressed_target_disabled`
+  - `suppressed_invalid_config`
+- The new test also verifies reused observability fields come from first-class routing columns, including preserved `target_name`, `config_error_code`, and `config_error_summary`, and that no repair target row is created.
+- Updated `.autoloop/tasks/slack-implementation-refactor/test/phases/schema-emission-runtime-boundary/test_strategy.md` with an explicit behavior-to-test coverage map.
+- Appended the test-phase summary to `.autoloop/tasks/slack-implementation-refactor/test/phases/schema-emission-runtime-boundary/feedback.md`.
+
+Key findings / decisions
+- The main missing regression check was not the happy path; it was reuse of stored non-created routing outcomes after the runtime settings changed.
+- Locking down `suppressed_target_disabled` and `suppressed_invalid_config` duplicate reuse is worthwhile because those are the routing cases with extra observability fields that would be easy to drop during later refactors.
+- Focused validation passed:
+  - `pytest tests/test_slack_event_emission.py -q`
+  - `pytest tests/test_foundation_persistence.py -q`
+
+Open issues / next step
+- No blocking test gaps remain for this phase’s acceptance criteria.
+- Later phases still need dedicated tests for claim-token ownership enforcement and single-boundary delivery finalization.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>

@@ -696,6 +696,97 @@ def test_duplicate_reuse_preserves_existing_target_row_state_without_creating_se
     )
 
 
+@pytest.mark.parametrize(
+    ("routing_result", "routing_target_name", "config_error_code", "config_error_summary", "expected_log_fields"),
+    [
+        (
+            "suppressed_target_disabled",
+            "ops_primary",
+            None,
+            None,
+            {"target_name": "ops_primary"},
+        ),
+        (
+            "suppressed_invalid_config",
+            None,
+            "slack_targets_json_parse_error",
+            "SLACK_TARGETS_JSON must be a valid JSON object",
+            {
+                "config_error_code": "slack_targets_json_parse_error",
+                "config_error_summary": "SLACK_TARGETS_JSON must be a valid JSON object",
+            },
+        ),
+    ],
+)
+def test_duplicate_reuse_zero_target_preserves_stored_non_created_routing_snapshot(
+    tmp_path,
+    routing_result,
+    routing_target_name,
+    config_error_code,
+    config_error_summary,
+    expected_log_fields,
+):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path, slack=_make_slack_settings())
+    fake_db = _FakeSession(settings=settings)
+    ticket = _make_ticket(symbols)
+    message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
+    observed = []
+    event = symbols["IntegrationEvent"](
+        id=uuid.uuid4(),
+        source_system="autosac",
+        event_type="ticket.created",
+        aggregate_type="ticket",
+        aggregate_id=ticket.id,
+        dedupe_key=f"ticket.created:{ticket.id}",
+        payload_json=symbols["build_ticket_created_payload"](
+            settings,
+            ticket=ticket,
+            occurred_at=ticket.created_at,
+        ),
+        routing_result=routing_result,
+        routing_target_name=routing_target_name,
+        routing_config_error_code=config_error_code,
+        routing_config_error_summary=config_error_summary,
+        created_at=datetime(2026, 4, 10, 12, 0, tzinfo=timezone.utc),
+    )
+    fake_db.add(event)
+
+    result = symbols["record_ticket_created_event"](
+        fake_db,
+        slack_runtime=_make_slack_runtime(
+            settings,
+            event_logger=lambda service, event_name, **payload: observed.append((service, event_name, payload)),
+        ),
+        ticket=ticket,
+        initial_message=message,
+    )
+
+    assert result.event.id == event.id
+    assert result.event_reused is True
+    assert result.routing_result == routing_result
+    assert result.target_name == routing_target_name
+    assert result.config_error_code == config_error_code
+    assert result.config_error_summary == config_error_summary
+    assert _integration_rows(fake_db, symbols, "IntegrationEventTarget") == []
+    assert observed == [
+        (
+            "integration",
+            "integration_event_recorded",
+            {
+                "event_id": str(event.id),
+                "event_type": "ticket.created",
+                "aggregate_type": "ticket",
+                "aggregate_id": str(ticket.id),
+                "dedupe_key": f"ticket.created:{ticket.id}",
+                "routing_result": routing_result,
+                "event_reused": True,
+                **expected_log_fields,
+            },
+        )
+    ]
+
+
 @pytest.mark.parametrize("routing_result", ["created", None])
 def test_duplicate_reuse_zero_target_falls_back_to_suppressed_notify_disabled_for_stale_or_missing_snapshot(tmp_path, routing_result):
     symbols = _load_symbols()

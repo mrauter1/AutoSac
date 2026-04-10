@@ -6,3 +6,5 @@
 - Phase Directory Key: schema-emission-runtime-boundary
 - Phase Title: Schema, Emission, and Runtime Boundary
 - Scope: phase-local authoritative verifier artifact
+
+- Added focused duplicate-reuse coverage in `tests/test_slack_event_emission.py` for zero-target rows that persist `suppressed_target_disabled` and `suppressed_invalid_config`, including preserved `target_name` / config-error log fields from first-class routing columns.
