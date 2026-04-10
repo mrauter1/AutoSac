@@ -1029,6 +1029,57 @@ def test_deliver_claimed_target_dead_letters_when_retry_budget_is_exhausted(monk
     ]
 
 
+def test_run_delivery_cycle_logs_claim_with_claim_token_and_passes_runtime(monkeypatch, tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path)
+    slack_runtime = _make_slack_runtime(settings)
+    claimed_target = _make_claimed_target(symbols)
+    observed = []
+    recovered = []
+    claimed = []
+    delivered = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield SimpleNamespace()
+
+    def fake_recover_stale_delivery_targets(_db, *, slack_runtime):
+        recovered.append(slack_runtime)
+        return []
+
+    def fake_claim_delivery_targets(_db, *, slack_runtime, locked_by):
+        claimed.append((slack_runtime, locked_by))
+        return [claimed_target]
+
+    def fake_deliver_claimed_target(passed_runtime, *, claimed_target, send_webhook=None):
+        delivered.append((passed_runtime, claimed_target))
+
+    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.slack_delivery.recover_stale_delivery_targets", fake_recover_stale_delivery_targets)
+    monkeypatch.setattr("worker.slack_delivery.claim_delivery_targets", fake_claim_delivery_targets)
+    monkeypatch.setattr("worker.slack_delivery.deliver_claimed_target", fake_deliver_claimed_target)
+    monkeypatch.setattr("worker.slack_delivery.log_worker_event", lambda event, **payload: observed.append((event, payload)))
+
+    symbols["run_delivery_cycle"](slack_runtime, worker_instance_id="worker-test")
+
+    assert recovered == [slack_runtime]
+    assert claimed == [(slack_runtime, "worker-test")]
+    assert delivered == [(slack_runtime, claimed_target)]
+    assert observed == [
+        (
+            "slack_target_claimed",
+            {
+                "event_id": str(claimed_target.event_id),
+                "target_name": claimed_target.target_name,
+                "delivery_status": "processing",
+                "attempt_count": claimed_target.attempt_count,
+                "locked_by": claimed_target.locked_by,
+                "claim_token": str(claimed_target.claim_token),
+            },
+        )
+    ]
+
+
 def test_run_delivery_cycle_logs_invalid_config_suppression_without_row_state(monkeypatch, tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(
