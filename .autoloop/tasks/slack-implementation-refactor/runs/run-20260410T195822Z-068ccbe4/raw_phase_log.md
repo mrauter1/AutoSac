@@ -649,3 +649,104 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=producer | cycle=2 | attempt=1 | thread_id=019d791c-1dca-7c11-80ca-dc992d303697
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_producer.md
+session_id=019d791c-1dca-7c11-80ca-dc992d303697
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d791c-1dca-7c11-80ca-dc992d303697
+---
+I’m addressing the reviewer’s blocking finding in the narrowest surface: the Slack settings validation strings and the localized route coverage for that admin page. First I’m re-reading the phase artifacts and the existing i18n/test patterns so the fix stays consistent with the current approach.
+
+I’ve pinned the smallest safe fix: keep the shared validator strings stable, add i18n mappings for those Slack settings errors, and cover the localized route path in the existing UI i18n tests. I’m editing those files now and then I’ll rerun the focused route suites.
+
+The code change is in place. I’m running the focused UI and ops route suites now to confirm the new localized Slack validation path and to catch any translation regressions around the admin pages.
+
+The test run is still active. I’m waiting on the full result before I close out the phase notes, so I can report the exact validation outcome rather than an assumption.
+
+The focused suites passed. I’m rerunning the same broader phase test set from the previous turn so the final result covers the full admin UI and user-mapping surface, not just the new localized-error case.
+
+The broader phase suite is still running clean so far. I’m waiting for the final status before I wrap up, since this turn is specifically about clearing the reviewer finding without reopening anything else.
+
+The full phase suite passed. I’m doing a quick diff sanity check on the touched files and the updated phase notes so the close-out stays aligned with the exact blast radius of this follow-up.
+
+The code and artifact diffs are clean. I’m doing one last workspace status check to separate this follow-up’s scope from the repo’s unrelated dirt before I finalize the implementation summary.
+
+Scope considered
+- Reviewer follow-up for `IMP-001` only: localized Slack settings validation on the admin Slack integration screen.
+- Kept scope to [app/i18n.py](/home/marcelo/code/AutoSac/app/i18n.py), [tests/test_ui_i18n.py](/home/marcelo/code/AutoSac/tests/test_ui_i18n.py), [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/admin-ui-and-user-mapping/implementation_notes.md), and the current turn block in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt). Existing unrelated dirt in [README.md](/home/marcelo/code/AutoSac/README.md) and [tasks/slack_dm_integration_PRD.md](/home/marcelo/code/AutoSac/tasks/slack_dm_integration_PRD.md) was not touched.
+
+What I analyzed
+- The blocking reviewer note in [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/admin-ui-and-user-mapping/feedback.md).
+- The Slack settings validator messages in [shared/slack_dm.py](/home/marcelo/code/AutoSac/shared/slack_dm.py#L97), the existing error-translation path in [app/i18n.py](/home/marcelo/code/AutoSac/app/i18n.py#L747), and the localized admin-route test pattern in [tests/test_ui_i18n.py](/home/marcelo/code/AutoSac/tests/test_ui_i18n.py#L408).
+
+What I changed
+- Added i18n keys plus regex translation mappings in [app/i18n.py](/home/marcelo/code/AutoSac/app/i18n.py) for all Slack settings tuning validation errors raised by `validate_slack_dm_settings_input()`.
+- Added a Portuguese route test in [tests/test_ui_i18n.py](/home/marcelo/code/AutoSac/tests/test_ui_i18n.py) that posts invalid Slack numeric settings, asserts the localized error text, and confirms the Slack route keeps the correct locale-switch path.
+- Updated [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/admin-ui-and-user-mapping/implementation_notes.md) and appended the non-obvious localization decision under the latest header in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt).
+
+Key findings / decisions
+- I kept the validator strings in [shared/slack_dm.py](/home/marcelo/code/AutoSac/shared/slack_dm.py#L97) unchanged and localized them through the existing `translate_error_text()` path instead of branching validation by locale.
+- Focused validation passed: `python3 -m pytest tests/test_ui_i18n.py tests/test_ops_workflow.py -q` -> `93 passed`.
+- Broader phase validation passed: `python3 -m pytest tests/test_ops_workflow.py tests/test_ui_i18n.py tests/test_auth_requester.py tests/test_foundation_persistence.py -q` -> `163 passed, 10 skipped`.
+- Diff hygiene check passed: `git diff --check -- app/i18n.py tests/test_ui_i18n.py .autoloop/tasks/slack-implementation-refactor/implement/phases/admin-ui-and-user-mapping/implementation_notes.md .autoloop/tasks/slack-implementation-refactor/decisions.txt`.
+
+Open issues / next step
+- No open implementation issue remains from `IMP-001`.
+- Next step is verifier re-review for the phase artifacts and updated localized Slack admin error path.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=verifier | cycle=2 | attempt=1 | thread_id=019d791c-1dca-7c11-80ca-dc992d303697
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_verifier.md
+session_id=019d791c-1dca-7c11-80ca-dc992d303697
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d791c-1dca-7c11-80ca-dc992d303697
+---
+I’m reviewing the follow-up against the single blocking finding and the phase acceptance criteria. I’ll check the new i18n mappings, the localized Slack route test, and the updated phase artifacts before I mark the verifier state.
+
+The localized-error gap is fixed: the new Slack validation messages are mapped, the Portuguese route path is covered, and I’m not seeing a new regression in the reviewed scope. I’m updating the verifier artifacts to mark the phase complete and to record that the prior blocking finding is resolved.
+
+The verifier artifacts are updated. I’m reading them back once to make sure the completion state is internally consistent before I close the loop.
+
+I’ve confirmed the artifact state. I’m doing one independent verifier-side test run of the localized UI suite so the completion call doesn’t rely only on the producer’s reported results.
+
+The verifier-side UI suite is still running. I’m waiting for the final status so I can cite an independent pass result in the close-out.
+
+Scope considered
+- Phase-local review of the `admin-ui-and-user-mapping` follow-up, focused on the reviewer-raised localized Slack settings validation gap. Unrelated dirty files stayed out of scope.
+
+What I analyzed
+- The updated i18n mappings in [app/i18n.py](/home/marcelo/code/AutoSac/app/i18n.py), the new localized Slack route coverage in [tests/test_ui_i18n.py](/home/marcelo/code/AutoSac/tests/test_ui_i18n.py), the validator messages in [shared/slack_dm.py](/home/marcelo/code/AutoSac/shared/slack_dm.py), and the phase artifacts in [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/admin-ui-and-user-mapping/criteria.md) and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/admin-ui-and-user-mapping/feedback.md).
+
+What I reviewed
+- Confirmed the Slack tuning validation messages now flow through the existing `translate_error_text()` path and have locale mappings for the admin Slack page.
+- Confirmed the added route test covers a `pt-BR` invalid numeric submission on `/ops/integrations/slack` and keeps the correct language-switch path.
+- Independently ran `python3 -m pytest tests/test_ui_i18n.py -q` and got `18 passed`.
+
+Key findings / decisions
+- `IMP-001` is resolved.
+- No additional blocking or non-blocking findings were identified in the reviewed scope.
+
+Open issues / next step
+- No open issues remain for this phase. The phase is ready to proceed.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
