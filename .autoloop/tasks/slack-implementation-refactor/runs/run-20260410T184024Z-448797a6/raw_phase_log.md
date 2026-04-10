@@ -91,3 +91,12 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T184024Z-448797a6 | entry=phase_scope_resolved
+---
+phase_mode=single
+phase_ids=schema-emission-runtime-boundary,delivery-claim-outcome-finalization,regression-rollout-verification
+explicit=True
+current_phase_index=0
