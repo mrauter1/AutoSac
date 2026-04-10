@@ -2,157 +2,199 @@ version: 1
 task_id: slack-implementation-refactor
 request_snapshot_ref: /home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/runs/run-20260410T195822Z-068ccbe4/request.md
 phases:
-- phase_id: schema-emission-runtime-boundary
-  title: Schema, Emission, and Runtime Boundary
-  objective: Add the additive Slack refactor schema, remove hidden session-based settings
-    lookup, and move emission plus duplicate handling to explicit runtime and first-class
-    routing snapshot persistence.
+- phase_id: dm-persistence-runtime-foundation
+  title: DM Persistence and Runtime Foundation
+  objective: Add the persisted Slack DM schema, replace env-backed Slack runtime loading,
+    and provide the token crypto and health primitives that later UI, emission, and
+    worker phases reuse.
   status: planned
   in_scope:
-  - Add routing snapshot columns on integration_events and claim_token on integration_event_targets
-    in a new additive migration and model update.
-  - Introduce SlackRuntimeContext and remove Session.info based settings access from
-    Slack code.
-  - Refactor shared/integrations.py to persist routing snapshot columns, stop writing
-    _integration_routing, and preserve duplicate behavior from stored routing columns
-    and target rows only.
-  - Thread explicit Slack runtime through shared/ticketing.py and the request or worker
-    callers that can emit Slack events.
-  - Update Slack emission and migration tests for the new persistence model.
+  - Create slack_dm_settings and users.slack_user_id plus DM recipient columns and
+    constraints on integration_event_targets.
+  - Clear disposable pre-launch Slack integration rows during migration so DM-only
+    target semantics can be enforced safely.
+  - Retire authoritative SLACK_* env parsing and introduce DB-backed Slack DM load,
+    save, validation, token crypto, and health helpers.
+  - Rework SlackRuntimeContext construction so request transactions and worker cycles
+    load current DB-backed Slack config instead of startup-time webhook settings.
   out_of_scope:
-  - Delivery claim-token ownership enforcement during worker finalization.
-  - Any mixed-version compatibility bridge for legacy Slack rows.
-  - Any non-Slack worker or ticketing redesign.
+  - Admin HTML, nav, and form work.
+  - Recipient routing inserts in shared/integrations.py.
+  - Slack Web API send logic in worker/slack_delivery.py.
   dependencies: []
   acceptance_criteria:
   - id: AC-1
-    text: No Slack emission path reads Session.info["settings"], and missing runtime
-      context is treated as a programmer error instead of a valid suppression path.
+    text: The schema includes slack_dm_settings, users.slack_user_id, recipient_user_id,
+      and recipient_reason, and the migration can run on pre-launch databases without
+      requiring webhook-row compatibility.
   - id: AC-2
-    text: Newly inserted integration_events rows populate the routing snapshot columns
-      and keep payload_json free of _integration_routing or equivalent metadata.
+    text: There is no authoritative env-driven Slack runtime path left; request and
+      worker code can load effective Slack DM defaults and persisted config from PostgreSQL.
   - id: AC-3
-    text: Duplicate reuse reports created from an existing target row, reuses stored
-      non-created suppression for zero-target events, and falls back to suppressed_notify_disabled
-      for zero-target rows whose stored snapshot is absent or stale created.
+    text: Token encryption and decryption use APP_SECRET_KEY-derived key material,
+      and delivery-health snapshots can be persisted for UI display without making
+      health state the routing source of truth.
   deliverables:
-  - New additive migration and shared/models.py updates for routing snapshot columns
-    plus claim_token
-  - SlackRuntimeContext and refactored shared/integrations.py emission helpers
-  - shared/ticketing.py and upstream request or worker call-site updates for explicit
-    runtime propagation
-  - Updated Slack emission and persistence tests
+  - New migration and shared/models.py updates for Slack DM settings, user Slack IDs,
+    and DM recipient target fields
+  - requirements.txt update plus shared Slack DM settings and Web API helper module
+    with validation and token crypto
+  - Runtime-context loader changes for request and worker flows
   risks:
-  - Call-site propagation can miss a Slack-emitting path because settings currently
-    arrive implicitly through session construction.
-  - Duplicate reuse can regress if current routing decisions leak back into reused
-    rows.
-  - The migration and model changes must stay additive because rollback is code/config
-    first.
+  - Existing webhook dry-run rows can block NOT NULL DM recipient columns unless they
+    are cleared deliberately.
+  - Leaving Settings.slack in place risks two competing runtime contracts.
+  - Token crypto and decryption failure handling can leak into logs if sanitization
+    is not centralized.
   rollback:
-  - Keep SLACK_ENABLED=false and revert code while leaving the additive columns in
-    place if the runtime-boundary or emission refactor regresses.
-  - Do not add a legacy payload-metadata bridge as part of rollback handling.
-- phase_id: delivery-claim-outcome-finalization
-  title: Delivery Claim, Outcome, and Finalization Refactor
-  objective: Refactor Slack delivery so claim ownership is proven by claim_token and
-    every post-claim mutation goes through one canonical finalization boundary driven
-    by typed executor outcomes.
+  - Keep Slack disabled in the DB and revert code while leaving additive schema in
+    place if the new runtime foundation regresses.
+  - Do not add a webhook compatibility bridge as rollback handling.
+- phase_id: admin-ui-and-user-mapping
+  title: Admin UI and User Slack Mapping
+  objective: Ship the admin-only Slack integration screen and extend the existing
+    ops-users surface so admins can manage Slack IDs without exposing new controls
+    to non-admins.
   status: planned
   in_scope:
-  - Extend claim handles and repository queries to write and use claim_token.
-  - Introduce typed delivery outcomes for sent, retryable_failure, and dead_letter_terminal.
-  - Move retry exhaustion conversion and next_attempt_at calculation into executor
-    classification before finalization.
-  - Consolidate success, retry, dead-letter, and ownership-lost handling behind one
-    repository finalization operation.
-  - Preserve current suppression, rendering, timeout, backoff, stale-lock recovery,
-    and logging contracts while adding claim-token observability where allowed.
+  - Add require_admin_user and the /ops/integrations/slack GET, save, and disconnect
+    routes.
+  - Add the Slack integration template, nav entry, locale-aware errors, and required
+    i18n strings.
+  - Extend /ops/users create or update flows and shared/user_admin.py with optional
+    slack_user_id validation, trimming, clear behavior, and uniqueness.
+  - Enforce that only admins can change slack_user_id, even if a non-admin submits
+    the field manually.
   out_of_scope:
-  - Schema cleanup that drops existing Slack columns.
-  - Any change to Slack message wording or routing business rules.
-  - Any mixed-version support for claim_token IS NULL processing rows.
+  - Recipient routing inserts for business events.
+  - Worker DM send-time behavior and retry classification.
+  - Historical data backfill or Slack user autodiscovery.
   dependencies:
-  - schema-emission-runtime-boundary
+  - dm-persistence-runtime-foundation
   acceptance_criteria:
   - id: AC-1
-    text: Claiming a due target row writes a fresh claim_token, increments attempt_count
-      once, and returns a claim handle that includes claim_token, payload_json, and
-      the existing observability fields.
+    text: Admins can load, save, and disconnect Slack DM settings from /ops/integrations/slack,
+      with blank-token preservation, auth.test validation for new tokens, and no token
+      echo in HTML.
   - id: AC-2
-    text: Finalization proves ownership with id plus processing status plus claim_token,
-      clears claim state on every transition out of processing, and leaves the row
-      unchanged when ownership is lost.
+    text: Admins can create, update, clear, and validate users.slack_user_id from
+      /ops/users, while Dev/TI and requester users cannot change Slack IDs.
   - id: AC-3
-    text: Retryable transport or HTTP failures below the configured limit finalize
-      to failed with executor-supplied next_attempt_at, while retryable failures at
-      or above the limit finalize directly to dead_letter with terminal_reason retry_exhausted
-      and no repository-side reclassification.
+    text: The UI shows stored-token presence, workspace metadata, last update metadata,
+      and last-known delivery health when available.
   deliverables:
-  - Refactored worker/slack_delivery.py repository and executor helpers plus updated
-    claim handle and outcome types
-  - Canonical finalization write-set implementation for sent, failed, dead_letter,
-    and ownership_lost
-  - Updated Slack delivery tests for claim_token, typed outcomes, stale-lock recovery,
-    and ownership-lost behavior
+  - Auth and app/routes_ops.py changes for admin-only Slack integration management
+  - Slack integration template, nav, and i18n updates
+  - shared/user_admin.py plus ops-users form changes for slack_user_id
+  - Updated ops workflow and locale-switch tests
   risks:
-  - Splitting repository versus executor responsibilities can still leave duplicated
-    row writes if finalization is not made the sole owner.
-  - Claim-token enforcement can weaken debugging if locked_by and attempt_count stop
-    appearing in logs.
-  - Retry-exhaustion handling can drift if outcome construction and finalization both
-    try to own it.
+  - Reusing /ops/users can accidentally widen Dev/TI permissions if route and template
+    checks diverge.
+  - Save and disconnect flows can accidentally leak token state back into rendered
+    HTML or translated errors.
+  - Locale-switch paths can regress if validation failures do not preserve the integration
+    page URL.
   rollback:
-  - Keep Slack disabled and revert worker code while preserving additive schema if
-    delivery-state transitions or ownership checks regress.
-  - Treat any post-migration failure as a forward-fix issue rather than restoring
-    legacy ownership predicates.
-- phase_id: regression-rollout-verification
-  title: Regression Completion and Rollout Verification
-  objective: Finish the required regression coverage, validate rollout assumptions,
-    and leave the refactor aligned with the Phase 1 Slack contract and the refactor
-    PRD acceptance criteria.
+  - Disable Slack in the DB and hide the new admin path if the UI flow regresses,
+    while keeping the persisted schema.
+  - Do not silently ignore unauthorized slack_user_id submissions; keep the permission
+    failure explicit.
+- phase_id: emission-dm-recipient-routing
+  title: Emission-Time DM Recipient Routing
+  objective: Replace webhook target selection with recipient-based DM routing while
+    preserving the canonical payload, dedupe, and no-backfill contracts.
   status: planned
   in_scope:
-  - Update Slack emission, delivery, and migration tests to the new runtime boundary,
-    routing snapshot, and claim-token model.
-  - Add or adjust rollout-facing docs or check coverage only where needed to keep
-    the pre-launch disposable-row assumption and config-first rollback explicit.
-  - Run the targeted Slack regression suite and resolve any breakage introduced by
-    signature propagation or finalization consolidation.
-  - Remove leftover code or test references that require _integration_routing or locked_by
-    plus attempt_count ownership checks.
+  - Update shared/integrations.py to route from requester and current assignee, using
+    active users with nonblank slack_user_id.
+  - Collapse requester and assignee duplicates to one row with recipient_reason=requester_assignee
+    and target_name=user:<recipient_user_id>.
+  - Persist routing_result values for created, suppressed_slack_disabled, suppressed_invalid_config,
+    suppressed_notify_disabled, and suppressed_no_recipients, with routing_target_name
+    always null.
+  - Preserve duplicate reuse as read-only, including no repair after later enablement,
+    assignment changes, or Slack ID edits.
+  - Update emission logging and tests for recipient_target_count and no-recipient cases.
   out_of_scope:
-  - New Slack functionality or backfill behavior.
-  - Dropping existing Slack columns in this refactor.
-  - Any unrelated repository-wide test cleanup.
+  - Admin save and disconnect UI behavior.
+  - Worker send-time Slack API calls.
+  - Any new Slack event families or business payload changes.
   dependencies:
-  - delivery-claim-outcome-finalization
+  - dm-persistence-runtime-foundation
   acceptance_criteria:
   - id: AC-1
-    text: The test suite covers explicit runtime context, first-class routing snapshot
-      persistence, duplicate reuse edge cases, claim-token ownership loss, retry exhaustion
-      before finalization, and canonical write sets for sent, failed, and dead_letter.
+    text: New eligible events create zero, one, or two slack_dm target rows exactly
+      from the post-mutation ticket state, with requester or assignee collapse when
+      they are the same AutoSac user.
   - id: AC-2
-    text: No remaining code or tests depend on _integration_routing payload metadata,
-      Session.info based Slack settings lookup, or legacy claimed-row ownership predicates.
+    text: Zero-recipient outcomes persist integration_events and link rows but create
+      no target rows, and routing_result is recorded as suppressed_no_recipients.
   - id: AC-3
-    text: Rollout notes remain explicit that deployment occurs with SLACK_ENABLED=false,
-      request-path and worker code ship together, and pre-refactor Slack rows are
-      disposable pre-launch state only.
+    text: Duplicate event reuse never adds or rewrites recipient rows after later
+      Slack config, Slack ID, or assignment changes.
   deliverables:
-  - Updated Slack regression suite and migration assertions
-  - Any necessary docs or check updates for rollout and rollback clarity
-  - Final refactor state aligned with the PRD acceptance criteria
+  - Refactored shared/integrations.py routing and target-row creation logic
+  - Any shared/ticketing.py or caller updates needed to build DB-backed Slack runtime
+    before emission
+  - Updated Slack emission tests for recipient routing, collapse, and no-backfill
   risks:
-  - Signature changes can regress request or worker flows outside the direct Slack
-    tests if affected callers are not rerun.
-  - Rollout assumptions can drift back to mixed-version expectations if the disposable-row
-    rule is not kept explicit.
-  - Test coverage can miss the single-finalization invariant unless write-set assertions
-    are made direct.
+  - Using stale config instead of the current DB snapshot can produce the wrong preview
+    limit or routing result.
+  - Duplicate reuse can accidentally backfill recipients if current eligibility leaks
+    into reused events.
+  - Assignment flows can regress if routing reads pre-mutation instead of post-mutation
+    ticket state.
   rollback:
-  - Hold Slack disabled and revert code if final verification exposes regressions,
-    leaving the additive schema intact.
-  - Do not reintroduce payload-metadata or mixed-version compatibility paths as a
-    rollback shortcut.
+  - Keep Slack disabled in the DB and revert emission code if recipient routing regresses,
+    leaving the DM schema intact.
+  - Do not repair or synthesize historical recipient rows as part of rollback handling.
+- phase_id: worker-dm-delivery-and-regression
+  title: Worker DM Delivery and Regression Completion
+  objective: Replace webhook posting with Slack Web API DM delivery, enforce the
+    required auth and recipient failure semantics, and align docs and tests with
+    the DB-backed DM contract.
+  status: planned
+  in_scope:
+  - Update worker/main.py and worker/slack_delivery.py so each cycle reloads DB-backed
+    Slack config and runs auth.test before recovery or claim work.
+  - Resolve recipients at send time by recipient_user_id, then call conversations.open
+    and chat.postMessage with Web API ok-response validation.
+  - Classify global invalid-config, terminal recipient, and retryable failures, including
+    Retry-After handling and no-Slack-call dead-lettering for missing or inactive
+    recipients.
+  - Update tests, README, .env.example, and deployment docs to remove webhook or
+    SLACK_* runtime assumptions and describe the new DB-backed rollout posture.
+  out_of_scope:
+  - Inbound Slack interactions, OAuth, or user autodiscovery.
+  - Historical backfill or mixed webhook/DM runtime support.
+  - Unrelated repository-wide documentation cleanup.
+  dependencies:
+  - dm-persistence-runtime-foundation
+  - admin-ui-and-user-mapping
+  - emission-dm-recipient-routing
+  acceptance_criteria:
+  - id: AC-1
+    text: The worker performs no claim, send, or stale-lock recovery work in cycles
+      where auth.test shows auth-level or scope-level invalid config.
+  - id: AC-2
+    text: Successful delivery requires both conversations.open and chat.postMessage
+      to return HTTP success and Slack ok=true, and send-time missing or inactive
+      recipients dead-letter without Slack HTTP calls.
+  - id: AC-3
+    text: Docs and regression tests reflect one DB-backed Slack DM contract, including
+      Retry-After handling, no-backfill behavior, and config-first rollback.
+  deliverables:
+  - Refactored worker/main.py and worker/slack_delivery.py for DB-backed DM delivery
+  - Updated Slack delivery and hardening tests plus targeted docs changes
+  - Final rollout notes for disabled-by-default enablement and disposable pre-launch
+    Slack row handling
+  risks:
+  - Worker threads can keep stale settings if cycle-level runtime reload is incomplete.
+  - Web API success classification can drift if HTTP and ok-response checks are split
+    across helper paths.
+  - Docs can leave old env-based guidance in place and cause operator drift after
+    implementation lands.
+  rollback:
+  - Disable Slack in the DB and revert worker or doc changes if the DM delivery flow
+    regresses, leaving the schema intact.
+  - Do not reintroduce webhook delivery or env-backed routing as a rollback shortcut.
