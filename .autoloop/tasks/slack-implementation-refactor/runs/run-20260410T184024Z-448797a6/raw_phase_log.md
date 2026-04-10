@@ -553,3 +553,128 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T184024Z-448797a6 | entry=session_turn | pair=implement | phase=producer | cycle=1 | attempt=1 | thread_id=019d78d3-5c8d-7060-ae50-ff790eb71150
+---
+provider=codex
+mode=start
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_producer.md
+session_id=019d78d3-5c8d-7060-ae50-ff790eb71150
+
+
+---
+run_id=run-20260410T184024Z-448797a6 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d78d3-5c8d-7060-ae50-ff790eb71150
+---
+I’m reading the phase artifacts and the current Slack implementation/tests first. I want the smallest edit set that closes the remaining regression gaps and doesn’t drift from the prior refactor phases.
+
+The core refactor is already in place. I’m checking for what this phase still owes: missing regression coverage, leftover legacy references, and any rollout note that still implies backward compatibility.
+
+I’ve confirmed the codebase already removed the legacy runtime and claim logic. The remaining question is whether the tests and operator-facing notes fully pin the refactor-era assumptions, so I’m checking the docs alongside the targeted regression suite.
+
+The Slack regression slice is green. What’s still thin is the rollout wording: the current docs say “dark launch” and “config-first rollback,” but I don’t yet see the explicit refactor-era assumption that old Slack rows are disposable and web/worker ship as one versioned unit.
+
+I found the likely gap. The docs mention dark launch and rollback, but they do not explicitly say “deploy web and worker together” or “treat pre-refactor Slack rows as disposable pre-launch state.” I’m checking the existing doc tests so I can tighten that without creating brittle assertions.
+
+The doc tests are minimal today. I’m going to tighten them and the operator notes together so this phase leaves an explicit rollout contract, not just implied behavior.
+
+Before editing, I’m making one more cleanup call: the emission test harness still carries a dormant `Session.info["settings"]` stub from the old model. I’m going to remove that and land the rollout-note/doc-test changes together so the phase ends without legacy scaffolding.
+
+I’ve made the doc and test updates. Now I’m rerunning the Slack slice plus the rollout doc assertions to catch any missed constructor cleanup or wording mismatch.
+
+The constructor cleanup changed the whole emission file, so I’m rerunning the full Slack regression files now, not just the filtered assertions. That closes the only real regression risk from this turn.
+
+The rollout doc assertions were cheap, so I’m widening that one more step to the full hardening file. It’s fast here, and it guards against me accidentally breaking a neighboring documentation/runtime contract assertion.
+
+I’m on the bookkeeping pass now: recording the phase-local decisions and implementation notes while the diff is still fresh. After that I’ll do a final diff scan and close out with concrete file references.
+
+I’m done with the edits and validation. I’m pulling exact line numbers now so the close-out points to the concrete rollout-note and regression changes rather than paraphrasing them.
+
+Scope considered
+
+- Phase-local `regression-rollout-verification`: Slack regression coverage, rollout/rollback documentation, and leftover legacy test scaffolding only.
+
+What I analyzed
+
+- The current Slack refactor state in tests and docs, plus remaining references to legacy `_integration_routing`, `Session.info["settings"]`, and rollout assumptions.
+- Targeted validation on the Slack suites and rollout doc checks.
+
+What I changed
+
+- Tightened rollout notes in [README.md](/home/marcelo/code/AutoSac/README.md#L167), [docs_deployment.md](/home/marcelo/code/AutoSac/docs_deployment.md#L27), [docs_deployment.md](/home/marcelo/code/AutoSac/docs_deployment.md#L63), and [.env.example](/home/marcelo/code/AutoSac/.env.example#L43) so they now explicitly say:
+  - keep `SLACK_ENABLED=false` through migration/verification
+  - ship web/request-path and worker together on the same refactor-aware build
+  - clear any pre-refactor Slack integration rows before enabling Slack because they are disposable pre-launch state
+- Removed the dormant session-info scaffold from the Slack emission fake session in [tests/test_slack_event_emission.py](/home/marcelo/code/AutoSac/tests/test_slack_event_emission.py#L30) so the regression harness no longer carries a legacy ambient-settings path.
+- Extended the rollout doc assertions in [tests/test_hardening_validation.py](/home/marcelo/code/AutoSac/tests/test_hardening_validation.py#L298).
+- Updated the phase artifact notes and shared decisions in [.autoloop/tasks/slack-implementation-refactor/implement/phases/regression-rollout-verification/implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/regression-rollout-verification/implementation_notes.md) and [.autoloop/tasks/slack-implementation-refactor/decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt).
+
+Key findings / decisions
+
+- The Slack runtime and delivery refactor itself was already in place and green; the remaining gap was explicit rollout posture in operator docs plus one leftover legacy-shaped test helper.
+- I kept rollout coverage in the existing hardening doc test instead of adding another parallel documentation test.
+
+Open issues / next step
+
+- No in-phase blockers remain.
+- Validation completed:
+  - `pytest tests/test_slack_event_emission.py tests/test_slack_delivery.py tests/test_foundation_persistence.py -q`
+  - `pytest tests/test_hardening_validation.py -q`
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
+
+
+---
+run_id=run-20260410T184024Z-448797a6 | entry=session_turn | pair=implement | phase=verifier | cycle=1 | attempt=1 | thread_id=019d78d3-5c8d-7060-ae50-ff790eb71150
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_verifier.md
+session_id=019d78d3-5c8d-7060-ae50-ff790eb71150
+
+
+---
+run_id=run-20260410T184024Z-448797a6 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d78d3-5c8d-7060-ae50-ff790eb71150
+---
+I’m reviewing the phase-local diff and artifacts now. I’ll verify the regression/docs changes against the acceptance criteria, then update the reviewer-owned `criteria.md` and `feedback.md` only.
+
+The repo diff is clean on the user-facing files, so I’m treating the current working tree as the review target and validating behavior directly. The targeted suite is still running; I’m waiting for the final result before I write the reviewer artifacts.
+
+The test run is green. I’m doing one last evidence pass for AC-2 and AC-3: legacy-reference searches and the current rollout wording in the checked-in files.
+
+I’ve finished the evidence pass. I found no defects to send back, so I’m marking the criteria complete and recording a no-findings review note with the validation basis.
+
+The reviewer artifacts are updated. I’m doing a quick readback of `criteria.md` and `feedback.md` to make sure the phase closes cleanly with no unchecked boxes and a single no-findings record.
+
+Scope considered
+
+- Phase-local review of `regression-rollout-verification`, limited to the Slack regression, rollout-note, and artifact scope required by AC-1/AC-2/AC-3.
+
+What I analyzed
+
+- The current checked-in Slack regression/docs state.
+- Legacy-reference searches for `Session.info["settings"]`, `_integration_routing`, and composite ownership predicates across request-relevant code and tests.
+- Validation run: `pytest tests/test_slack_event_emission.py tests/test_slack_delivery.py tests/test_foundation_persistence.py tests/test_hardening_validation.py -q`.
+
+What I reviewed
+
+- Rollout wording in `README.md`, `docs_deployment.md`, and `.env.example`.
+- Slack regression coverage and the remaining legacy-reference surface in the current tests.
+- Reviewer-owned artifacts [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/regression-rollout-verification/criteria.md) and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/regression-rollout-verification/feedback.md).
+
+Key findings / decisions
+
+- No blocking findings.
+- AC-1, AC-2, and AC-3 are satisfied in the current tree.
+- I marked all criteria complete and recorded a single non-blocking no-findings review note (`IMP-000`) in the phase feedback artifact.
+
+Open issues / next step
+
+- None for this phase.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
