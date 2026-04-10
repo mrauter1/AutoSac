@@ -1,0 +1,4 @@
+version: 1
+task_id: slack-implementation-refactor
+request_snapshot_ref: /home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/runs/run-20260410T184024Z-448797a6/request.md
+phases: []
