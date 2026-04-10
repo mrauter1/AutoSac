@@ -26,6 +26,7 @@
 ## Symbols touched
 
 - `app.auth.require_admin_user`
+- `app.i18n.translate_error_text`
 - `app.routes_ops.ops_slack_integration`
 - `app.routes_ops.ops_save_slack_integration`
 - `app.routes_ops.ops_disconnect_slack_integration`
@@ -40,7 +41,7 @@
 
 ## Checklist mapping
 
-- `AC-1`: added the admin-only `/ops/integrations/slack` GET/save/disconnect routes, Slack integration template, nav entry, `auth.test` validation for new tokens, blank-token preservation, disconnect behavior, and no-token-echo error rendering.
+- `AC-1`: added the admin-only `/ops/integrations/slack` GET/save/disconnect routes, Slack integration template, nav entry, `auth.test` validation for new tokens, blank-token preservation, disconnect behavior, no-token-echo error rendering, and localized tuning-validation errors for the Slack settings form.
 - `AC-2`: extended `/ops/users` create or update flows and `shared/user_admin.py` with optional `slack_user_id` trim, clear, whitespace-only rejection, uniqueness, and explicit non-admin rejection when the field is manually submitted.
 - `AC-3`: surfaced stored-token presence, workspace metadata, updater metadata, runtime config validity, and last-known delivery health on the Slack integration page.
 
@@ -70,6 +71,7 @@
 ## Expected side effects
 
 - Admin-only Slack save errors preserve non-secret submitted values while keeping the bot token input blank.
+- Slack settings validation failures for delivery tuning values now localize through the shared UI error translation path instead of falling back to raw English helper messages.
 - Admin user pages now show Slack IDs for operators; non-admin ops pages keep the prior table layout without the Slack column or inputs.
 - Route-level tests now rely on the newly installed local Python packages listed above when run in this workspace.
 
@@ -77,9 +79,11 @@
 
 - `python3 -m compileall app shared tests scripts`
 - `python3 -m pytest tests/test_ops_workflow.py tests/test_ui_i18n.py tests/test_auth_requester.py tests/test_foundation_persistence.py -q`
+- `python3 -m pytest tests/test_ui_i18n.py tests/test_ops_workflow.py -q`
 
 ## Deduplication / centralization
 
 - Centralized admin-only Slack page rendering through `_slack_integration_page_extra` and `_render_slack_integration_page`.
 - Centralized Slack ID permission handling in `_resolve_requested_slack_user_id` so create and update flows reject non-admin crafted submissions the same way.
 - Kept Slack ID normalization and uniqueness in `shared.user_admin.py` so route handlers do not duplicate trim or duplicate-check logic.
+- Kept Slack settings validation strings stable in `shared.slack_dm.py` and localized them in `app.i18n.py`, preserving a single UI-facing error translation path instead of branching validation by locale.

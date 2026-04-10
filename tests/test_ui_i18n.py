@@ -460,6 +460,53 @@ def test_ops_slack_integration_error_uses_slack_get_path_for_language_switch(mon
     assert "/ui-language?locale=pt-BR&amp;next=%2Fops%2Fintegrations%2Fslack" in response.text
 
 
+def test_ops_slack_integration_numeric_validation_error_translates_to_portuguese(monkeypatch, tmp_path):
+    from shared.config import SlackSettings
+
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings(tmp_path)
+    admin_user = SimpleNamespace(id=uuid.uuid4(), display_name="Admin", role="admin", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "load_slack_dm_settings",
+        lambda db, app_settings: SlackSettings(routing_mode="dm"),
+    )
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "slack_api_auth_test",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("auth.test should not run for invalid numeric settings")),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_admin_user] = lambda: admin_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            "/ops/integrations/slack",
+            data={
+                "csrf_token": "csrf-token",
+                "message_preview_max_chars": "3",
+                "http_timeout_seconds": "10",
+                "delivery_batch_size": "10",
+                "delivery_max_attempts": "5",
+                "delivery_stale_lock_seconds": "120",
+            },
+            headers={"Accept-Language": "pt-BR"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
+    assert "message_preview_max_chars deve ser maior ou igual a 4" in response.text
+    assert "/ui-language?locale=en&amp;next=%2Fops%2Fintegrations%2Fslack" in response.text
+    assert "/ui-language?locale=pt-BR&amp;next=%2Fops%2Fintegrations%2Fslack" in response.text
+
+
 def test_ops_set_user_active_invalid_state_is_translated(monkeypatch):
     stack = _load_web_stack()
     app = stack["create_app"]()
