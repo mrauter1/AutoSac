@@ -877,3 +877,28 @@ The plan needs a targeted revision to close the three blocking gaps above, then 
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=plan | phase=producer | cycle=2 | attempt=1 | thread_id=019d78f9-6319-7c80-956f-163a1f84d16a
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/plan_producer.md
+session_id=019d78f9-6319-7c80-956f-163a1f84d16a
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=plan | phase=producer | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d78f9-6319-7c80-956f-163a1f84d16a
+---
+I’m addressing the verifier’s blocking gaps directly in the plan artifacts now. First I’m checking the latest feedback and decision-log header, then I’ll patch the plan so the admin contract, no-actor-suppression rule, and DM-specific delivery observability are explicit.
+
+I have the exact fixes. I’m patching the plan to make the integration-page scope help and disconnect semantics explicit, to lock in no actor suppression for recipient routing, and to carry `recipient_user_id` plus `recipient_reason` into the worker observability and test contract.
+
+The narrative and phase contract are updated. I’m appending a short closure note to the feedback log and recording the new non-obvious decisions under this turn’s header so later implementation doesn’t drift back to the gaps the verifier found.
+
+I’ve written the fixes. I’m doing a short consistency pass now to confirm the three verifier findings are actually closed in both the narrative plan and the machine-readable phases, and that the new decisions landed under the correct turn header.
+
+Updated the planning artifacts to close the verifier’s blocking gaps. [plan.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/plan/plan.md) now makes the admin-page scope guidance explicit, defines disconnect as “disable delivery + clear `bot_token_ciphertext` + preserve non-secret workspace/audit metadata by default,” states the no-actor-suppression routing rule, and requires worker delivery logs/tests to carry `recipient_user_id` and `recipient_reason`.
+
+I also updated [phase_plan.yaml](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/plan/phase_plan.yaml) so the admin, routing, and worker phases each encode those requirements in scope and acceptance criteria, appended a closure note to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/plan/feedback.md), and recorded the non-obvious decisions under this turn’s header in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt). I did not edit the verifier-owned [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/plan/criteria.md). No tests were run; this turn only revised planning artifacts.

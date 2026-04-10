@@ -59,8 +59,8 @@ phases:
   in_scope:
   - Add require_admin_user and the /ops/integrations/slack GET, save, and disconnect
     routes.
-  - Add the Slack integration template, nav entry, locale-aware errors, and required
-    i18n strings.
+  - Add the Slack integration template, nav entry, locale-aware errors, required
+    i18n strings, and required Slack bot scope or capability guidance.
   - Extend /ops/users create or update flows and shared/user_admin.py with optional
     slack_user_id validation, trimming, clear behavior, and uniqueness.
   - Enforce that only admins can change slack_user_id, even if a non-admin submits
@@ -74,8 +74,9 @@ phases:
   acceptance_criteria:
   - id: AC-1
     text: Admins can load, save, and disconnect Slack DM settings from /ops/integrations/slack,
-      with blank-token preservation, auth.test validation for new tokens, and no token
-      echo in HTML.
+      with blank-token preservation, auth.test validation for new tokens, explicit
+      required-scope guidance, disconnect behavior that disables delivery and clears
+      bot_token_ciphertext, and no token echo in HTML.
   - id: AC-2
     text: Admins can create, update, clear, and validate users.slack_user_id from
       /ops/users, while Dev/TI and requester users cannot change Slack IDs.
@@ -84,7 +85,7 @@ phases:
       and last-known delivery health when available.
   deliverables:
   - Auth and app/routes_ops.py changes for admin-only Slack integration management
-  - Slack integration template, nav, and i18n updates
+  - Slack integration template, nav, i18n, and required-scope guidance updates
   - shared/user_admin.py plus ops-users form changes for slack_user_id
   - Updated ops workflow and locale-switch tests
   risks:
@@ -109,6 +110,8 @@ phases:
     active users with nonblank slack_user_id.
   - Collapse requester and assignee duplicates to one row with recipient_reason=requester_assignee
     and target_name=user:<recipient_user_id>.
+  - Preserve the no-actor-suppression rule so requester or assignee recipients are
+    not excluded just because they performed the action.
   - Persist routing_result values for created, suppressed_slack_disabled, suppressed_invalid_config,
     suppressed_notify_disabled, and suppressed_no_recipients, with routing_target_name
     always null.
@@ -125,7 +128,7 @@ phases:
   - id: AC-1
     text: New eligible events create zero, one, or two slack_dm target rows exactly
       from the post-mutation ticket state, with requester or assignee collapse when
-      they are the same AutoSac user.
+      they are the same AutoSac user and no actor-based self-notification suppression.
   - id: AC-2
     text: Zero-recipient outcomes persist integration_events and link rows but create
       no target rows, and routing_result is recorded as suppressed_no_recipients.
@@ -159,6 +162,8 @@ phases:
     Slack config and runs auth.test before recovery or claim work.
   - Resolve recipients at send time by recipient_user_id, then call conversations.open
     and chat.postMessage with Web API ok-response validation.
+  - Update worker claim and result logging so recipient_user_id and recipient_reason
+    are emitted alongside the delivery-state fields required by the PRD.
   - Classify global invalid-config, terminal recipient, and retryable failures, including
     Retry-After handling and no-Slack-call dead-lettering for missing or inactive
     recipients.
@@ -181,8 +186,9 @@ phases:
       to return HTTP success and Slack ok=true, and send-time missing or inactive
       recipients dead-letter without Slack HTTP calls.
   - id: AC-3
-    text: Docs and regression tests reflect one DB-backed Slack DM contract, including
-      Retry-After handling, no-backfill behavior, and config-first rollback.
+    text: Docs, regression tests, and worker observability reflect one DB-backed Slack
+      DM contract, including Retry-After handling, no-backfill behavior, config-first
+      rollback, and recipient_user_id plus recipient_reason logging.
   deliverables:
   - Refactored worker/main.py and worker/slack_delivery.py for DB-backed DM delivery
   - Updated Slack delivery and hardening tests plus targeted docs changes

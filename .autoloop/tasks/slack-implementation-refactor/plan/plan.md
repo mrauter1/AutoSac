@@ -39,6 +39,7 @@
 
 - Add `require_admin_user` in the auth layer and use it for `/ops/integrations/slack`.
 - Add `GET /ops/integrations/slack`, `POST /ops/integrations/slack`, and an explicit disconnect or clear-token POST in `app/routes_ops.py`, plus a dedicated template, nav entry, and i18n keys.
+- The integration page must document the required Slack bot capabilities and scopes for `auth.test`, `conversations.open`, and `chat.postMessage`, and it must make clear that the rollout expects DM-open or DM-send behavior rather than webhook or channel-post behavior.
 - Save flow must:
   - validate booleans and numeric knobs against the PRD ranges
   - preserve the stored token when the submitted token field is blank
@@ -46,6 +47,10 @@
   - run `auth.test` before storing a new token
   - persist `team_id`, `team_name`, `bot_user_id`, `validated_at`, `updated_at`, and `updated_by_user_id`
   - never echo the raw token into HTML, logs, or validation errors
+- Disconnect flow must:
+  - disable Slack DM delivery
+  - remove `bot_token_ciphertext`
+  - preserve non-secret workspace metadata and audit metadata by default, rather than clearing it implicitly
 - Extend `/ops/users` create/update forms and `shared/user_admin.py` with optional `slack_user_id`, but only admins may set or clear it. Dev/TI-visible forms should hide the field, and non-admin POST attempts to change it should fail at the route layer instead of being silently ignored.
 
 ### Emission-time routing and persistence
@@ -58,6 +63,7 @@
   - eligible recipients must exist, be active, and have a nonblank `users.slack_user_id`
   - same requester and assignee collapses to one row with `recipient_reason = requester_assignee`
   - target rows use `target_name = user:<recipient_user_id>`
+- No actor suppression is allowed. Recipient routing is based only on requester and assignee eligibility, so a requester or assignee may receive a DM even when they performed the triggering action themselves.
 - New event inserts must always persist the event row and required link rows for eligible business facts, with zero, one, or two DM target rows. Duplicate reuse remains read-only and must never add recipient rows after later enablement, assignment changes, or Slack ID edits.
 - Emission logs should switch from webhook `target_name` observability to `recipient_target_count`, while still logging `event_id`, `event_type`, `aggregate_id`, `dedupe_key`, and `routing_result`.
 
@@ -76,6 +82,7 @@
   - terminal recipient: missing or inactive recipient, missing Slack ID, recipient-specific Slack API errors
   - retryable: transport errors, ambiguous timeouts, 408, 429, 5xx, Slack `ratelimited`, or transient internal errors
 - Honor `Retry-After` when present by flooring `next_attempt_at` to both the header and the normal backoff minimum. Keep logs and persisted error summaries free of tokens, ciphertext, Slack response bodies, and internal-note text.
+- Worker claim and delivery-result logs must include `recipient_user_id` and `recipient_reason` alongside the existing delivery-state fields so DM observability does not regress to the old `target_name`-only contract.
 
 ## Milestones
 
@@ -99,7 +106,7 @@ Exit criteria:
 
 Exit criteria:
 
-- Admins can manage Slack DM settings end-to-end from `/ops/integrations/slack`.
+- Admins can manage Slack DM settings end-to-end from `/ops/integrations/slack`, including required-scope guidance and explicit disconnect behavior that disables delivery and removes the stored ciphertext.
 - Admins can create, update, clear, and validate `slack_user_id` mappings from `/ops/users`.
 - Non-admin users cannot change Slack configuration or Slack user IDs.
 
@@ -111,7 +118,7 @@ Exit criteria:
 
 Exit criteria:
 
-- New eligible events create 0, 1, or 2 `slack_dm` target rows exactly as the PRD specifies.
+- New eligible events create 0, 1, or 2 `slack_dm` target rows exactly as the PRD specifies, without suppressing self-notifications based on actor identity.
 - Duplicate reuse never repairs or backfills missing recipient rows.
 - Emission-time routing uses DB-backed config and current active Slack IDs without leaking internal content.
 
@@ -125,6 +132,7 @@ Exit criteria:
 
 - The worker only sends Slack DMs through `conversations.open` plus `chat.postMessage`.
 - Retry, dead-letter, invalid-config suppression, and send-time recipient lookup match the PRD.
+- Delivery logs and tests explicitly carry `recipient_user_id` and `recipient_reason` so DM observability stays aligned with the new target-row shape.
 - README, `.env.example`, deployment docs, and tests describe one DB-backed Slack DM contract rather than a competing webhook contract.
 
 ## Compatibility, Migration, Rollout, and Rollback
@@ -151,16 +159,18 @@ Exit criteria:
   - undecryptable tokens surface invalid config without crashing startup
 - Admin/UI tests:
   - admin-only access to `/ops/integrations/slack`
-  - save/disconnect page behavior, locale-switch path stability, and no token echo
+  - save/disconnect page behavior, locale-switch path stability, required-scope guidance, and no token echo
   - `/ops/users` admin-only Slack ID edits, uniqueness, trim/clear handling, and Dev/TI rejection paths
 - Emission tests:
   - requester-only, assignee-only, requester-plus-assignee, and requester-equals-assignee collapse
+  - no actor suppression when requester or assignee performed the triggering action
   - zero-recipient suppression and `recipient_target_count` logging
   - duplicate reuse after later Slack ID or assignment changes creates no new rows
 - Delivery tests:
   - cycle-level `auth.test` suppression and health persistence
   - send-time missing or inactive recipient dead-letters without Slack calls
   - `conversations.open` then `chat.postMessage`, with `ok = true` required on both
+  - worker claim and result logs include `recipient_user_id` and `recipient_reason`
   - auth/scope, recipient, transport, timeout, 429 or `Retry-After`, and 5xx classification
 - Docs/contract tests:
   - remove webhook/env assumptions from README, `.env.example`, deployment docs, and hardening tests
