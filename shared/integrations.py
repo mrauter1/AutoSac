@@ -19,6 +19,7 @@ from shared.models import (
     Ticket,
     TicketMessage,
     TicketStatusHistory,
+    User,
 )
 from shared.slack_dm import load_slack_dm_settings
 from shared.security import utc_now
@@ -29,7 +30,6 @@ INTEGRATION_ROUTING_RESULTS = (
     "suppressed_invalid_config",
     "suppressed_notify_disabled",
     "suppressed_no_recipients",
-    "suppressed_target_disabled",
 )
 
 _EVENT_TYPE_TO_NOTIFY_ENABLED = {
@@ -43,9 +43,17 @@ _WHITESPACE_RE = re.compile(r"\s+", re.UNICODE)
 @dataclass(frozen=True)
 class RoutingDecision:
     routing_result: str
+    recipient_targets: tuple["RecipientTarget", ...] = ()
     target_name: str | None = None
     config_error_code: str | None = None
     config_error_summary: str | None = None
+
+
+@dataclass(frozen=True)
+class RecipientTarget:
+    recipient_user_id: uuid.UUID
+    recipient_reason: str
+    target_name: str
 
 
 @dataclass(frozen=True)
@@ -63,6 +71,7 @@ class SlackRuntimeContext:
 class EmissionResult:
     event: IntegrationEvent
     routing_result: str
+    recipient_target_count: int = 0
     target_name: str | None = None
     config_error_code: str | None = None
     config_error_summary: str | None = None
@@ -269,24 +278,64 @@ def resolve_routing_decision(slack: SlackSettings, *, event_type: str) -> Routin
     notify_enabled = _EVENT_TYPE_TO_NOTIFY_ENABLED[event_type](slack)
     if not notify_enabled:
         return RoutingDecision(routing_result="suppressed_notify_disabled")
-    if slack.routing_mode == "dm":
-        # Recipient selection lands in a later phase; the DB-backed DM runtime must not
-        # fall back to webhook target semantics or misclassify valid config as invalid.
-        return RoutingDecision(routing_result="suppressed_no_recipients")
-    target = slack.get_target(slack.default_target_name)
-    if target is None:
-        return RoutingDecision(
-            routing_result="suppressed_invalid_config",
-            config_error_code=slack.config_error_code or "slack_default_target_not_found",
-            config_error_summary=slack.config_error_summary
-            or "SLACK_DEFAULT_TARGET_NAME must reference a target defined in SLACK_TARGETS_JSON",
+    return RoutingDecision(routing_result="suppressed_no_recipients")
+
+
+def load_user_by_id(db: Session, *, user_id: uuid.UUID | None) -> User | None:
+    if user_id is None:
+        return None
+    getter = getattr(db, "get", None)
+    if callable(getter):
+        return getter(User, user_id)
+    result = db.execute(select(User).where(User.id == user_id))
+    scalar_one_or_none = getattr(result, "scalar_one_or_none", None)
+    if callable(scalar_one_or_none):
+        return scalar_one_or_none()
+    return None
+
+
+def _is_recipient_eligible(user: User | None) -> bool:
+    if user is None or not bool(getattr(user, "is_active", False)):
+        return False
+    slack_user_id = getattr(user, "slack_user_id", None)
+    return isinstance(slack_user_id, str) and bool(slack_user_id.strip())
+
+
+def resolve_dm_recipient_targets(db: Session, *, ticket: Ticket) -> tuple[RecipientTarget, ...]:
+    requester = load_user_by_id(db, user_id=ticket.created_by_user_id)
+    assignee = load_user_by_id(db, user_id=ticket.assigned_to_user_id)
+
+    requester_eligible = _is_recipient_eligible(requester)
+    assignee_eligible = _is_recipient_eligible(assignee)
+
+    if requester_eligible and assignee_eligible and ticket.created_by_user_id == ticket.assigned_to_user_id:
+        recipient_user_id = ticket.created_by_user_id
+        return (
+            RecipientTarget(
+                recipient_user_id=recipient_user_id,
+                recipient_reason="requester_assignee",
+                target_name=f"user:{recipient_user_id}",
+            ),
         )
-    if not target.enabled:
-        return RoutingDecision(
-            routing_result="suppressed_target_disabled",
-            target_name=target.name,
+
+    recipient_targets: list[RecipientTarget] = []
+    if requester_eligible:
+        recipient_targets.append(
+            RecipientTarget(
+                recipient_user_id=ticket.created_by_user_id,
+                recipient_reason="requester",
+                target_name=f"user:{ticket.created_by_user_id}",
+            )
         )
-    return RoutingDecision(routing_result="created", target_name=target.name)
+    if assignee_eligible and ticket.assigned_to_user_id is not None:
+        recipient_targets.append(
+            RecipientTarget(
+                recipient_user_id=ticket.assigned_to_user_id,
+                recipient_reason="assignee",
+                target_name=f"user:{ticket.assigned_to_user_id}",
+            )
+        )
+    return tuple(recipient_targets)
 
 
 def _build_common_payload(
@@ -316,6 +365,13 @@ def _record_integration_event(
     links: tuple[tuple[str, uuid.UUID, str], ...],
 ) -> EmissionResult:
     routing = resolve_routing_decision(slack_runtime.slack, event_type=event_type)
+    if routing.routing_result == "suppressed_no_recipients":
+        recipient_targets = resolve_dm_recipient_targets(db, ticket=ticket)
+        if recipient_targets:
+            routing = RoutingDecision(
+                routing_result="created",
+                recipient_targets=recipient_targets,
+            )
     existing_event = load_integration_event_by_dedupe_key(db, dedupe_key=dedupe_key)
     if existing_event is not None:
         result = _build_duplicate_result(db, event=existing_event)
@@ -338,7 +394,7 @@ def _record_integration_event(
         dedupe_key=dedupe_key,
         payload_json=payload_json,
         routing_result=routing.routing_result,
-        routing_target_name=routing.target_name,
+        routing_target_name=None,
         routing_config_error_code=routing.config_error_code,
         routing_config_error_summary=routing.config_error_summary,
         created_at=recorded_at,
@@ -375,24 +431,28 @@ def _record_integration_event(
                 created_at=recorded_at,
             )
         )
-    if routing.routing_result == "created" and routing.target_name is not None:
-        db.add(
-            IntegrationEventTarget(
-                id=uuid.uuid4(),
-                event_id=event.id,
-                target_name=routing.target_name,
-                target_kind="slack_webhook",
-                delivery_status="pending",
-                attempt_count=0,
-                next_attempt_at=recorded_at,
-                created_at=recorded_at,
+    if routing.routing_result == "created":
+        for recipient_target in routing.recipient_targets:
+            db.add(
+                IntegrationEventTarget(
+                    id=uuid.uuid4(),
+                    event_id=event.id,
+                    target_name=recipient_target.target_name,
+                    target_kind="slack_dm",
+                    recipient_user_id=recipient_target.recipient_user_id,
+                    recipient_reason=recipient_target.recipient_reason,
+                    delivery_status="pending",
+                    attempt_count=0,
+                    next_attempt_at=recorded_at,
+                    created_at=recorded_at,
+                )
             )
-        )
 
     result = EmissionResult(
         event=event,
         routing_result=routing.routing_result,
-        target_name=routing.target_name,
+        recipient_target_count=len(routing.recipient_targets),
+        target_name=None,
         config_error_code=routing.config_error_code,
         config_error_summary=routing.config_error_summary,
         event_reused=False,
@@ -417,7 +477,7 @@ def _build_duplicate_result(
         return EmissionResult(
             event=event,
             routing_result="created",
-            target_name=existing_targets[0].target_name,
+            recipient_target_count=len(existing_targets),
             event_reused=True,
         )
     preserved_routing = _routing_decision_from_event(event)
@@ -427,7 +487,7 @@ def _build_duplicate_result(
     return EmissionResult(
         event=event,
         routing_result=selected_routing.routing_result,
-        target_name=selected_routing.target_name if selected_routing.routing_result == "suppressed_target_disabled" else None,
+        recipient_target_count=0,
         config_error_code=selected_routing.config_error_code,
         config_error_summary=selected_routing.config_error_summary,
         event_reused=True,
@@ -481,9 +541,8 @@ def _log_emission(
         "aggregate_id": str(ticket.id),
         "dedupe_key": dedupe_key,
         "routing_result": result.routing_result,
+        "recipient_target_count": result.recipient_target_count,
     }
-    if result.routing_result in {"created", "suppressed_target_disabled"} and result.target_name is not None:
-        payload["target_name"] = result.target_name
     if result.routing_result == "suppressed_invalid_config":
         payload["config_error_code"] = result.config_error_code
         payload["config_error_summary"] = result.config_error_summary

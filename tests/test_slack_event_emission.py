@@ -7,7 +7,7 @@ import uuid
 
 import pytest
 
-from shared.config import Settings, SlackSettings, SlackTargetSettings
+from shared.config import Settings, SlackSettings
 
 
 class _FakeNestedTransaction:
@@ -30,10 +30,11 @@ class _FakeScalarResult:
 class _FakeSession:
     def __init__(self, *, next_reference_num: int = 1):
         pytest.importorskip("sqlalchemy")
-        from shared.models import IntegrationEvent, IntegrationEventTarget
+        from shared.models import IntegrationEvent, IntegrationEventTarget, User
 
         self._integration_event_type = IntegrationEvent
         self._integration_event_target_type = IntegrationEventTarget
+        self._user_type = User
         self.added = []
         self.operations = []
         self.existing = {}
@@ -48,6 +49,8 @@ class _FakeSession:
             self.events_by_dedupe_key[item.dedupe_key] = item
         elif isinstance(item, self._integration_event_target_type):
             self.targets_by_event_id.setdefault(item.event_id, []).append(item)
+        elif isinstance(item, self._user_type):
+            self.existing[(self._user_type, item.id)] = item
         key = getattr(item, "user_id", None), getattr(item, "ticket_id", None)
         if key != (None, None):
             self.existing[key] = item
@@ -91,7 +94,6 @@ def _fake_integration_queries(monkeypatch):
 def _make_slack_settings(
     *,
     enabled: bool = True,
-    target_enabled: bool = True,
     notify_ticket_created: bool = True,
     notify_public_message_added: bool = True,
     notify_status_changed: bool = True,
@@ -100,17 +102,8 @@ def _make_slack_settings(
     config_error_summary: str | None = None,
     message_preview_max_chars: int = 24,
 ) -> SlackSettings:
-    targets = (
-        SlackTargetSettings(
-            name="ops_primary",
-            enabled=target_enabled,
-            webhook_url="https://hooks.slack.com/services/T000/B000/XXXX",
-        ),
-    )
     return SlackSettings(
         enabled=enabled,
-        default_target_name="ops_primary",
-        targets=targets,
         notify_ticket_created=notify_ticket_created,
         notify_public_message_added=notify_public_message_added,
         notify_status_changed=notify_status_changed,
@@ -118,6 +111,7 @@ def _make_slack_settings(
         is_valid=is_valid,
         config_error_code=config_error_code,
         config_error_summary=config_error_summary,
+        routing_mode="dm",
     )
 
 
@@ -169,6 +163,7 @@ def _load_symbols():
         build_message_preview,
         build_ticket_created_payload,
         record_ticket_created_event,
+        record_ticket_public_message_added_event,
     )
     from shared.models import (
         AIDraft,
@@ -181,6 +176,7 @@ def _load_symbols():
         User,
     )
     from shared.ticketing import (
+        add_ops_public_reply,
         add_ops_internal_note,
         add_requester_reply,
         create_ai_draft,
@@ -200,6 +196,7 @@ def _load_symbols():
         "TicketMessage": TicketMessage,
         "TicketStatusHistory": TicketStatusHistory,
         "User": User,
+        "add_ops_public_reply": add_ops_public_reply,
         "add_ops_internal_note": add_ops_internal_note,
         "add_requester_reply": add_requester_reply,
         "build_message_preview": build_message_preview,
@@ -210,28 +207,39 @@ def _load_symbols():
         "publish_ai_failure_note": publish_ai_failure_note,
         "record_status_change": record_status_change,
         "record_ticket_created_event": record_ticket_created_event,
+        "record_ticket_public_message_added_event": record_ticket_public_message_added_event,
         "route_ticket_after_ai": route_ticket_after_ai,
     }
 
 
-def _make_user(symbols, *, role: str = "requester"):
+def _make_user(symbols, *, role: str = "requester", slack_user_id: str | None = None, is_active: bool = True):
     return symbols["User"](
         id=uuid.uuid4(),
         email=f"{role}@example.com",
         display_name=role.upper(),
         password_hash="hash",
         role=role,
-        is_active=True,
+        slack_user_id=slack_user_id,
+        is_active=is_active,
     )
 
 
-def _make_ticket(symbols, *, status: str = "new", title: str = "Ticket title", reference: str = "T-000001"):
+def _make_ticket(
+    symbols,
+    *,
+    status: str = "new",
+    title: str = "Ticket title",
+    reference: str = "T-000001",
+    created_by_user_id: uuid.UUID | None = None,
+    assigned_to_user_id: uuid.UUID | None = None,
+):
     return symbols["Ticket"](
         id=uuid.uuid4(),
         reference_num=1,
         reference=reference,
         title=title,
-        created_by_user_id=uuid.uuid4(),
+        created_by_user_id=created_by_user_id or uuid.uuid4(),
+        assigned_to_user_id=assigned_to_user_id,
         status=status,
         urgent=False,
         created_at=datetime(2026, 4, 10, tzinfo=timezone.utc),
@@ -256,6 +264,11 @@ def _make_public_message(symbols, *, ticket_id, source: str = "requester_reply",
 def _integration_rows(fake_db, symbols, row_name: str):
     row_type = symbols[row_name]
     return [item for item in fake_db.added if isinstance(item, row_type)]
+
+
+def _register_users(fake_db, *users):
+    for user in users:
+        fake_db.add(user)
 
 
 def test_build_message_preview_normalizes_unicode_whitespace_and_truncates(tmp_path):
@@ -297,7 +310,8 @@ def test_create_requester_ticket_emits_ticket_created_only(monkeypatch, tmp_path
     )
     fake_db = _FakeSession(next_reference_num=17)
     slack_runtime = _make_slack_runtime(settings)
-    requester = _make_user(symbols)
+    requester = _make_user(symbols, slack_user_id="UREQUESTER")
+    _register_users(fake_db, requester)
 
     monkeypatch.setattr("shared.ticketing.create_pending_ai_run", lambda *args, **kwargs: None)
 
@@ -323,7 +337,7 @@ def test_create_requester_ticket_emits_ticket_created_only(monkeypatch, tmp_path
     assert events[0].payload_json["ticket_status"] == "new"
     assert "_integration_routing" not in events[0].payload_json
     assert events[0].routing_result == "created"
-    assert events[0].routing_target_name == "ops_primary"
+    assert events[0].routing_target_name is None
     assert events[0].routing_config_error_code is None
     assert events[0].routing_config_error_summary is None
     assert {(link.entity_type, link.entity_id, link.relation_kind) for link in links} == {
@@ -331,29 +345,35 @@ def test_create_requester_ticket_emits_ticket_created_only(monkeypatch, tmp_path
         ("ticket_message", initial_message.id, "message"),
     }
     assert len(targets) == 1
-    assert targets[0].target_name == "ops_primary"
+    assert targets[0].target_name == f"user:{requester.id}"
+    assert targets[0].target_kind == "slack_dm"
+    assert targets[0].recipient_user_id == requester.id
+    assert targets[0].recipient_reason == "requester"
     assert targets[0].delivery_status == "pending"
 
 
 @pytest.mark.parametrize(
-    ("slack_enabled", "target_enabled", "expected_routing_result", "expect_target_name"),
+    ("slack_enabled", "notify_ticket_created", "requester_slack_user_id", "expected_routing_result"),
     (
-        (False, True, "suppressed_slack_disabled", False),
-        (True, False, "suppressed_target_disabled", True),
+        (False, True, "UREQUESTER", "suppressed_slack_disabled"),
+        (True, False, "UREQUESTER", "suppressed_notify_disabled"),
+        (True, True, None, "suppressed_no_recipients"),
     ),
 )
 def test_ticket_created_suppression_paths_record_event_and_links_without_target_row(
-    monkeypatch,
     tmp_path,
     slack_enabled,
-    target_enabled,
+    notify_ticket_created,
+    requester_slack_user_id,
     expected_routing_result,
-    expect_target_name,
 ):
     symbols = _load_symbols()
     settings = _make_settings(
         tmp_path,
-        slack=_make_slack_settings(enabled=slack_enabled, target_enabled=target_enabled),
+        slack=_make_slack_settings(
+            enabled=slack_enabled,
+            notify_ticket_created=notify_ticket_created,
+        ),
     )
     fake_db = _FakeSession()
     observed = []
@@ -361,7 +381,9 @@ def test_ticket_created_suppression_paths_record_event_and_links_without_target_
         settings,
         event_logger=lambda service, event, **payload: observed.append((service, event, payload)),
     )
-    ticket = _make_ticket(symbols)
+    requester = _make_user(symbols, slack_user_id=requester_slack_user_id)
+    _register_users(fake_db, requester)
+    ticket = _make_ticket(symbols, created_by_user_id=requester.id)
     message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
 
     result = symbols["record_ticket_created_event"](
@@ -385,14 +407,10 @@ def test_ticket_created_suppression_paths_record_event_and_links_without_target_
     assert events[0].routing_result == expected_routing_result
     assert "_integration_routing" not in events[0].payload_json
     assert observed[0][2]["routing_result"] == expected_routing_result
-    if expect_target_name:
-        assert result.target_name == "ops_primary"
-        assert events[0].routing_target_name == "ops_primary"
-        assert observed[0][2]["target_name"] == "ops_primary"
-    else:
-        assert result.target_name is None
-        assert events[0].routing_target_name is None
-        assert "target_name" not in observed[0][2]
+    assert result.target_name is None
+    assert result.recipient_target_count == 0
+    assert events[0].routing_target_name is None
+    assert observed[0][2]["recipient_target_count"] == 0
 
 
 def test_add_requester_reply_emits_public_message_and_status_changed(monkeypatch, tmp_path):
@@ -400,8 +418,9 @@ def test_add_requester_reply_emits_public_message_and_status_changed(monkeypatch
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
     fake_db = _FakeSession()
     slack_runtime = _make_slack_runtime(settings)
-    requester = _make_user(symbols)
-    ticket = _make_ticket(symbols, status="resolved")
+    requester = _make_user(symbols, slack_user_id="UREQUESTER")
+    _register_users(fake_db, requester)
+    ticket = _make_ticket(symbols, status="resolved", created_by_user_id=requester.id)
 
     monkeypatch.setattr("shared.ticketing.enqueue_or_requeue_ai_run", lambda *args, **kwargs: None)
 
@@ -432,6 +451,141 @@ def test_add_requester_reply_emits_public_message_and_status_changed(monkeypatch
     assert message_event.payload_json["message_preview"] == "Ainda acontece o erro..."
     assert message_event.payload_json["ticket_status"] == "ai_triage"
     assert len(targets) == 2
+    assert {
+        (target.event_id, target.target_name, target.recipient_user_id, target.recipient_reason)
+        for target in targets
+    } == {
+        (status_event.id, f"user:{requester.id}", requester.id, "requester"),
+        (message_event.id, f"user:{requester.id}", requester.id, "requester"),
+    }
+
+
+def test_record_ticket_created_event_creates_requester_and_assignee_dm_targets_when_distinct_and_eligible(tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path, slack=_make_slack_settings())
+    fake_db = _FakeSession()
+    requester = _make_user(symbols, slack_user_id="UREQUESTER")
+    assignee = _make_user(symbols, role="dev_ti", slack_user_id="UASSIGNEE")
+    _register_users(fake_db, requester, assignee)
+    ticket = _make_ticket(
+        symbols,
+        created_by_user_id=requester.id,
+        assigned_to_user_id=assignee.id,
+    )
+    message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
+
+    result = symbols["record_ticket_created_event"](
+        fake_db,
+        slack_runtime=_make_slack_runtime(settings),
+        ticket=ticket,
+        initial_message=message,
+    )
+
+    targets = _integration_rows(fake_db, symbols, "IntegrationEventTarget")
+
+    assert result.routing_result == "created"
+    assert result.recipient_target_count == 2
+    assert {target.target_name for target in targets} == {
+        f"user:{requester.id}",
+        f"user:{assignee.id}",
+    }
+    assert {(target.recipient_user_id, target.recipient_reason) for target in targets} == {
+        (requester.id, "requester"),
+        (assignee.id, "assignee"),
+    }
+
+
+def test_record_ticket_created_event_creates_assignee_only_target_when_requester_is_ineligible(tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path, slack=_make_slack_settings())
+    fake_db = _FakeSession()
+    requester = _make_user(symbols)
+    assignee = _make_user(symbols, role="dev_ti", slack_user_id="UASSIGNEE")
+    _register_users(fake_db, requester, assignee)
+    ticket = _make_ticket(
+        symbols,
+        created_by_user_id=requester.id,
+        assigned_to_user_id=assignee.id,
+    )
+    message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
+
+    result = symbols["record_ticket_created_event"](
+        fake_db,
+        slack_runtime=_make_slack_runtime(settings),
+        ticket=ticket,
+        initial_message=message,
+    )
+
+    targets = _integration_rows(fake_db, symbols, "IntegrationEventTarget")
+
+    assert result.routing_result == "created"
+    assert result.recipient_target_count == 1
+    assert len(targets) == 1
+    assert targets[0].target_name == f"user:{assignee.id}"
+    assert targets[0].recipient_user_id == assignee.id
+    assert targets[0].recipient_reason == "assignee"
+
+
+def test_record_ticket_created_event_collapses_requester_and_assignee_when_same_user(tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path, slack=_make_slack_settings())
+    fake_db = _FakeSession()
+    operator = _make_user(symbols, role="dev_ti", slack_user_id="UOPERATOR")
+    _register_users(fake_db, operator)
+    ticket = _make_ticket(
+        symbols,
+        created_by_user_id=operator.id,
+        assigned_to_user_id=operator.id,
+    )
+    message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
+
+    result = symbols["record_ticket_created_event"](
+        fake_db,
+        slack_runtime=_make_slack_runtime(settings),
+        ticket=ticket,
+        initial_message=message,
+    )
+
+    targets = _integration_rows(fake_db, symbols, "IntegrationEventTarget")
+
+    assert result.routing_result == "created"
+    assert result.recipient_target_count == 1
+    assert len(targets) == 1
+    assert targets[0].target_name == f"user:{operator.id}"
+    assert targets[0].recipient_user_id == operator.id
+    assert targets[0].recipient_reason == "requester_assignee"
+
+
+def test_add_ops_public_reply_keeps_assignee_self_notification_when_actor_is_recipient(tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path, slack=_make_slack_settings())
+    fake_db = _FakeSession()
+    actor = _make_user(symbols, role="dev_ti", slack_user_id="UASSIGNEE")
+    _register_users(fake_db, actor)
+    ticket = _make_ticket(
+        symbols,
+        status="waiting_on_user",
+        created_by_user_id=uuid.uuid4(),
+        assigned_to_user_id=actor.id,
+    )
+
+    symbols["add_ops_public_reply"](
+        fake_db,
+        slack_runtime=_make_slack_runtime(settings),
+        ticket=ticket,
+        actor=actor,
+        body_markdown="Segue atualização.",
+        next_status="waiting_on_user",
+    )
+
+    events = _integration_rows(fake_db, symbols, "IntegrationEvent")
+    targets = _integration_rows(fake_db, symbols, "IntegrationEventTarget")
+
+    assert [event.event_type for event in events] == ["ticket.public_message_added"]
+    assert len(targets) == 1
+    assert targets[0].target_name == f"user:{actor.id}"
+    assert targets[0].recipient_user_id == actor.id
+    assert targets[0].recipient_reason == "assignee"
 
 
 def test_add_ops_internal_note_creates_no_integration_rows(tmp_path):
@@ -561,35 +715,30 @@ def test_publish_ai_draft_for_ops_uses_ai_public_message_author_in_payload(tmp_p
     assert message_event.payload_json["ticket_status"] == "waiting_on_user"
 
 
-def test_duplicate_reuse_preserves_zero_target_state_and_log_after_routing_change(monkeypatch, tmp_path):
+def test_duplicate_reuse_preserves_zero_target_state_after_later_slack_id_change(tmp_path):
     symbols = _load_symbols()
-    disabled_settings = _make_settings(
-        tmp_path,
-        slack=_make_slack_settings(
-            notify_ticket_created=False,
-            notify_public_message_added=False,
-            notify_status_changed=False,
-        ),
-    )
-    enabled_settings = _make_settings(tmp_path, slack=_make_slack_settings())
+    settings = _make_settings(tmp_path, slack=_make_slack_settings())
     fake_db = _FakeSession()
-    ticket = _make_ticket(symbols)
+    requester = _make_user(symbols)
+    _register_users(fake_db, requester)
+    ticket = _make_ticket(symbols, created_by_user_id=requester.id)
     message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
     observed = []
 
     first = symbols["record_ticket_created_event"](
         fake_db,
         slack_runtime=_make_slack_runtime(
-            disabled_settings,
+            settings,
             event_logger=lambda service, event, **payload: observed.append((service, event, payload)),
         ),
         ticket=ticket,
         initial_message=message,
     )
+    requester.slack_user_id = "UREQUESTER"
     second = symbols["record_ticket_created_event"](
         fake_db,
         slack_runtime=_make_slack_runtime(
-            enabled_settings,
+            settings,
             event_logger=lambda service, event, **payload: observed.append((service, event, payload)),
         ),
         ticket=ticket,
@@ -604,8 +753,9 @@ def test_duplicate_reuse_preserves_zero_target_state_and_log_after_routing_chang
     assert first.event.id == second.event.id
     assert second.event_reused is True
     assert "_integration_routing" not in first.event.payload_json
-    assert first.event.routing_result == "suppressed_notify_disabled"
-    assert second.routing_result == "suppressed_notify_disabled"
+    assert first.event.routing_result == "suppressed_no_recipients"
+    assert second.routing_result == "suppressed_no_recipients"
+    assert second.recipient_target_count == 0
     assert observed[1] == (
         "integration",
         "integration_event_recorded",
@@ -615,28 +765,28 @@ def test_duplicate_reuse_preserves_zero_target_state_and_log_after_routing_chang
             "aggregate_type": "ticket",
             "aggregate_id": str(ticket.id),
             "dedupe_key": f"ticket.created:{ticket.id}",
-            "routing_result": "suppressed_notify_disabled",
+            "routing_result": "suppressed_no_recipients",
+            "recipient_target_count": 0,
             "event_reused": True,
         },
     )
 
 
-def test_duplicate_reuse_preserves_existing_target_row_state_without_creating_second_row(monkeypatch, tmp_path):
+def test_duplicate_reuse_does_not_add_missing_assignee_row_after_later_assignment_change(tmp_path):
     symbols = _load_symbols()
-    original_settings = _make_settings(tmp_path, slack=_make_slack_settings())
-    changed_settings = _make_settings(
-        tmp_path,
-        slack=_make_slack_settings(target_enabled=False),
-    )
+    settings = _make_settings(tmp_path, slack=_make_slack_settings())
     fake_db = _FakeSession()
-    ticket = _make_ticket(symbols)
+    requester = _make_user(symbols, slack_user_id="UREQUESTER")
+    assignee = _make_user(symbols, role="dev_ti", slack_user_id="UASSIGNEE")
+    _register_users(fake_db, requester, assignee)
+    ticket = _make_ticket(symbols, created_by_user_id=requester.id)
     message = _make_public_message(symbols, ticket_id=ticket.id, source="ticket_create")
     observed = []
 
     first = symbols["record_ticket_created_event"](
         fake_db,
         slack_runtime=_make_slack_runtime(
-            original_settings,
+            settings,
             event_logger=lambda service, event, **payload: observed.append((service, event, payload)),
         ),
         ticket=ticket,
@@ -651,11 +801,12 @@ def test_duplicate_reuse_preserves_existing_target_row_state_without_creating_se
     original_target.last_error = "timeout"
     original_target.locked_by = "host:123"
     original_target.locked_at = datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc)
+    ticket.assigned_to_user_id = assignee.id
 
     second = symbols["record_ticket_created_event"](
         fake_db,
         slack_runtime=_make_slack_runtime(
-            changed_settings,
+            settings,
             event_logger=lambda service, event, **payload: observed.append((service, event, payload)),
         ),
         ticket=ticket,
@@ -670,13 +821,16 @@ def test_duplicate_reuse_preserves_existing_target_row_state_without_creating_se
     assert second.event_reused is True
     assert second.event.id == first.event.id
     assert second.routing_result == "created"
-    assert second.target_name == "ops_primary"
+    assert second.recipient_target_count == 1
     assert targets[0] is original_target
     assert targets[0].delivery_status == "failed"
     assert targets[0].attempt_count == 3
     assert targets[0].last_error == "timeout"
     assert targets[0].locked_by == "host:123"
     assert targets[0].locked_at == datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc)
+    assert targets[0].target_name == f"user:{requester.id}"
+    assert targets[0].recipient_user_id == requester.id
+    assert targets[0].recipient_reason == "requester"
     assert observed[1] == (
         "integration",
         "integration_event_recorded",
@@ -687,25 +841,23 @@ def test_duplicate_reuse_preserves_existing_target_row_state_without_creating_se
             "aggregate_id": str(ticket.id),
             "dedupe_key": f"ticket.created:{ticket.id}",
             "routing_result": "created",
-            "target_name": "ops_primary",
+            "recipient_target_count": 1,
             "event_reused": True,
         },
     )
 
 
 @pytest.mark.parametrize(
-    ("routing_result", "routing_target_name", "config_error_code", "config_error_summary", "expected_log_fields"),
+    ("routing_result", "config_error_code", "config_error_summary", "expected_log_fields"),
     [
         (
-            "suppressed_target_disabled",
-            "ops_primary",
+            "suppressed_no_recipients",
             None,
             None,
-            {"target_name": "ops_primary"},
+            {},
         ),
         (
             "suppressed_invalid_config",
-            None,
             "slack_targets_json_parse_error",
             "SLACK_TARGETS_JSON must be a valid JSON object",
             {
@@ -718,7 +870,6 @@ def test_duplicate_reuse_preserves_existing_target_row_state_without_creating_se
 def test_duplicate_reuse_zero_target_preserves_stored_non_created_routing_snapshot(
     tmp_path,
     routing_result,
-    routing_target_name,
     config_error_code,
     config_error_summary,
     expected_log_fields,
@@ -742,7 +893,7 @@ def test_duplicate_reuse_zero_target_preserves_stored_non_created_routing_snapsh
             occurred_at=ticket.created_at,
         ),
         routing_result=routing_result,
-        routing_target_name=routing_target_name,
+        routing_target_name=None,
         routing_config_error_code=config_error_code,
         routing_config_error_summary=config_error_summary,
         created_at=datetime(2026, 4, 10, 12, 0, tzinfo=timezone.utc),
@@ -762,7 +913,8 @@ def test_duplicate_reuse_zero_target_preserves_stored_non_created_routing_snapsh
     assert result.event.id == event.id
     assert result.event_reused is True
     assert result.routing_result == routing_result
-    assert result.target_name == routing_target_name
+    assert result.recipient_target_count == 0
+    assert result.target_name is None
     assert result.config_error_code == config_error_code
     assert result.config_error_summary == config_error_summary
     assert _integration_rows(fake_db, symbols, "IntegrationEventTarget") == []
@@ -777,6 +929,7 @@ def test_duplicate_reuse_zero_target_preserves_stored_non_created_routing_snapsh
                 "aggregate_id": str(ticket.id),
                 "dedupe_key": f"ticket.created:{ticket.id}",
                 "routing_result": routing_result,
+                "recipient_target_count": 0,
                 "event_reused": True,
                 **expected_log_fields,
             },
@@ -804,7 +957,7 @@ def test_duplicate_reuse_zero_target_falls_back_to_suppressed_notify_disabled_fo
             occurred_at=ticket.created_at,
         ),
         routing_result=routing_result,
-        routing_target_name="ops_primary" if routing_result == "created" else None,
+        routing_target_name=None,
         routing_config_error_code=None,
         routing_config_error_summary=None,
         created_at=datetime(2026, 4, 10, 12, 0, tzinfo=timezone.utc),
@@ -821,11 +974,12 @@ def test_duplicate_reuse_zero_target_falls_back_to_suppressed_notify_disabled_fo
     assert result.event.id == event.id
     assert result.event_reused is True
     assert result.routing_result == "suppressed_notify_disabled"
+    assert result.recipient_target_count == 0
     assert result.target_name is None
     assert _integration_rows(fake_db, symbols, "IntegrationEventTarget") == []
 
 
-def test_invalid_config_emission_logs_suppression_without_row_state_fields(monkeypatch, tmp_path):
+def test_invalid_config_emission_logs_suppression_without_row_state_fields(tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(
         tmp_path,
@@ -866,6 +1020,7 @@ def test_invalid_config_emission_logs_suppression_without_row_state_fields(monke
                 "aggregate_id": str(ticket.id),
                 "dedupe_key": f"ticket.created:{ticket.id}",
                 "routing_result": "suppressed_invalid_config",
+                "recipient_target_count": 0,
                 "config_error_code": "slack_targets_json_parse_error",
                 "config_error_summary": "SLACK_TARGETS_JSON must be a valid JSON object",
             },
