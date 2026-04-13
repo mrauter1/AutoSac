@@ -15,8 +15,8 @@
       "worker-dm-delivery-and-regression"
     ],
     "explicit": true,
-    "current_phase_index": 3,
-    "current_phase_id": "worker-dm-delivery-and-regression"
+    "current_phase_index": 4,
+    "current_phase_id": null
   },
   "phase_status": {
     "schema-emission-runtime-boundary": "completed",
@@ -25,7 +25,7 @@
     "dm-persistence-runtime-foundation": "completed",
     "admin-ui-and-user-mapping": "completed",
     "emission-dm-recipient-routing": "completed",
-    "worker-dm-delivery-and-regression": "in_progress"
+    "worker-dm-delivery-and-regression": "completed"
   },
   "phase_history": [
     {
@@ -111,6 +111,13 @@
       "run_id": "run-20260410T195822Z-068ccbe4",
       "status": "in_progress",
       "ts": "2026-04-13T14:15:35.650614+00:00"
+    },
+    {
+      "phase_id": "worker-dm-delivery-and-regression",
+      "run_id": "run-20260410T195822Z-068ccbe4",
+      "status": "completed",
+      "ts": "2026-04-13T14:56:14.370889+00:00",
+      "pair": "test"
     }
   ]
 }
