@@ -1220,3 +1220,114 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=producer | cycle=2 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_producer.md
+session_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+I have the fix approach scoped: keep the existing batch claim path, but explicitly restore any still-owned `processing` claims when a send-time auth/scope failure halts the cycle. I’m checking the phase notes and checklist now so I can map the code change and keep the artifact updates aligned.
+
+I’ve narrowed the blast radius. The code change will stay inside `worker/slack_delivery.py`, the Slack delivery tests, and the existing phase notes/decision ledger, with one small README line adjustment to avoid the untracked-doc reference.
+
+I’m editing the worker path now. The change is narrowly scoped: carry enough pre-claim state to restore still-owned rows, add one helper to do that restoration, and wire it into the cycle halt path for send-time auth or scope failures.
+
+I’m updating the regression tests now. One test will pin the new restore helper directly, and one will exercise the real cycle path where `auth.test` succeeds but `conversations.open` returns `missing_scope`, so the row-state contract is covered end to end.
+
+I’m resolving the docs finding with the smallest safe change: keeping the README anchored to tracked docs and the operational contract already summarized there, rather than pointing it at an untracked file.
+
+The code edits are in place. I’m reading back the touched sections once before I run tests so I can catch any contract drift in the restore path or the new cycle-level assertions.
+
+The code reads cleanly after the patch. I’m running the targeted delivery and doc checks now, then I’ll refresh the phase notes and decision ledger with the finalized behavior change.
+
+The compile step passed. Pytest is still running; once that finishes I’ll update the implementation notes and the shared decision block with the validated restore behavior.
+
+The targeted delivery/doc tests passed. I’m running one adjacent worker regression slice as a safety check because the orchestration change sits on the delivery loop boundary, then I’ll finalize the phase notes.
+
+I’ve got green tests on the changed path. I’m updating the phase notes and appending the non-obvious decisions now so the next reviewer or turn sees the exact restore semantics and the doc-reference choice without having to rediscover them from the diff.
+
+Scope considered
+- Reviewer findings `IMP-001` and `IMP-002` only, plus the adjacent worker delivery orchestration and the touched rollout docs.
+
+What I analyzed
+- The claim -> send -> suppression path in [worker/slack_delivery.py](/home/marcelo/code/AutoSac/worker/slack_delivery.py).
+- The delivery regressions in [tests/test_slack_delivery.py](/home/marcelo/code/AutoSac/tests/test_slack_delivery.py).
+- The README Slack rollout reference in [README.md](/home/marcelo/code/AutoSac/README.md).
+- The phase notes and shared decision ledger in [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/worker-dm-delivery-and-regression/implementation_notes.md) and [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt).
+
+What I changed
+- Extended `ClaimedDeliveryTarget` with pre-claim state and added `restore_claimed_delivery_targets()` in [worker/slack_delivery.py](/home/marcelo/code/AutoSac/worker/slack_delivery.py). When a send-time auth or scope failure halts the cycle, the worker now restores still-owned claims from the current batch back to their pre-claim `pending` or `failed` state before persisting invalid-config health and returning.
+- Added two regressions in [tests/test_slack_delivery.py](/home/marcelo/code/AutoSac/tests/test_slack_delivery.py): one for the restore helper directly, and one cycle-level test where `auth.test` succeeds and `conversations.open` returns `missing_scope`, proving the claimed rows are restored.
+- Removed the README pointer to the untracked Slack DM PRD working file in [README.md](/home/marcelo/code/AutoSac/README.md) and kept the docs anchored to tracked repo docs plus the inline DB-backed contract summary.
+- Updated [implementation_notes.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/worker-dm-delivery-and-regression/implementation_notes.md) and appended a new turn block in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt).
+
+Key findings / decisions
+- I kept the existing batch-claim shape and centralized the fix at the cycle halt point instead of switching the worker to one-row-at-a-time claims.
+- The restore path only touches still-owned `processing` rows from the current batch. Rows already finalized earlier in the batch stay finalized.
+
+Open issues / next step
+- Validation passed:
+  - `python3 -m compileall worker/slack_delivery.py tests/test_slack_delivery.py`
+  - `pytest tests/test_slack_delivery.py tests/test_hardening_validation.py -q`
+  - `pytest tests/test_ai_worker.py -q`
+- Ready for verifier rerun.
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=verifier | cycle=2 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_verifier.md
+session_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+Re-reviewing the phase after the producer follow-up. I’m checking the updated worker claim-restore path, the new regression tests, and the tracked-doc change, then I’ll update the reviewer artifacts to match the current state.
+
+The restore path is wired the way the review asked for, and the new cycle-level test actually exercises the missing-scope case rather than just mocking the suppression. I’m doing one last spot-check on the README line and the phase notes, then I’ll mark the criteria and feedback accordingly.
+
+A second pass turned up one remaining contract gap. The claimed-row restore is fixed, but the worker still performs stale-lock recovery before a send-time scope/auth failure can be discovered, which means the affected cycle can still mutate `processing` rows contrary to the PRD. I’m capturing that in the feedback and leaving the phase incomplete.
+
+The reviewer artifacts are updated. I’m doing a quick read-back of the feedback so the final status is consistent with the remaining stale-recovery issue and the resolved earlier findings.
+
+Scope considered
+- Worker DM delivery and regression-completion phase only.
+- Request-relevant runtime paths in `worker/slack_delivery.py`, the updated Slack delivery tests, the touched README line, and the phase-local review artifacts.
+
+What I analyzed
+- The current cycle ordering in `worker/slack_delivery.py`: preflight, stale-lock recovery, claim, send, and invalid-config halt handling.
+- The new claim-restore helper and the added cycle-level regression for `auth.test` success followed by `missing_scope`.
+- The updated README rollout reference and the phase notes plus shared decision ledger.
+- The producer’s reported validation run: `pytest tests/test_slack_delivery.py tests/test_hardening_validation.py tests/test_ai_worker.py -q`.
+
+What I reviewed
+- Left [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/worker-dm-delivery-and-regression/criteria.md) in an incomplete state because one blocking runtime issue remains.
+- Appended follow-up status and a new blocking finding to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/worker-dm-delivery-and-regression/feedback.md):
+  - `IMP-001` resolved.
+  - `IMP-002` resolved.
+  - `IMP-003` blocking: stale-lock recovery still mutates rows before send-time invalid-config can halt the cycle.
+
+Key findings / decisions
+- The claimed-row regression is fixed correctly. The worker now restores still-owned claimed rows when `conversations.open` or `chat.postMessage` reveals auth or scope invalid-config after a successful `auth.test`.
+- A remaining blocking gap still exists: `_run_delivery_cycle_with_runtime()` runs `recover_stale_delivery_targets()` before send-time invalid-config can be discovered, so a token that passes `auth.test` but lacks DM send scopes can still rewrite stale `processing` rows to `failed` in the affected cycle. That still violates the PRD requirement that invalid-config suppression leave pending, failed, and processing rows unchanged for the affected cycle.
+- The README doc-link issue is resolved.
+
+Open issues / next step
+- The producer should either move stale-lock recovery behind a capability check that proves DM send is usable before any row mutation, or restore stale-recovery mutations when send-time auth or scope invalid-config is discovered.
+- Add a regression test for stale rows plus a send-time `missing_scope` failure.
+- Re-run verifier after that fix.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
