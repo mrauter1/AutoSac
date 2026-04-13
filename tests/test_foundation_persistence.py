@@ -366,7 +366,7 @@ def test_slack_integration_foundation_migration_adds_required_tables_and_indexes
     assert 'op.create_table(\n        "integration_event_links"' in migration_source
     assert 'op.create_table(\n        "integration_event_targets"' in migration_source
     assert 'sa.UniqueConstraint("dedupe_key"' in migration_source
-    assert '"uq_integration_event_links_event_id_entity_type_entity_id_relation_kind"' in migration_source
+    assert '"uq_integration_event_links_event_entity_relation"' in migration_source
     assert '"uq_integration_event_targets_event_id_target_name"' in migration_source
     assert '"ix_integration_events_event_type_created_at"' in migration_source
     assert '"ix_integration_events_aggregate_type_aggregate_id_created_at"' in migration_source
