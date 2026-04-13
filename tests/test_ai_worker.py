@@ -497,6 +497,86 @@ def test_prepare_step_run_projects_non_image_attachment_into_workspace_prompt_wi
     assert "image_attachment=no" in prepared.prompt
 
 
+def test_prepare_step_run_skips_missing_attachment_file_without_failing(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    missing_path = tmp_path / "source_attachments" / "03 - MARCO.xlsx"
+    attachment = SimpleNamespace(
+        id=uuid.uuid4(),
+        original_filename="03 - MARCO.xlsx",
+        stored_path=str(missing_path),
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=123,
+        sha256="sha-missing",
+        width=None,
+        height=None,
+    )
+    context = _make_context(public_attachments=[attachment])
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
+        context=context,
+        router_result=router_result,
+        target_route_target_id="support",
+    )
+
+    assert prepared.public_attachments == ()
+    assert prepared.image_paths == []
+    assert "Public attachments:" in prepared.prompt
+    assert "(none)" in prepared.prompt
+
+
+def test_prepare_step_run_keeps_existing_attachments_when_some_files_are_missing(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    present_attachment = _make_attachment(
+        tmp_path,
+        filename="Quarterly Report.xls",
+        contents=b"fake spreadsheet",
+        mime_type="application/vnd.ms-excel",
+        sha256="sha-xls",
+    )
+    missing_attachment = SimpleNamespace(
+        id=uuid.uuid4(),
+        original_filename="03 - MARCO.xlsx",
+        stored_path=str(tmp_path / "source_attachments" / "03 - MARCO.xlsx"),
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=456,
+        sha256="sha-missing",
+        width=None,
+        height=None,
+    )
+    context = _make_context(public_attachments=[present_attachment, missing_attachment])
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
+        context=context,
+        router_result=router_result,
+        target_route_target_id="support",
+    )
+
+    assert len(prepared.public_attachments) == 1
+    assert prepared.public_attachments[0].original_filename == "Quarterly Report.xls"
+    assert "Quarterly Report.xls" in prepared.prompt
+    assert "03 - MARCO.xlsx" not in prepared.prompt
+
+
 def test_prepare_step_run_rejects_symlinked_attachment_dir_outside_workspace_before_copy(tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)

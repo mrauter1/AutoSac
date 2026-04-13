@@ -14,6 +14,7 @@ from sqlalchemy import select
 from shared.agent_specs import AgentSpec
 from shared.config import Settings
 from shared.db import session_scope
+from shared.logging import log_worker_event
 from shared.models import AIRun, AIRunStep, Ticket
 from shared.routing_registry import RoutingRegistryError, load_routing_registry
 from shared.security import utc_now
@@ -102,10 +103,15 @@ def _materialize_public_attachments(
     for attachment in public_attachments:
         source_path = Path(attachment.stored_path)
         if not source_path.is_file():
-            raise StepRunError(
-                f"Attachment file is missing for ticket {ticket_id}: "
-                f"{attachment.original_filename} ({source_path})"
+            log_worker_event(
+                "attachment_file_missing",
+                level="warning",
+                ticket_id=str(ticket_id),
+                attachment_id=str(attachment.id),
+                original_filename=attachment.original_filename,
+                stored_path=str(source_path),
             )
+            continue
         target_path = attachment_root / _safe_workspace_attachment_filename(
             attachment_id=attachment.id,
             original_filename=attachment.original_filename,
