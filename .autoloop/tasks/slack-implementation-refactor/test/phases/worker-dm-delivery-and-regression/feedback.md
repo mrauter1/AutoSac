@@ -9,3 +9,6 @@
 
 - Added cycle-level regression coverage in `tests/test_slack_delivery.py` for the mixed batch case where one DM send succeeds and a later claimed target fails with `missing_scope`; the test pins that the earlier row stays finalized, the later row is restored, and stale-lock recovery is skipped for the affected cycle.
 - Documented the phase behavior-to-test coverage map, preserved invariants, failure paths, flake controls, and known gaps in `test_strategy.md`.
+
+Audit review, cycle 1
+No audit findings in phase scope. The added regressions cover both first-send and later-send `missing_scope` halts, stale-lock recovery skip semantics, and the mixed batch case where earlier finalized rows must remain finalized.
