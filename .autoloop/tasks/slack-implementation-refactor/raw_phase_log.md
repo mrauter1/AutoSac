@@ -1946,3 +1946,58 @@ I’ve reached the end-state for this phase. I’m writing down the two non-obvi
 **Open issues / next step**
 - Validation passed: `pytest tests/test_slack_delivery.py -q`, `pytest tests/test_slack_delivery.py tests/test_hardening_validation.py tests/test_ai_worker.py -q`, `pytest tests/test_slack_dm_foundation.py tests/test_slack_event_emission.py -q`, and `python3 -m compileall worker tests shared app`.
 - `tasks/slack_dm_integration_PRD.md` is present but currently untracked in this worktree; I left it untouched, but if README should keep pointing to it, it needs to be included by the owner.
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=verifier | cycle=1 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_verifier.md
+session_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+I found one material contract violation in the worker flow and one smaller docs risk. I’m recording both in the phase feedback now and leaving the criteria incomplete.
+
+Reviewing the delivery-phase diff against the PRD and prior decisions now. I’m checking the changed worker path and the phase artifacts, then I’ll update the review criteria and feedback with any concrete findings.
+
+I’ve confirmed the phase artifacts are still empty and checked the shared decision log. Next I’m reading the worker delivery path and the targeted docs/tests to pin down whether the current code actually satisfies the cycle-halting and row-state requirements.
+
+The main worker path confirms the risk I was looking for: the cycle preflight is auth-only, then the worker batch-claims rows before any send-time scope/auth error can be seen. I’m checking the regression tests now to see whether that gap is covered or currently missed.
+
+The existing tests cover preflight suppression and per-target invalid-config classification, but they stop short of the batch-claim row-state scenario the PRD calls out. I’m doing one more pass over the worker entrypoint to make sure there isn’t already a compensating behavior elsewhere before I write the blocking note.
+
+I’ve finished the review pass. I found one blocking runtime mismatch in the claim/send orchestration and one smaller docs issue, and I’m writing those into the phase feedback plus updating the criteria checkboxes to match the current state.
+
+The review artifacts are updated. I’m doing a quick read-back now to make sure the findings are precise and the criteria state matches the promise I’ll return.
+
+Scope considered
+- Worker DM delivery and regression-completion phase only.
+- Request-relevant runtime paths in `worker/slack_delivery.py`, worker wiring in `worker/main.py`, targeted regression tests, the rollout docs in scope, and the phase-local review artifacts.
+
+What I analyzed
+- The current delivery-cycle orchestration from preflight through stale-lock recovery, claim, send, and finalization.
+- The shared decision log for this phase, especially the runtime invalid-config handling requirement.
+- Targeted tests covering preflight suppression, send-time invalid-config classification, and claim/finalization behavior.
+- The new README Slack DM contract reference.
+
+What I reviewed
+- Updated [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/worker-dm-delivery-and-regression/criteria.md) checkboxes to reflect the current state.
+- Appended prioritized findings to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/worker-dm-delivery-and-regression/feedback.md):
+  - `IMP-001` blocking: send-time scope/auth invalid-config can strand already-claimed rows in `processing`.
+  - `IMP-002` non-blocking: README references an untracked PRD file.
+
+Key findings / decisions
+- Blocking: `worker/slack_delivery.py::_run_delivery_cycle_with_runtime` still batch-claims rows after an `auth.test`-only preflight, so a later `missing_scope` or similar send-time failure halts the cycle after rows have already been mutated to `processing`. That contradicts the PRD and the shared decision that invalid-config suppression must leave pending/failed/processing rows unchanged until config is usable again.
+- Non-blocking: `README.md:184` points to `tasks/slack_dm_integration_PRD.md`, but that file is not tracked in git in this worktree.
+
+Open issues / next step
+- Rework the claim/send orchestration so send-time invalid-config either cannot strand a batch or explicitly reverts unfinalized claims, then add a cycle-level regression test for the `auth.test` success plus `missing_scope` path.
+- Either add `tasks/slack_dm_integration_PRD.md` to the repo in the same rollout or retarget the README link to a tracked document.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
