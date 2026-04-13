@@ -2060,3 +2060,55 @@ Open issues / next step
   - `pytest tests/test_slack_delivery.py tests/test_hardening_validation.py -q`
   - `pytest tests/test_ai_worker.py -q`
 - Ready for verifier rerun.
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=verifier | cycle=2 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_verifier.md
+session_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=2 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+Re-reviewing the phase after the producer follow-up. I’m checking the updated worker claim-restore path, the new regression tests, and the tracked-doc change, then I’ll update the reviewer artifacts to match the current state.
+
+The restore path is wired the way the review asked for, and the new cycle-level test actually exercises the missing-scope case rather than just mocking the suppression. I’m doing one last spot-check on the README line and the phase notes, then I’ll mark the criteria and feedback accordingly.
+
+A second pass turned up one remaining contract gap. The claimed-row restore is fixed, but the worker still performs stale-lock recovery before a send-time scope/auth failure can be discovered, which means the affected cycle can still mutate `processing` rows contrary to the PRD. I’m capturing that in the feedback and leaving the phase incomplete.
+
+The reviewer artifacts are updated. I’m doing a quick read-back of the feedback so the final status is consistent with the remaining stale-recovery issue and the resolved earlier findings.
+
+Scope considered
+- Worker DM delivery and regression-completion phase only.
+- Request-relevant runtime paths in `worker/slack_delivery.py`, the updated Slack delivery tests, the touched README line, and the phase-local review artifacts.
+
+What I analyzed
+- The current cycle ordering in `worker/slack_delivery.py`: preflight, stale-lock recovery, claim, send, and invalid-config halt handling.
+- The new claim-restore helper and the added cycle-level regression for `auth.test` success followed by `missing_scope`.
+- The updated README rollout reference and the phase notes plus shared decision ledger.
+- The producer’s reported validation run: `pytest tests/test_slack_delivery.py tests/test_hardening_validation.py tests/test_ai_worker.py -q`.
+
+What I reviewed
+- Left [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/worker-dm-delivery-and-regression/criteria.md) in an incomplete state because one blocking runtime issue remains.
+- Appended follow-up status and a new blocking finding to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/worker-dm-delivery-and-regression/feedback.md):
+  - `IMP-001` resolved.
+  - `IMP-002` resolved.
+  - `IMP-003` blocking: stale-lock recovery still mutates rows before send-time invalid-config can halt the cycle.
+
+Key findings / decisions
+- The claimed-row regression is fixed correctly. The worker now restores still-owned claimed rows when `conversations.open` or `chat.postMessage` reveals auth or scope invalid-config after a successful `auth.test`.
+- A remaining blocking gap still exists: `_run_delivery_cycle_with_runtime()` runs `recover_stale_delivery_targets()` before send-time invalid-config can be discovered, so a token that passes `auth.test` but lacks DM send scopes can still rewrite stale `processing` rows to `failed` in the affected cycle. That still violates the PRD requirement that invalid-config suppression leave pending, failed, and processing rows unchanged for the affected cycle.
+- The README doc-link issue is resolved.
+
+Open issues / next step
+- The producer should either move stale-lock recovery behind a capability check that proves DM send is usable before any row mutation, or restore stale-recovery mutations when send-time auth or scope invalid-config is discovered.
+- Add a regression test for stale rows plus a send-time `missing_scope` failure.
+- Re-run verifier after that fix.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
