@@ -160,7 +160,7 @@ def start_slack_delivery_thread(
     thread = threading.Thread(
         target=slack_delivery_loop,
         kwargs={
-            "settings": settings,
+            "slack_runtime": settings,
             "worker_instance_id": worker_identity.worker_instance_id,
         },
         name="worker-slack-delivery",

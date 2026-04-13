@@ -12,6 +12,7 @@ import uuid
 import pytest
 
 from shared.config import Settings
+from shared.contracts import WORKSPACE_BOOTSTRAP_VERSION
 
 
 def _make_settings(tmp_path: Path, *, codex_api_key: str | None = "test-key") -> Settings:
@@ -21,7 +22,7 @@ def _make_settings(tmp_path: Path, *, codex_api_key: str | None = "test-key") ->
         app_base_url="http://localhost:8000",
         app_secret_key="test-secret",
         database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=workspace_dir / "attachments_store",
         triage_workspace_dir=workspace_dir,
         repo_mount_dir=workspace_dir / "app",
         manuals_mount_dir=workspace_dir / "manuals",
@@ -94,7 +95,6 @@ def _make_context(
     ticket=None,
     public_body: str = "Public body",
     internal_body: str = "Internal body",
-    attachment_sha: str = "sha-1",
     public_attachments=None,
     requester_role: str = "requester",
     requester_can_view_internal_messages: bool = False,
@@ -123,20 +123,38 @@ def _make_context(
         created_at=SimpleNamespace(isoformat=lambda: "2026-03-23T00:01:00+00:00"),
         body_text=internal_body,
     )
-    attachment = SimpleNamespace(
-        sha256=attachment_sha,
-        stored_path="/tmp/example.png",
-        mime_type="image/png",
-        width=40,
-        height=20,
-    )
     return SimpleNamespace(
         ticket=ticket,
         requester_role=requester_role,
         requester_can_view_internal_messages=requester_can_view_internal_messages,
         public_messages=[public_message],
         internal_messages=[internal_message],
-        public_attachments=public_attachments or [attachment],
+        public_attachments=list(public_attachments or []),
+    )
+
+
+def _make_attachment(
+    tmp_path: Path,
+    *,
+    filename: str,
+    contents: bytes,
+    mime_type: str,
+    sha256: str,
+    width: int | None = None,
+    height: int | None = None,
+):
+    source_path = tmp_path / "source_attachments" / filename
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(contents)
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        original_filename=filename,
+        stored_path=str(source_path),
+        mime_type=mime_type,
+        size_bytes=len(contents),
+        sha256=sha256,
+        width=width,
+        height=height,
     )
 
 
@@ -399,7 +417,16 @@ def test_requester_visible_fingerprint_excludes_internal_messages():
 def test_prepare_step_run_writes_prompt_and_schema(tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
-    context = _make_context()
+    attachment = _make_attachment(
+        tmp_path,
+        filename="Example Screenshot.png",
+        contents=b"fake image data",
+        mime_type="image/png",
+        sha256="sha-image",
+        width=40,
+        height=20,
+    )
+    context = _make_context(public_attachments=[attachment])
     spec = symbols["load_agent_spec"]("support")
     router_result = symbols["RouterResult"].model_validate(_route_payload())
 
@@ -420,7 +447,91 @@ def test_prepare_step_run_writes_prompt_and_schema(tmp_path):
     assert prepared.paths.schema_path.read_text(encoding="utf-8").startswith("{")
     assert str(context.ticket.id) in str(prepared.paths.run_dir)
     assert prepared.paths.step_dir.name.startswith("02-support")
-    assert prepared.image_paths == [Path("/tmp/example.png")]
+    assert len(prepared.image_paths) == 1
+    assert prepared.image_paths[0].is_file()
+    assert prepared.image_paths[0].parent == prepared.paths.run_dir / "attachments"
+    assert prepared.image_paths[0].read_bytes() == b"fake image data"
+    assert prepared.public_attachments[0].original_filename == "Example Screenshot.png"
+    assert prepared.public_attachments[0].workspace_path.startswith(f"runs/{context.ticket.id}/")
+    assert prepared.public_attachments[0].absolute_path == str(prepared.image_paths[0].resolve())
+    assert "Attachment workspace root:" in prepared.prompt
+    assert "Public attachments:" in prepared.prompt
+    assert "Example Screenshot.png" in prepared.prompt
+    assert prepared.public_attachments[0].workspace_path in prepared.prompt
+
+
+def test_prepare_step_run_projects_non_image_attachment_into_workspace_prompt_without_image_flag(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    attachment = _make_attachment(
+        tmp_path,
+        filename="Quarterly Report.xls",
+        contents=b"fake spreadsheet",
+        mime_type="application/vnd.ms-excel",
+        sha256="sha-xls",
+    )
+    context = _make_context(public_attachments=[attachment])
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
+        context=context,
+        router_result=router_result,
+        target_route_target_id="support",
+    )
+
+    assert prepared.image_paths == []
+    assert prepared.public_attachments[0].is_image is False
+    assert Path(prepared.public_attachments[0].absolute_path).is_file()
+    assert Path(prepared.public_attachments[0].absolute_path).parent == prepared.paths.run_dir / "attachments"
+    assert Path(prepared.public_attachments[0].absolute_path).read_bytes() == b"fake spreadsheet"
+    assert "Quarterly Report.xls" in prepared.prompt
+    assert prepared.public_attachments[0].workspace_path in prepared.prompt
+    assert "image_attachment=no" in prepared.prompt
+
+
+def test_prepare_step_run_rejects_symlinked_attachment_dir_outside_workspace_before_copy(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    attachment = _make_attachment(
+        tmp_path,
+        filename="evidence.txt",
+        contents=b"sensitive evidence",
+        mime_type="text/plain",
+        sha256="sha-text",
+    )
+    context = _make_context(public_attachments=[attachment])
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+    run_id = uuid.uuid4()
+    run_dir = settings.runs_dir / str(context.ticket.id) / str(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "attachments").symlink_to(outside_dir, target_is_directory=True)
+
+    with pytest.raises(symbols["StepRunError"], match="escaped the workspace"):
+        symbols["prepare_step_run"](
+            settings,
+            run_id=run_id,
+            ticket_id=context.ticket.id,
+            worker_instance_id="worker-test",
+            step_index=2,
+            step_kind="specialist",
+            spec=spec,
+            context=context,
+            router_result=router_result,
+            target_route_target_id="support",
+        )
+
+    assert list(outside_dir.iterdir()) == []
 
 
 def test_build_codex_command_omits_api_key_when_not_configured(monkeypatch, tmp_path):
@@ -2427,11 +2538,13 @@ def test_emit_worker_heartbeat_initializes_system_state_defaults(monkeypatch, tm
 
     bootstrap_state = fake_db.objects[("SystemState", "bootstrap_version")]
     heartbeat_state = fake_db.objects[("SystemState", "worker_heartbeat")]
+    slack_health_state = fake_db.objects[("SystemState", "slack_dm_delivery_health")]
     assert fake_db.flush_calls == 1
-    assert bootstrap_state.value_json == {"version": "stage1-v5"}
+    assert bootstrap_state.value_json == {"version": WORKSPACE_BOOTSTRAP_VERSION}
     assert heartbeat_state.value_json["status"] == "alive"
     assert heartbeat_state.value_json["worker_pid"] == 2222
     assert heartbeat_state.value_json["worker_instance_id"] == "worker-test"
+    assert slack_health_state.value_json == {"status": "unknown"}
 
 
 def test_emit_worker_heartbeat_updates_stale_bootstrap_version(monkeypatch, tmp_path):
@@ -2460,7 +2573,7 @@ def test_emit_worker_heartbeat_updates_stale_bootstrap_version(monkeypatch, tmp_
     )
 
     bootstrap_state = fake_db.objects[("SystemState", "bootstrap_version")]
-    assert bootstrap_state.value_json == {"version": "stage1-v5"}
+    assert bootstrap_state.value_json == {"version": WORKSPACE_BOOTSTRAP_VERSION}
 
 
 def test_emit_worker_heartbeat_updates_active_run_last_heartbeat(monkeypatch, tmp_path):
@@ -2671,7 +2784,7 @@ def test_recover_stale_runs_routes_ticket_when_retry_budget_is_exhausted(monkeyp
     )
     monkeypatch.setattr(
         "worker.queue.record_status_change",
-        lambda db, ticket, to_status, changed_by_type, changed_at: observed["status_changes"].append((ticket.status, to_status, changed_by_type)) or setattr(ticket, "status", to_status),
+        lambda db, ticket, to_status, changed_by_type, changed_at, **kwargs: observed["status_changes"].append((ticket.status, to_status, changed_by_type)) or setattr(ticket, "status", to_status),
     )
     monkeypatch.setattr("worker.queue.write_run_manifest_snapshot", lambda *args, **kwargs: None)
 

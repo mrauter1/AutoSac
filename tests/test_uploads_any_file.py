@@ -18,7 +18,7 @@ def _make_settings(tmp_path: Path) -> Settings:
         app_base_url="https://triage.example.test",
         app_secret_key="secret",
         database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=workspace_dir / "attachments_store",
         triage_workspace_dir=workspace_dir,
         repo_mount_dir=workspace_dir / "app",
         manuals_mount_dir=workspace_dir / "manuals",

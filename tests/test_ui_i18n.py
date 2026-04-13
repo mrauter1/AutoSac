@@ -50,7 +50,7 @@ def _make_settings(tmp_path: Path) -> Settings:
         app_base_url="https://triage.example.test",
         app_secret_key="secret",
         database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=workspace_dir / "attachments_store",
         triage_workspace_dir=workspace_dir,
         repo_mount_dir=workspace_dir / "app",
         manuals_mount_dir=workspace_dir / "manuals",
@@ -271,6 +271,26 @@ def test_multipart_errors_translate_to_portuguese():
     assert translate_error_text("Missing boundary in multipart.", "pt-BR") == "Solicitação de upload inválida."
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("message_preview_max_chars must be greater than or equal to 4", "message_preview_max_chars deve ser maior ou igual a 4"),
+        ("http_timeout_seconds must be between 1 and 30 inclusive", "http_timeout_seconds deve ficar entre 1 e 30, inclusive"),
+        ("delivery_batch_size must be greater than or equal to 1", "delivery_batch_size deve ser maior ou igual a 1"),
+        ("delivery_max_attempts must be greater than or equal to 1", "delivery_max_attempts deve ser maior ou igual a 1"),
+        (
+            "delivery_stale_lock_seconds must be greater than http_timeout_seconds",
+            "delivery_stale_lock_seconds deve ser maior que http_timeout_seconds",
+        ),
+    ],
+)
+def test_slack_settings_validation_errors_translate_to_portuguese(message, expected):
+    pytest.importorskip("fastapi")
+    from app.i18n import translate_error_text
+
+    assert translate_error_text(message, "pt-BR") == expected
+
+
 def test_requester_create_error_uses_get_path_for_language_switch(monkeypatch, tmp_path):
     stack = _load_web_stack()
     app = stack["create_app"]()
@@ -372,6 +392,7 @@ def test_ops_user_update_error_uses_editing_users_get_path_for_language_switch(m
         email="existing@example.com",
         display_name="Existing User",
         role="dev_ti",
+        slack_user_id="UEXISTING",
         is_active=True,
     )
 
@@ -404,6 +425,108 @@ def test_ops_user_update_error_uses_editing_users_get_path_for_language_switch(m
     assert f"/ui-language?locale=pt-BR&amp;next=%2Fops%2Fusers%3Fedit_user%3D{target_user.id}" in response.text
 
 
+def test_ops_slack_integration_error_uses_slack_get_path_for_language_switch(monkeypatch, tmp_path):
+    from shared.config import SlackSettings
+    from shared.slack_dm import SlackWebApiResponse
+
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings(tmp_path)
+    admin_user = SimpleNamespace(id=uuid.uuid4(), display_name="Admin", role="admin", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "load_slack_dm_settings",
+        lambda db, app_settings: SlackSettings(routing_mode="dm"),
+    )
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "slack_api_auth_test",
+        lambda **kwargs: SlackWebApiResponse(
+            method="auth.test",
+            http_status=200,
+            body_json={"ok": False, "error": "invalid_auth"},
+        ),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_admin_user] = lambda: admin_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            "/ops/integrations/slack",
+            data={
+                "csrf_token": "csrf-token",
+                "enabled": "on",
+                "bot_token": "xoxb-invalid",
+                "notify_ticket_created": "on",
+                "notify_public_message_added": "on",
+                "notify_status_changed": "on",
+                "message_preview_max_chars": "200",
+                "http_timeout_seconds": "10",
+                "delivery_batch_size": "10",
+                "delivery_max_attempts": "5",
+                "delivery_stale_lock_seconds": "120",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
+    assert "/ui-language?locale=en&amp;next=%2Fops%2Fintegrations%2Fslack" in response.text
+    assert "/ui-language?locale=pt-BR&amp;next=%2Fops%2Fintegrations%2Fslack" in response.text
+
+
+def test_ops_slack_integration_numeric_validation_error_translates_to_portuguese(monkeypatch, tmp_path):
+    from shared.config import SlackSettings
+
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings(tmp_path)
+    admin_user = SimpleNamespace(id=uuid.uuid4(), display_name="Admin", role="admin", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "load_slack_dm_settings",
+        lambda db, app_settings: SlackSettings(routing_mode="dm"),
+    )
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "slack_api_auth_test",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("auth.test should not run for invalid numeric settings")),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_admin_user] = lambda: admin_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            "/ops/integrations/slack",
+            data={
+                "csrf_token": "csrf-token",
+                "message_preview_max_chars": "3",
+                "http_timeout_seconds": "10",
+                "delivery_batch_size": "10",
+                "delivery_max_attempts": "5",
+                "delivery_stale_lock_seconds": "120",
+            },
+            headers={"Accept-Language": "pt-BR"},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 400
+    assert "message_preview_max_chars deve ser maior ou igual a 4" in response.text
+    assert "/ui-language?locale=en&amp;next=%2Fops%2Fintegrations%2Fslack" in response.text
+    assert "/ui-language?locale=pt-BR&amp;next=%2Fops%2Fintegrations%2Fslack" in response.text
+
+
 def test_ops_set_user_active_invalid_state_is_translated(monkeypatch):
     stack = _load_web_stack()
     app = stack["create_app"]()
@@ -434,6 +557,25 @@ def test_ops_set_user_active_invalid_state_is_translated(monkeypatch):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Estado de ativação inválido."
+
+
+def test_admin_only_slack_route_error_translates_to_portuguese(tmp_path):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings(tmp_path)
+    dev_ti_user = SimpleNamespace(id=uuid.uuid4(), display_name="Dev", role="dev_ti", is_active=True)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: dev_ti_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: SimpleNamespace(csrf_token="csrf")
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops/integrations/slack", headers={"Accept-Language": "pt-BR"})
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Acesso de admin é obrigatório"}
 
 
 def test_requester_timeline_uses_portuguese_status_labels(monkeypatch):

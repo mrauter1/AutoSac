@@ -51,12 +51,13 @@ Unauthenticated browser navigation to protected HTML pages redirects to `/login`
 
    Optional:
    - `CODEX_API_KEY` if this runtime is not already authenticated via Codex CLI login.
-   - Leave `SLACK_ENABLED=false` for the initial Phase 1 rollout until the migration is applied and integration rows are verified.
-   - Configure `SLACK_TARGETS_JSON`, `SLACK_DEFAULT_TARGET_NAME`, and the `SLACK_NOTIFY_*` flags only when you are ready to start outbound Slack delivery.
+   - Slack DM settings are DB-backed. Configure them later from `/ops/integrations/slack`; there are no authoritative `SLACK_*` runtime env vars in `.env`.
 
    Runtime scripts load `.env` automatically from the repository root.
 
 4. Ensure the workspace mount directories exist before bootstrapping:
+   - `TRIAGE_WORKSPACE_DIR`
+   - `UPLOADS_DIR` inside `TRIAGE_WORKSPACE_DIR`
    - `REPO_MOUNT_DIR`
    - `MANUALS_MOUNT_DIR`
 
@@ -66,7 +67,7 @@ Unauthenticated browser navigation to protected HTML pages redirects to `/login`
    python scripts/preflight_setup.py --ensure-workspace-dirs --setup-postgres-local
    ```
 
-   This can create the local workspace mount directories and, when `DATABASE_URL` points at localhost PostgreSQL, call `scripts/setup_postgres_local.sh` to install/start PostgreSQL and create the configured role/database.
+   This can create the local workspace, uploads, runs, and mount directories and, when `DATABASE_URL` points at localhost PostgreSQL, call `scripts/setup_postgres_local.sh` to install/start PostgreSQL and create the configured role/database.
 
 6. Apply the schema:
 
@@ -84,13 +85,13 @@ Unauthenticated browser navigation to protected HTML pages redirects to `/login`
 
 Run these steps in order on a new environment:
 
-1. Bootstrap the workspace files and runs directory:
+1. Bootstrap the workspace files, attachment store, and runs directory:
 
    ```bash
    python scripts/bootstrap_workspace.py
    ```
 
-   The script creates the workspace contract files, syncs all required AI skills, initializes the workspace git repository if needed, and prints a JSON snapshot that includes `"bootstrap_version": "stage1-v2"`.
+   The script creates the workspace contract files, syncs all required AI skills, ensures the workspace-local attachment store exists, initializes the workspace git repository if needed, and prints a JSON snapshot that includes `"bootstrap_version": "stage1-v6"`.
 
 2. Create the initial admin account:
 
@@ -158,16 +159,46 @@ Useful endpoints:
 - `GET /healthz`
 - `GET /readyz`
 
+## Slack Integration
+
+AutoSac includes DB-backed Slack DM notifications. Ticket mutations on the web/request path record integration events in PostgreSQL, and the worker reloads Slack settings each cycle before delivering eligible requester/assignee DMs through Slack Web API.
+
+Covered event types:
+
+- `ticket.created`
+- `ticket.public_message_added`
+- `ticket.status_changed`
+
+Admin workflow:
+
+- Configure enablement, the bot token, notify flags, and delivery tuning at `/ops/integrations/slack`.
+- Set per-user `slack_user_id` mappings from `/ops/users`.
+- The worker validates credentials with `auth.test`, opens DMs with `conversations.open`, and sends message text with `chat.postMessage`.
+
+Operational notes:
+
+- Event recording still happens while Slack is disabled; the stored routing result reflects the suppression reason and no delivery target row is created.
+- Delivery is asynchronous and worker-driven, with retry, stale-lock recovery, and dead-letter handling in PostgreSQL-backed integration tables.
+- There are no authoritative `SLACK_*` runtime env vars for Slack DM routing or delivery; `APP_SECRET_KEY` is used only to encrypt and decrypt the stored bot token.
+- Slack does not backfill historical ticket activity. Only newly emitted events can create new Slack delivery targets.
+- Deploy the web request path and worker together before enabling Slack. The rollout treats any pre-launch Slack integration rows from earlier dry runs as disposable data.
+
+The original webhook PRD remains the payload-snapshot reference in `tasks/slack_integration_PRD.md`; the current DM rollout contract is the DB-backed, admin-managed behavior described above.
+
 ## Notes For Operators
 
 - `.env.example` lists every supported runtime knob and the shipped defaults.
 - `APP_BASE_URL=https://...` automatically enables secure cookies.
 - `UI_DEFAULT_LOCALE=pt-BR` makes Portuguese the server-side fallback when there is no saved language cookie and no matching browser language.
 - Leave `CODEX_API_KEY` empty to rely on existing Codex CLI login in local environments.
-- Phase 1 Slack delivery ships dark by default: keep `SLACK_ENABLED=false` through migration and initial event verification, then enable one named target and the desired `SLACK_NOTIFY_*` flags gradually.
-- Slack rollback is config-only for Phase 1: set `SLACK_ENABLED=false` to stop claims, sends, and stale-lock recovery while preserving the stored integration rows for later inspection or re-enable.
+- Slack DM delivery is DB-backed and disabled by default until an admin stores a bot token and enables it at `/ops/integrations/slack`.
+- Deploy the web request path and worker together as the same DM-capable build before enabling Slack; mixed-version Slack delivery compatibility is not supported for this pre-launch rollout.
+- Slack rollback is config-first: disable delivery or disconnect the bot token from `/ops/integrations/slack` while preserving the stored integration rows for later inspection or re-enable.
+- `APP_SECRET_KEY` participates in Slack only for bot-token encryption and decryption. There are no authoritative `SLACK_*` runtime env vars.
+- Admins manage per-user Slack IDs from `/ops/users`.
+- If a pre-launch environment still has earlier dry-run Slack integration rows, treat that Slack-specific state as disposable pre-launch data before enabling Slack.
 - Re-enabling Slack later does not backfill historical ticket activity; only newly emitted events can create new target rows.
-- Invalid Slack-specific env values do not block web or worker startup; they surface as structured invalid-config state so outbound routing and delivery stay suppressed instead of taking the service down.
+- Undecryptable stored Slack tokens surface as invalid config until an admin saves a new token.
 - On Ubuntu 24.04, Codex read-only probing may require an AppArmor profile for `bwrap`; see the Ubuntu internal server guide.
 - `scripts/setup_postgres_local.sh` is intended for local localhost PostgreSQL only; it is not part of the cloud deployment path.
 - `WORKER_HEARTBEAT_SECONDS`, `AI_RUN_STALE_TIMEOUT_SECONDS`, and `AI_RUN_MAX_RECOVERY_ATTEMPTS` control stale-run detection and automatic recovery.

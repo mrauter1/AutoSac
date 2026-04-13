@@ -32,6 +32,17 @@ def normalize_display_name(display_name: str) -> str:
     return normalized
 
 
+def validate_slack_user_id(slack_user_id: str | None) -> str | None:
+    if slack_user_id is None:
+        return None
+    if slack_user_id == "":
+        return None
+    normalized = slack_user_id.strip()
+    if not normalized:
+        raise ValueError("Slack user ID cannot be whitespace only.")
+    return normalized
+
+
 def validate_password(password: str) -> str:
     if not isinstance(password, str) or not password.strip():
         raise ValueError("Password is required.")
@@ -45,7 +56,35 @@ def get_user_by_email(db: Session, email: str) -> User | None:
     return db.execute(statement).scalar_one_or_none()
 
 
-def create_user(db: Session, *, email: str, display_name: str, password: str, role: str) -> User:
+def get_user_by_slack_user_id(db: Session, slack_user_id: str) -> User | None:
+    statement = select(User).where(User.slack_user_id == slack_user_id)
+    return db.execute(statement).scalar_one_or_none()
+
+
+def _validate_unique_slack_user_id(
+    db: Session,
+    *,
+    slack_user_id: str | None,
+    current_user: User | None = None,
+) -> str | None:
+    normalized = validate_slack_user_id(slack_user_id)
+    if normalized is None:
+        return None
+    existing = get_user_by_slack_user_id(db, normalized)
+    if existing is not None and (current_user is None or existing.id != current_user.id):
+        raise ValueError(f"Slack user ID already exists: {normalized}")
+    return normalized
+
+
+def create_user(
+    db: Session,
+    *,
+    email: str,
+    display_name: str,
+    password: str,
+    role: str,
+    slack_user_id: str | None = None,
+) -> User:
     if role not in USER_ROLES:
         raise ValueError(f"Unsupported role: {role}")
     normalized_email = validate_email_address(email)
@@ -57,6 +96,7 @@ def create_user(db: Session, *, email: str, display_name: str, password: str, ro
         display_name=normalize_display_name(display_name),
         password_hash=hash_password(validate_password(password)),
         role=role,
+        slack_user_id=_validate_unique_slack_user_id(db, slack_user_id=slack_user_id),
         is_active=True,
         created_at=now,
         updated_at=now,
@@ -115,12 +155,14 @@ def update_user(
     user: User,
     display_name: str,
     role: str,
+    slack_user_id: str | None,
     password: str | None = None,
 ) -> User:
     if role not in USER_ROLES:
         raise ValueError(f"Unsupported role: {role}")
     user.display_name = normalize_display_name(display_name)
     user.role = role
+    user.slack_user_id = _validate_unique_slack_user_id(db, slack_user_id=slack_user_id, current_user=user)
     if password is not None and password.strip():
         user.password_hash = hash_password(validate_password(password))
     user.updated_at = utc_now()

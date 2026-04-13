@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
+
 from shared.agent_specs import AgentSpec, load_specialist_shared_policy_template
 from shared.routing_registry import RoutingRegistryError, load_routing_registry
 from worker.ticket_loader import LoadedTicketContext
@@ -8,6 +10,21 @@ from worker.output_contracts import RouterResult
 
 class PromptRenderError(RuntimeError):
     """Raised when prompt rendering fails."""
+
+
+@dataclass(frozen=True)
+class PromptAttachment:
+    attachment_id: str
+    original_filename: str
+    mime_type: str
+    size_bytes: int
+    sha256: str
+    workspace_path: str
+    absolute_path: str
+    is_image: bool
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
 
 
 def _format_messages(messages) -> str:
@@ -26,7 +43,33 @@ def _format_messages(messages) -> str:
     return "\n\n".join(blocks)
 
 
-def _base_prompt_values(context: LoadedTicketContext) -> dict[str, str]:
+def _format_attachments(attachments: tuple[PromptAttachment, ...]) -> str:
+    if not attachments:
+        return "(none)"
+    blocks: list[str] = []
+    for index, attachment in enumerate(attachments, start=1):
+        blocks.append(
+            "\n".join(
+                [
+                    (
+                        f"{index}. original_filename={attachment.original_filename}; mime_type={attachment.mime_type}; "
+                        f"size_bytes={attachment.size_bytes}; sha256={attachment.sha256}; "
+                        f"image_attachment={'yes' if attachment.is_image else 'no'}"
+                    ),
+                    f"   workspace_path={attachment.workspace_path}",
+                    f"   absolute_path={attachment.absolute_path}",
+                ]
+            )
+        )
+    return "\n\n".join(blocks)
+
+
+def _base_prompt_values(
+    context: LoadedTicketContext,
+    *,
+    public_attachments: tuple[PromptAttachment, ...],
+    attachments_root: str | None,
+) -> dict[str, str]:
     return {
         "REFERENCE": context.ticket.reference,
         "TITLE": context.ticket.title,
@@ -36,6 +79,8 @@ def _base_prompt_values(context: LoadedTicketContext) -> dict[str, str]:
         "URGENT": "yes" if context.ticket.urgent else "no",
         "PUBLIC_MESSAGES": _format_messages(context.public_messages),
         "INTERNAL_MESSAGES": _format_messages(context.internal_messages),
+        "ATTACHMENTS_ROOT": attachments_root or "(none)",
+        "PUBLIC_ATTACHMENTS": _format_attachments(public_attachments),
     }
 
 
@@ -81,6 +126,8 @@ def render_agent_prompt(
     spec: AgentSpec,
     *,
     context: LoadedTicketContext,
+    public_attachments: tuple[PromptAttachment, ...] = (),
+    attachments_root: str | None = None,
     router_result: RouterResult | None = None,
     target_route_target_id: str | None = None,
     candidate_specialist_ids: tuple[str, ...] | None = None,
@@ -104,7 +151,11 @@ def render_agent_prompt(
     if spec.kind in {"selector", "specialist"} and route_target is None:
         raise PromptRenderError(f"Route target context is required for {spec.kind} prompt rendering")
 
-    values = _base_prompt_values(context)
+    values = _base_prompt_values(
+        context,
+        public_attachments=public_attachments,
+        attachments_root=attachments_root,
+    )
     shared_policy = ""
     if spec.kind == "specialist":
         shared_policy = _render_template(

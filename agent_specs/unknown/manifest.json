@@ -1,6 +1,6 @@
 {
   "id": "unknown",
-  "version": "2",
+  "version": "3",
   "kind": "specialist",
   "description": "Fallback specialist for ambiguous or mixed-signal Stage 1 tickets.",
   "skill_id": "triage-unknown",

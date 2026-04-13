@@ -1,6 +1,6 @@
 {
   "id": "router",
-  "version": "1",
+  "version": "2",
   "kind": "router",
   "description": "Classify the ticket into the most appropriate Stage 1 triage specialist.",
   "skill_id": "triage-router",

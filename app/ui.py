@@ -34,7 +34,7 @@ from app.i18n import (
     user_role_label,
 )
 from shared.models import SessionRecord, User
-from shared.permissions import is_ops_user
+from shared.permissions import is_admin_user, is_ops_user
 
 APP_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = APP_DIR / "templates"
@@ -138,6 +138,7 @@ def build_template_context(
         "unassigned_label": unassigned_label(resolved_locale),
         "none_yet_label": none_yet_label(resolved_locale),
         "is_ops_user": is_ops_user(current_user) if current_user is not None else False,
+        "is_admin_user": is_admin_user(current_user) if current_user is not None else False,
     }
     if extra_context:
         context.update(extra_context)

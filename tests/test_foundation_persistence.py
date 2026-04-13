@@ -17,6 +17,7 @@ from shared.contracts import (
     APP_ROUTES,
     CLI_COMMAND_NAMES,
     WORKSPACE_AGENTS_CONTENT,
+    WORKSPACE_BOOTSTRAP_VERSION,
 )
 from shared.workspace import bootstrap_workspace
 
@@ -77,7 +78,7 @@ def _make_settings(tmp_path: Path) -> Settings:
         app_base_url="http://localhost:8000",
         app_secret_key="test-secret",
         database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=workspace_dir / "attachments_store",
         triage_workspace_dir=workspace_dir,
         repo_mount_dir=workspace_dir / "app",
         manuals_mount_dir=workspace_dir / "manuals",
@@ -93,6 +94,12 @@ def _make_settings(tmp_path: Path) -> Settings:
         session_default_hours=12,
         session_remember_days=30,
     )
+
+
+def _make_slack_runtime() -> object:
+    from shared.integrations import build_slack_runtime_context
+
+    return build_slack_runtime_context(_make_settings(Path("/tmp/autosac-foundation")))
 
 
 def _load_ticketing_dependencies():
@@ -214,6 +221,7 @@ def test_record_status_change_supports_initial_null_transition():
 
     history = record_status_change(
         session,
+        slack_runtime=_make_slack_runtime(),
         ticket=ticket,
         to_status="new",
         changed_by_type="system",
@@ -358,12 +366,26 @@ def test_slack_integration_foundation_migration_adds_required_tables_and_indexes
     assert 'op.create_table(\n        "integration_event_links"' in migration_source
     assert 'op.create_table(\n        "integration_event_targets"' in migration_source
     assert 'sa.UniqueConstraint("dedupe_key"' in migration_source
-    assert '"uq_integration_event_links_event_id_entity_type_entity_id_relation_kind"' in migration_source
+    assert '"uq_integration_event_links_event_entity_relation"' in migration_source
     assert '"uq_integration_event_targets_event_id_target_name"' in migration_source
     assert '"ix_integration_events_event_type_created_at"' in migration_source
     assert '"ix_integration_events_aggregate_type_aggregate_id_created_at"' in migration_source
     assert '"ix_integration_event_targets_delivery_status_next_attempt_at"' in migration_source
     assert '"ix_integration_event_targets_locked_at"' in migration_source
+
+
+def test_slack_routing_runtime_refactor_migration_adds_routing_snapshot_and_claim_token_columns():
+    migration_source = Path(
+        "shared/migrations/versions/20260410_0011_slack_routing_runtime_refactor.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260410_0011"' in migration_source
+    assert 'down_revision = "20260410_0010"' in migration_source
+    assert 'op.add_column("integration_events", sa.Column("routing_result", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("integration_events", sa.Column("routing_target_name", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("integration_events", sa.Column("routing_config_error_code", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("integration_events", sa.Column("routing_config_error_summary", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("integration_event_targets", sa.Column("claim_token", postgresql.UUID(as_uuid=True), nullable=True))' in migration_source
 
 
 def test_route_target_compatibility_persistence_backfills_and_allows_selector_steps(tmp_path):
@@ -846,12 +868,120 @@ def test_create_user_rejects_short_password():
         )
 
 
+def test_create_user_trims_slack_user_id_when_provided():
+    pytest.importorskip("argon2")
+    from shared.user_admin import create_user
+
+    class _AdminSession:
+        def __init__(self):
+            self.users_by_email = {}
+            self.users_by_slack = {}
+
+        def add(self, item):
+            email = getattr(item, "email", None)
+            slack_user_id = getattr(item, "slack_user_id", None)
+            if email:
+                self.users_by_email[email] = item
+            if slack_user_id:
+                self.users_by_slack[slack_user_id] = item
+
+        def execute(self, statement):
+            class _Result:
+                def __init__(self, user):
+                    self._user = user
+
+                def scalar_one_or_none(self):
+                    return self._user
+
+            query_text = str(statement)
+            params = statement.compile().params
+            value = next(iter(params.values()), None)
+            if "users.email" in query_text:
+                return _Result(self.users_by_email.get(value))
+            return _Result(self.users_by_slack.get(value))
+
+    user = create_user(
+        _AdminSession(),
+        email="requester@example.com",
+        display_name="Requester",
+        password="secret-pass",
+        role="requester",
+        slack_user_id=" U123456 ",
+    )
+
+    assert user.slack_user_id == "U123456"
+
+
+def test_create_user_rejects_whitespace_only_slack_user_id():
+    pytest.importorskip("argon2")
+    from shared.user_admin import create_user
+
+    class _AdminSession:
+        def add(self, item):
+            return None
+
+        def execute(self, statement):
+            class _Result:
+                def scalar_one_or_none(self):
+                    return None
+
+            return _Result()
+
+    with pytest.raises(ValueError, match=r"^Slack user ID cannot be whitespace only\.$"):
+        create_user(
+            _AdminSession(),
+            email="requester@example.com",
+            display_name="Requester",
+            password="secret-pass",
+            role="requester",
+            slack_user_id="   ",
+        )
+
+
+def test_create_user_rejects_duplicate_slack_user_id():
+    pytest.importorskip("argon2")
+    from shared.user_admin import create_user
+
+    existing_user = SimpleNamespace(id=uuid.uuid4(), slack_user_id="U123456")
+
+    class _AdminSession:
+        def add(self, item):
+            return None
+
+        def execute(self, statement):
+            class _Result:
+                def __init__(self, user):
+                    self._user = user
+
+                def scalar_one_or_none(self):
+                    return self._user
+
+            query_text = str(statement)
+            params = statement.compile().params
+            value = next(iter(params.values()), None)
+            if "users.email" in query_text:
+                return _Result(None)
+            return _Result(existing_user if value == existing_user.slack_user_id else None)
+
+    with pytest.raises(ValueError, match=r"^Slack user ID already exists: U123456$"):
+        create_user(
+            _AdminSession(),
+            email="requester@example.com",
+            display_name="Requester",
+            password="secret-pass",
+            role="requester",
+            slack_user_id="U123456",
+        )
+
+
 def test_update_user_rejects_short_password_when_provided():
     from shared.user_admin import update_user
 
     user = SimpleNamespace(
+        id=uuid.uuid4(),
         display_name="Existing User",
         role="requester",
+        slack_user_id=None,
         password_hash="hash",
         updated_at=None,
     )
@@ -862,8 +992,41 @@ def test_update_user_rejects_short_password_when_provided():
             user=user,
             display_name="Existing User",
             role="requester",
+            slack_user_id=None,
             password="short",
         )
+
+
+def test_update_user_clears_slack_user_id_with_blank_input():
+    from shared.user_admin import update_user
+
+    user = SimpleNamespace(
+        id=uuid.uuid4(),
+        display_name="Existing User",
+        role="requester",
+        slack_user_id="U123456",
+        password_hash="hash",
+        updated_at=None,
+    )
+
+    class _AdminSession:
+        def execute(self, statement):
+            class _Result:
+                def scalar_one_or_none(self):
+                    return None
+
+            return _Result()
+
+    updated = update_user(
+        _AdminSession(),
+        user=user,
+        display_name="Existing User",
+        role="requester",
+        slack_user_id="",
+        password=None,
+    )
+
+    assert updated.slack_user_id is None
 
 
 def test_set_password_rejects_blank_password():
@@ -923,7 +1086,7 @@ def test_create_admin_script_reports_matching_admin_as_success(monkeypatch, caps
 
     create_admin.main()
 
-    assert observed["defaults"] == ("db", "stage1-v5")
+    assert observed["defaults"] == ("db", WORKSPACE_BOOTSTRAP_VERSION)
     assert capsys.readouterr().out.strip() == "Admin user admin@example.com already matched the requested bootstrap state"
 
 
@@ -958,7 +1121,7 @@ def test_bootstrap_workspace_script_seeds_system_state_defaults(monkeypatch, cap
     monkeypatch.setattr(
         bootstrap_script,
         "workspace_contract_snapshot",
-        lambda resolved_settings: {"bootstrap_version": "stage1-v5", "workspace_dir": str(resolved_settings.triage_workspace_dir)},
+        lambda resolved_settings: {"bootstrap_version": WORKSPACE_BOOTSTRAP_VERSION, "workspace_dir": str(resolved_settings.triage_workspace_dir)},
     )
 
     bootstrap_script.main()
@@ -967,10 +1130,10 @@ def test_bootstrap_workspace_script_seeds_system_state_defaults(monkeypatch, cap
         ("ensure_uploads_dir", settings),
         ("bootstrap_workspace", settings),
         ("session_scope", settings),
-        ("ensure_system_state_defaults", "db", "stage1-v5"),
+        ("ensure_system_state_defaults", "db", WORKSPACE_BOOTSTRAP_VERSION),
     ]
     assert json.loads(capsys.readouterr().out) == {
-        "bootstrap_version": "stage1-v5",
+        "bootstrap_version": WORKSPACE_BOOTSTRAP_VERSION,
         "workspace_dir": str(settings.triage_workspace_dir),
     }
 
@@ -983,7 +1146,7 @@ def test_preflight_setup_script_can_prepare_dirs_and_report_ready(monkeypatch, c
         app_base_url=settings.app_base_url,
         app_secret_key=settings.app_secret_key,
         database_url=settings.database_url,
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=tmp_path / "workspace" / "attachments_store",
         triage_workspace_dir=tmp_path / "workspace",
         repo_mount_dir=tmp_path / "workspace" / "app",
         manuals_mount_dir=tmp_path / "workspace" / "manuals",
@@ -1011,6 +1174,7 @@ def test_preflight_setup_script_can_prepare_dirs_and_report_ready(monkeypatch, c
     assert payload["status"] == "ok"
     assert payload["database"]["ok"] is True
     assert settings.uploads_dir.is_dir()
+    assert settings.runs_dir.is_dir()
     assert settings.repo_mount_dir.is_dir()
     assert settings.manuals_mount_dir.is_dir()
 
@@ -1022,7 +1186,7 @@ def test_preflight_setup_script_can_run_local_postgres_setup(monkeypatch, capsys
         app_base_url="http://localhost:8000",
         app_secret_key="test-secret",
         database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=tmp_path / "workspace" / "attachments_store",
         triage_workspace_dir=tmp_path / "workspace",
         repo_mount_dir=tmp_path / "workspace" / "app",
         manuals_mount_dir=tmp_path / "workspace" / "manuals",

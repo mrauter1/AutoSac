@@ -107,7 +107,7 @@ def _make_settings(tmp_path: Path) -> Settings:
         app_base_url="https://triage.example.test",
         app_secret_key="secret",
         database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=workspace_dir / "attachments_store",
         triage_workspace_dir=workspace_dir,
         repo_mount_dir=workspace_dir / "app",
         manuals_mount_dir=workspace_dir / "manuals",
@@ -123,6 +123,12 @@ def _make_settings(tmp_path: Path) -> Settings:
         session_default_hours=12,
         session_remember_days=30,
     )
+
+
+def _make_slack_runtime(settings: Settings):
+    from shared.integrations import build_slack_runtime_context
+
+    return build_slack_runtime_context(settings)
 
 
 def _load_web_stack():
@@ -195,6 +201,7 @@ class _FakePreauthStore:
 def test_create_requester_ticket_creates_initial_records(monkeypatch, tmp_path):
     symbols = _load_ticketing_symbols()
     fake_db = _FakeSession(next_reference_num=17)
+    settings = _make_settings(tmp_path)
     requester = symbols["User"](
         id=uuid.uuid4(),
         email="requester@example.com",
@@ -213,7 +220,8 @@ def test_create_requester_ticket_creates_initial_records(monkeypatch, tmp_path):
 
     ticket, message, attachments, run = symbols["create_requester_ticket"](
         fake_db,
-        settings=_make_settings(tmp_path),
+        settings=settings,
+        slack_runtime=_make_slack_runtime(settings),
         requester=requester,
         title="",
         description_markdown="Email reports are missing after noon. Please check.",
@@ -233,6 +241,7 @@ def test_create_requester_ticket_creates_initial_records(monkeypatch, tmp_path):
     assert len(attachments) == 1
     assert str(ticket.id) in attachments[0].stored_path
     assert attachments[0].stored_path.endswith(".png")
+    assert Path(attachments[0].stored_path).resolve().is_relative_to(settings.uploads_dir.resolve())
     assert history[0].from_status is None
     assert history[0].to_status == "new"
     assert views[0].user_id == requester.id
@@ -245,6 +254,7 @@ def test_add_requester_reply_reopens_and_requeues(monkeypatch, tmp_path):
     from shared.security import utc_now
 
     fake_db = _FakeSession()
+    settings = _make_settings(tmp_path)
     requester = symbols["User"](
         id=uuid.uuid4(),
         email="requester@example.com",
@@ -269,7 +279,8 @@ def test_add_requester_reply_reopens_and_requeues(monkeypatch, tmp_path):
 
     message, attachments, run = symbols["add_requester_reply"](
         fake_db,
-        settings=_make_settings(tmp_path),
+        settings=settings,
+        slack_runtime=_make_slack_runtime(settings),
         ticket=ticket,
         requester=requester,
         body_markdown="The issue came back after I retried it.",
@@ -293,6 +304,7 @@ def test_add_requester_reply_reopens_and_requeues(monkeypatch, tmp_path):
 def test_create_requester_ticket_persists_non_image_attachment_on_created_message(monkeypatch, tmp_path):
     symbols = _load_ticketing_symbols()
     fake_db = _FakeSession(next_reference_num=21)
+    settings = _make_settings(tmp_path)
     requester = symbols["User"](
         id=uuid.uuid4(),
         email="requester@example.com",
@@ -311,7 +323,8 @@ def test_create_requester_ticket_persists_non_image_attachment_on_created_messag
 
     ticket, message, attachments, run = symbols["create_requester_ticket"](
         fake_db,
-        settings=_make_settings(tmp_path),
+        settings=settings,
+        slack_runtime=_make_slack_runtime(settings),
         requester=requester,
         title="Attach a report",
         description_markdown="Please review the attached report export.",
@@ -329,11 +342,13 @@ def test_create_requester_ticket_persists_non_image_attachment_on_created_messag
     assert attachments[0].height is None
     assert attachments[0].stored_path.endswith(".pdf")
     assert str(ticket.id) in attachments[0].stored_path
+    assert Path(attachments[0].stored_path).resolve().is_relative_to(settings.uploads_dir.resolve())
 
 
 def test_add_requester_reply_accepts_mixed_attachments(monkeypatch, tmp_path):
     symbols = _load_ticketing_symbols()
     fake_db = _FakeSession()
+    settings = _make_settings(tmp_path)
     requester = symbols["User"](
         id=uuid.uuid4(),
         email="requester@example.com",
@@ -355,7 +370,8 @@ def test_add_requester_reply_accepts_mixed_attachments(monkeypatch, tmp_path):
 
     message, attachments, _ = symbols["add_requester_reply"](
         fake_db,
-        settings=_make_settings(tmp_path),
+        settings=settings,
+        slack_runtime=_make_slack_runtime(settings),
         ticket=ticket,
         requester=requester,
         body_markdown="Attaching both a screenshot and a report.",
@@ -366,11 +382,13 @@ def test_add_requester_reply_accepts_mixed_attachments(monkeypatch, tmp_path):
     assert [attachment.mime_type for attachment in attachments] == ["image/png", "application/pdf"]
     _assert_flush_before_attachments(fake_db, attachments)
     assert all(attachment.message_id == message.id for attachment in attachments)
+    assert all(Path(attachment.stored_path).resolve().is_relative_to(settings.uploads_dir.resolve()) for attachment in attachments)
 
 
 def test_resolve_ticket_for_requester_updates_status_and_view():
     symbols = _load_ticketing_symbols()
     fake_db = _FakeSession()
+    settings = _make_settings(Path("/tmp/autosac-auth-requester"))
     requester = symbols["User"](
         id=uuid.uuid4(),
         email="requester@example.com",
@@ -389,7 +407,12 @@ def test_resolve_ticket_for_requester_updates_status_and_view():
         urgent=False,
     )
 
-    symbols["resolve_ticket_for_requester"](fake_db, ticket=ticket, requester=requester)
+    symbols["resolve_ticket_for_requester"](
+        fake_db,
+        slack_runtime=_make_slack_runtime(settings),
+        ticket=ticket,
+        requester=requester,
+    )
 
     history = [item for item in fake_db.added if isinstance(item, symbols["TicketStatusHistory"])]
     views = [item for item in fake_db.added if isinstance(item, symbols["TicketView"])]
@@ -461,7 +484,8 @@ def test_requester_routes_source_uses_custom_auth_and_explicit_multipart_limits(
 
 def test_ticket_access_guard_allows_requester_and_ops_roles():
     pytest.importorskip("fastapi")
-    from app.auth import require_requester_user
+    from app.auth import require_admin_user, require_requester_user
+    from fastapi import HTTPException
 
     requester = SimpleNamespace(role="requester")
     dev_ti = SimpleNamespace(role="dev_ti")
@@ -470,25 +494,39 @@ def test_ticket_access_guard_allows_requester_and_ops_roles():
     assert require_requester_user(requester) is requester
     assert require_requester_user(dev_ti) is dev_ti
     assert require_requester_user(admin) is admin
+    assert require_admin_user(admin) is admin
+    with pytest.raises(HTTPException) as excinfo:
+        require_admin_user(dev_ti)
+    assert excinfo.value.status_code == 403
 
 
 def test_ops_user_management_routes_and_role_limits_are_present():
     source = Path("app/routes_ops.py").read_text(encoding="utf-8")
     template_source = Path("app/templates/ops_users.html").read_text(encoding="utf-8")
+    slack_template_source = Path("app/templates/ops_slack_integration.html").read_text(encoding="utf-8")
     base_template_source = Path("app/templates/base.html").read_text(encoding="utf-8")
 
     assert '"/ops/users"' in source
     assert '"/ops/users/create"' in source
     assert '"/ops/users/{user_id}/update"' in source
     assert '"/ops/users/{user_id}/set-active"' in source
+    assert '"/ops/integrations/slack"' in source
+    assert '"/ops/integrations/slack/disconnect"' in source
+    assert "require_admin_user" in source
     assert "if actor.role == \"admin\"" in source
     assert "return (\"requester\",)" in source
     assert 't("ops.users.create_heading")' in template_source
+    assert 'name="slack_user_id"' in template_source
     assert 't("button.edit")' in template_source
     assert 't("button.save_changes")' in template_source
     assert 'class="table ops-users__table"' in template_source
     assert '"/ops/users?create=1"' in template_source
+    assert 't("ops.slack.heading")' in slack_template_source
+    assert 'auth.test' in slack_template_source
+    assert 'conversations.open' in slack_template_source
+    assert 'chat.postMessage' in slack_template_source
     assert "/ops/users" in base_template_source
+    assert "/ops/integrations/slack" in base_template_source
 
 
 def test_login_route_sets_remember_me_cookie(monkeypatch, tmp_path):
@@ -736,10 +774,11 @@ def test_ops_roles_can_submit_new_ticket_through_requester_flow(monkeypatch, tmp
     async def fake_parse_ticket_create_form(request, *, settings):
         return "Printer issue", "Queue is stuck after login.", True, "csrf-token", []
 
-    def fake_create_requester_ticket(db, *, settings, requester, title, description_markdown, urgent, attachments):
+    def fake_create_requester_ticket(db, *, settings, slack_runtime, requester, title, description_markdown, urgent, attachments):
         captured.update(
             {
                 "settings": settings,
+                "slack_runtime": slack_runtime,
                 "requester": requester,
                 "title": title,
                 "description_markdown": description_markdown,
@@ -763,6 +802,7 @@ def test_ops_roles_can_submit_new_ticket_through_requester_flow(monkeypatch, tmp
     assert response.status_code == 303
     assert response.headers["location"] == "/ops/tickets/T-000321"
     assert captured["settings"] is settings
+    assert captured["slack_runtime"].settings is settings
     assert captured["requester"] is current_user
     assert captured["title"] == "Printer issue"
     assert captured["description_markdown"] == "Queue is stuck after login."

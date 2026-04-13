@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import Any
 import uuid
 
+import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
@@ -19,14 +20,27 @@ from app.i18n import (
     resolve_ui_locale,
     timeline_lane_label,
 )
-from app.auth import get_required_auth_session, require_ops_user, validate_csrf_token
+from app.auth import get_required_auth_session, require_admin_user, require_ops_user, validate_csrf_token
 from app.render import render_markdown_to_html
 from app.timeline import build_author_label, load_ticket_status_history, load_users_by_ids, merge_timeline_items, serialize_status_changes
 from app.ui import build_template_context, is_htmx_request, templates
+from shared.config import Settings, get_settings
 from shared.db import db_session_dependency
+from shared.integrations import build_slack_runtime_context
 from shared.models import AIDraft, AIRun, AIRunStep, Ticket, TicketAttachment, TicketMessage, TicketView, User
-from shared.permissions import is_ops_user
+from shared.permissions import is_admin_user, is_ops_user
 from shared.routing_registry import RoutingRegistryError, load_routing_registry
+from shared.slack_dm import (
+    SlackDMSettingsError,
+    SlackDMSettingsInput,
+    clear_slack_dm_token,
+    load_slack_delivery_health,
+    load_slack_dm_settings,
+    parse_slack_auth_test_result,
+    slack_api_auth_test,
+    upsert_slack_dm_settings,
+    validate_slack_dm_settings_input,
+)
 from shared.user_admin import create_user, set_user_active_state, update_user
 from shared.ticketing import (
     add_ops_internal_note,
@@ -366,6 +380,114 @@ def _render_ops_users_page(
     )
 
 
+def _slack_integration_page_path() -> str:
+    return "/ops/integrations/slack"
+
+
+def _build_slack_form_values(
+    *,
+    slack_settings,
+    overrides: dict[str, object] | None = None,
+) -> dict[str, object]:
+    values: dict[str, object] = {
+        "enabled": slack_settings.enabled,
+        "notify_ticket_created": slack_settings.notify_ticket_created,
+        "notify_public_message_added": slack_settings.notify_public_message_added,
+        "notify_status_changed": slack_settings.notify_status_changed,
+        "message_preview_max_chars": slack_settings.message_preview_max_chars,
+        "http_timeout_seconds": slack_settings.http_timeout_seconds,
+        "delivery_batch_size": slack_settings.delivery_batch_size,
+        "delivery_max_attempts": slack_settings.delivery_max_attempts,
+        "delivery_stale_lock_seconds": slack_settings.delivery_stale_lock_seconds,
+    }
+    if overrides:
+        values.update(overrides)
+    return values
+
+
+def _slack_integration_page_extra(
+    *,
+    db: Session,
+    current_user: User,
+    settings: Settings,
+    error: str | None = None,
+    form_values: dict[str, object] | None = None,
+) -> dict[str, object]:
+    slack_settings = load_slack_dm_settings(db, app_settings=settings)
+    updated_by_user = None
+    getter = getattr(db, "get", None)
+    if callable(getter) and slack_settings.updated_by_user_id is not None:
+        updated_by_user = getter(User, slack_settings.updated_by_user_id)
+    extra: dict[str, object] = {
+        "slack_settings": slack_settings,
+        "slack_form": _build_slack_form_values(slack_settings=slack_settings, overrides=form_values),
+        "slack_delivery_health": load_slack_delivery_health(db),
+        "slack_updated_by_user": updated_by_user,
+        "can_manage_slack_settings": is_admin_user(current_user),
+    }
+    if error is not None:
+        extra["error"] = error
+    return extra
+
+
+def _render_slack_integration_page(
+    request: Request,
+    *,
+    current_user: User,
+    auth_session,
+    db: Session,
+    settings: Settings,
+    status_code: int = status.HTTP_200_OK,
+    error: str | None = None,
+    form_values: dict[str, object] | None = None,
+):
+    return templates.TemplateResponse(
+        request,
+        "ops_slack_integration.html",
+        build_template_context(
+            request=request,
+            current_user=current_user,
+            auth_session=auth_session,
+            extra=_slack_integration_page_extra(
+                db=db,
+                current_user=current_user,
+                settings=settings,
+                error=error,
+                form_values=form_values,
+            ),
+            ui_switch_path=_slack_integration_page_path(),
+        ),
+        status_code=status_code,
+    )
+
+
+def _resolve_requested_slack_user_id(
+    *,
+    actor: User,
+    submitted_value: str | None,
+    current_value: str | None = None,
+) -> str | None:
+    if is_admin_user(actor):
+        if submitted_value is None:
+            return current_value
+        return submitted_value
+    if submitted_value is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return current_value
+
+
+def _run_slack_auth_test(*, bot_token: str, timeout_seconds: int):
+    try:
+        response = slack_api_auth_test(bot_token=bot_token, timeout_seconds=timeout_seconds)
+    except httpx.HTTPError as exc:
+        raise SlackDMSettingsError("Slack auth.test request failed.") from exc
+    if not response.ok:
+        if response.error_code:
+            raise SlackDMSettingsError(f"Slack auth.test failed: {response.error_code}")
+        raise SlackDMSettingsError("Slack auth.test failed.")
+    return parse_slack_auth_test_result(response)
+
+
 def _read_filters(request: Request) -> dict[str, object]:
     query = request.query_params
     return {
@@ -554,6 +676,118 @@ def ops_manage_users(
     )
 
 
+@router.get("/ops/integrations/slack", response_class=HTMLResponse)
+def ops_slack_integration(
+    request: Request,
+    current_user: User = Depends(require_admin_user),
+    auth_session=Depends(get_required_auth_session),
+    db: Session = Depends(db_session_dependency),
+    settings: Settings = Depends(get_settings),
+):
+    db.commit()
+    return _render_slack_integration_page(
+        request,
+        current_user=current_user,
+        auth_session=auth_session,
+        db=db,
+        settings=settings,
+    )
+
+
+@router.post("/ops/integrations/slack")
+def ops_save_slack_integration(
+    request: Request,
+    current_user: User = Depends(require_admin_user),
+    auth_session=Depends(get_required_auth_session),
+    csrf_token: str = Form(...),
+    enabled: str | None = Form(default=None),
+    bot_token: str = Form(default=""),
+    notify_ticket_created: str | None = Form(default=None),
+    notify_public_message_added: str | None = Form(default=None),
+    notify_status_changed: str | None = Form(default=None),
+    message_preview_max_chars: int = Form(...),
+    http_timeout_seconds: int = Form(...),
+    delivery_batch_size: int = Form(...),
+    delivery_max_attempts: int = Form(...),
+    delivery_stale_lock_seconds: int = Form(...),
+    db: Session = Depends(db_session_dependency),
+    settings: Settings = Depends(get_settings),
+):
+    validate_csrf_token(auth_session, csrf_token)
+    form_values = {
+        "enabled": _parse_bool(enabled),
+        "notify_ticket_created": _parse_bool(notify_ticket_created),
+        "notify_public_message_added": _parse_bool(notify_public_message_added),
+        "notify_status_changed": _parse_bool(notify_status_changed),
+        "message_preview_max_chars": message_preview_max_chars,
+        "http_timeout_seconds": http_timeout_seconds,
+        "delivery_batch_size": delivery_batch_size,
+        "delivery_max_attempts": delivery_max_attempts,
+        "delivery_stale_lock_seconds": delivery_stale_lock_seconds,
+    }
+    current_settings = load_slack_dm_settings(db, app_settings=settings)
+    try:
+        validated = validate_slack_dm_settings_input(
+            SlackDMSettingsInput(
+                enabled=bool(form_values["enabled"]),
+                notify_ticket_created=bool(form_values["notify_ticket_created"]),
+                notify_public_message_added=bool(form_values["notify_public_message_added"]),
+                notify_status_changed=bool(form_values["notify_status_changed"]),
+                message_preview_max_chars=message_preview_max_chars,
+                http_timeout_seconds=http_timeout_seconds,
+                delivery_batch_size=delivery_batch_size,
+                delivery_max_attempts=delivery_max_attempts,
+                delivery_stale_lock_seconds=delivery_stale_lock_seconds,
+                bot_token=bot_token,
+            )
+        )
+        auth_result = None
+        if validated.bot_token is not None:
+            auth_result = _run_slack_auth_test(
+                bot_token=validated.bot_token,
+                timeout_seconds=validated.http_timeout_seconds,
+            )
+        elif validated.enabled and (
+            not current_settings.has_stored_token
+            or current_settings.config_error_code in {"slack_bot_token_missing", "slack_bot_token_undecryptable"}
+        ):
+            raise SlackDMSettingsError("Slack DM delivery cannot be enabled without a stored bot token")
+        upsert_slack_dm_settings(
+            db,
+            app_settings=settings,
+            values=validated,
+            updated_by_user_id=current_user.id,
+            auth_result=auth_result,
+        )
+    except SlackDMSettingsError as exc:
+        db.rollback()
+        return _render_slack_integration_page(
+            request,
+            current_user=current_user,
+            auth_session=auth_session,
+            db=db,
+            settings=settings,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error=str(exc),
+            form_values=form_values,
+        )
+    db.commit()
+    return RedirectResponse(_slack_integration_page_path(), status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/ops/integrations/slack/disconnect")
+def ops_disconnect_slack_integration(
+    current_user: User = Depends(require_admin_user),
+    auth_session=Depends(get_required_auth_session),
+    csrf_token: str = Form(...),
+    db: Session = Depends(db_session_dependency),
+):
+    validate_csrf_token(auth_session, csrf_token)
+    clear_slack_dm_token(db, updated_by_user_id=current_user.id)
+    db.commit()
+    return RedirectResponse(_slack_integration_page_path(), status_code=status.HTTP_303_SEE_OTHER)
+
+
 @router.post("/ops/users/create")
 def ops_create_user(
     request: Request,
@@ -564,12 +798,14 @@ def ops_create_user(
     display_name: str = Form(...),
     password: str = Form(...),
     role: str = Form(...),
+    slack_user_id: str | None = Form(default=None),
     db: Session = Depends(db_session_dependency),
 ):
     validate_csrf_token(auth_session, csrf_token)
     requested_role = role.strip()
     if requested_role not in _allowed_new_user_roles(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot create that role")
+    requested_slack_user_id = _resolve_requested_slack_user_id(actor=current_user, submitted_value=slack_user_id)
     try:
         create_user(
             db,
@@ -577,6 +813,7 @@ def ops_create_user(
             display_name=display_name.strip(),
             password=password,
             role=requested_role,
+            slack_user_id=requested_slack_user_id,
         )
     except ValueError as exc:
         db.rollback()
@@ -603,6 +840,7 @@ def ops_update_user(
     display_name: str = Form(...),
     password: str = Form(default=""),
     role: str = Form(...),
+    slack_user_id: str | None = Form(default=None),
     db: Session = Depends(db_session_dependency),
 ):
     validate_csrf_token(auth_session, csrf_token)
@@ -612,12 +850,18 @@ def ops_update_user(
     requested_role = role.strip()
     if requested_role != user.role and not _can_change_user_role(current_user, user, requested_role):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot assign that role")
+    requested_slack_user_id = _resolve_requested_slack_user_id(
+        actor=current_user,
+        submitted_value=slack_user_id,
+        current_value=user.slack_user_id,
+    )
     try:
         update_user(
             db,
             user=user,
             display_name=display_name,
             role=requested_role,
+            slack_user_id=requested_slack_user_id,
             password=password,
         )
     except ValueError as exc:
@@ -764,6 +1008,7 @@ def ops_set_ticket_status(
     reference: str,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
     csrf_token: str = Form(...),
     next_status: str = Form(...),
     db: Session = Depends(db_session_dependency),
@@ -771,7 +1016,13 @@ def ops_set_ticket_status(
     validate_csrf_token(auth_session, csrf_token)
     ticket = _load_ops_ticket_or_404(db, reference=reference)
     try:
-        set_ticket_status_for_ops(db, ticket=ticket, actor=current_user, next_status=next_status.strip())
+        set_ticket_status_for_ops(
+            db,
+            slack_runtime=build_slack_runtime_context(settings, db=db),
+            ticket=ticket,
+            actor=current_user,
+            next_status=next_status.strip(),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     db.commit()
@@ -783,6 +1034,7 @@ def ops_reply_public(
     reference: str,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
     csrf_token: str = Form(...),
     body: str = Form(...),
     next_status: str = Form(...),
@@ -797,6 +1049,7 @@ def ops_reply_public(
     try:
         add_ops_public_reply(
             db,
+            slack_runtime=build_slack_runtime_context(settings, db=db),
             ticket=ticket,
             actor=current_user,
             body_markdown=body.strip(),
@@ -833,6 +1086,7 @@ def ops_rerun_ai(
     reference: str,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
     csrf_token: str = Form(...),
     forced_route_target_id: str = Form(default=""),
     db: Session = Depends(db_session_dependency),
@@ -842,6 +1096,7 @@ def ops_rerun_ai(
     route_target_value, forced_specialist_id = _resolve_manual_rerun_specialist_override(forced_route_target_id)
     request_manual_rerun(
         db,
+        slack_runtime=build_slack_runtime_context(settings, db=db),
         ticket=ticket,
         actor=current_user,
         forced_route_target_id=route_target_value,
@@ -856,6 +1111,7 @@ def ops_approve_publish_draft(
     draft_id: str,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
     csrf_token: str = Form(...),
     next_status: str = Form(...),
     db: Session = Depends(db_session_dependency),
@@ -868,6 +1124,7 @@ def ops_approve_publish_draft(
     try:
         publish_ai_draft_for_ops(
             db,
+            slack_runtime=build_slack_runtime_context(settings, db=db),
             ticket=ticket,
             draft=draft,
             actor=current_user,

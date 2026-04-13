@@ -37,15 +37,15 @@ CLI_COMMAND_NAMES = (
     "deactivate-user",
 )
 
-DEFAULT_UPLOADS_DIR = Path("/opt/triage/data/uploads")
 DEFAULT_TRIAGE_WORKSPACE_DIR = Path("/opt/triage/triage_workspace")
+DEFAULT_UPLOADS_DIR = DEFAULT_TRIAGE_WORKSPACE_DIR / "attachments_store"
 DEFAULT_REPO_MOUNT_DIR = DEFAULT_TRIAGE_WORKSPACE_DIR / "app"
 DEFAULT_MANUALS_MOUNT_DIR = DEFAULT_TRIAGE_WORKSPACE_DIR / "manuals"
 DEFAULT_RUNS_DIR = DEFAULT_TRIAGE_WORKSPACE_DIR / "runs"
 
 WORKSPACE_AGENTS_RELATIVE_PATH = Path("AGENTS.md")
 
-WORKSPACE_BOOTSTRAP_VERSION = "stage1-v5"
+WORKSPACE_BOOTSTRAP_VERSION = "stage1-v6"
 
 WORKSPACE_AGENTS_CONTENT = """This repository is the Stage 1 custom triage workspace.
 
@@ -56,20 +56,22 @@ Hard rules:
 2. Do not modify files under app/ or manuals/.
 3. Do not inspect live databases or operational logs. Repo-local code, migrations, DDL, and schema dumps under app/ are allowed when they help answer the ticket.
 4. Do not use web search.
-5. Use only the ticket title, public and internal ticket messages, attached images, files under manuals/, and files under app/.
-6. Inspect manuals/ and app/ whenever repository or process evidence would materially improve correctness.
-7. When requester role is dev_ti or admin, requester-facing replies may include technical investigation details and concrete code, configuration, or schema change proposals.
-8. When requester role is not dev_ti or admin, keep concrete code, configuration, or schema change proposals in internal notes or human-reviewed drafts, not auto-published requester replies.
-9. When the question is not document-scoped, you may answer using general reasoning.
-10. Never promise a fix, implementation, release, or timeline.
-11. Prefer concise requester-facing replies.
-12. For document-scoped questions, search the relevant sources before answering.
-13. If a document-scoped answer is low risk and useful but you cannot verify it in manuals/ or app/, clearly say it was not verified.
-14. Return only the final JSON object that matches the provided schema.
-15. Treat screenshots as evidence but do not claim certainty beyond what is visible.
-16. Never execute edits, patches, commits, branches, migrations, or database changes in Stage 1.
-17. Internal messages may inform internal analysis but must not be disclosed publicly unless the same information is already present in public ticket content.
-18. Perform every Stage 1-safe probe you can before concluding. Do not tell the internal team to run a repo/manual/ticket-evidence probe that you could have done yourself.
-19. Separate verified facts, strong hypotheses, and unknowns. Never present an unverified guess as confirmed.
-20. When the exact fix or root cause cannot be confirmed, provide enough internal context and concrete next steps for the next operator to continue safely.
+5. Use only the ticket title, public and internal ticket messages, public attachment files explicitly listed in the prompt, files under manuals/, and files under app/.
+6. When the prompt provides workspace paths for public attachments, inspect those files directly when they are relevant.
+7. Do not claim you lack access to a prompt-listed attachment path unless the file is actually unreadable from the workspace.
+8. Inspect manuals/, app/, and relevant prompt-listed attachment files whenever repository, document, or ticket evidence would materially improve correctness.
+9. When requester role is dev_ti or admin, requester-facing replies may include technical investigation details and concrete code, configuration, or schema change proposals.
+10. When requester role is not dev_ti or admin, keep concrete code, configuration, or schema change proposals in internal notes or human-reviewed drafts, not auto-published requester replies.
+11. When the question is not document-scoped, you may answer using general reasoning.
+12. Never promise a fix, implementation, release, or timeline.
+13. Prefer concise requester-facing replies.
+14. For document-scoped questions, search the relevant sources before answering.
+15. If a document-scoped answer is low risk and useful but you cannot verify it in manuals/, app/, or the provided attachment files, clearly say it was not verified.
+16. Return only the final JSON object that matches the provided schema.
+17. Treat screenshots and other prompt-listed attachments as evidence but do not claim certainty beyond what they support.
+18. Never execute edits, patches, commits, branches, migrations, or database changes in Stage 1.
+19. Internal messages may inform internal analysis but must not be disclosed publicly unless the same information is already present in public ticket content.
+20. Perform every Stage 1-safe probe you can before concluding. Do not tell the internal team to run a repo/manual/ticket-evidence probe that you could have done yourself.
+21. Separate verified facts, strong hypotheses, and unknowns. Never present an unverified guess as confirmed.
+22. When the exact fix or root cause cannot be confirmed, provide enough internal context and concrete next steps for the next operator to continue safely.
 """

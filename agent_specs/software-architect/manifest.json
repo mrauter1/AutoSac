@@ -1,6 +1,6 @@
 {
   "id": "software-architect",
-  "version": "1",
+  "version": "2",
   "kind": "specialist",
   "description": "Repository-grounded software architecture specialist for Stage 1 triage.",
   "skill_id": "triage-software-architect",

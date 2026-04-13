@@ -48,7 +48,8 @@ INTEGRATION_EVENT_TYPES = ("ticket.created", "ticket.public_message_added", "tic
 INTEGRATION_AGGREGATE_TYPES = ("ticket",)
 INTEGRATION_EVENT_LINK_ENTITY_TYPES = ("ticket", "ticket_message", "ticket_status_history")
 INTEGRATION_EVENT_LINK_RELATION_KINDS = ("primary", "message", "status_history")
-INTEGRATION_TARGET_KINDS = ("slack_webhook",)
+INTEGRATION_TARGET_KINDS = ("slack_dm",)
+SLACK_RECIPIENT_REASONS = ("requester", "assignee", "requester_assignee")
 INTEGRATION_DELIVERY_STATUSES = ("pending", "processing", "sent", "failed", "dead_letter")
 
 TICKET_REFERENCE_NUM_SEQUENCE = Sequence("ticket_reference_num_seq")
@@ -61,13 +62,17 @@ def _enum_sql(values: tuple[str, ...]) -> str:
 
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = (CheckConstraint(f"role IN {_enum_sql(USER_ROLES)}", name="users_role"),)
+    __table_args__ = (
+        CheckConstraint(f"role IN {_enum_sql(USER_ROLES)}", name="users_role"),
+        CheckConstraint("slack_user_id IS NULL OR btrim(slack_user_id) <> ''", name="users_slack_user_id_not_blank"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[str] = mapped_column(Text, nullable=False)
+    slack_user_id: Mapped[str | None] = mapped_column(Text, nullable=True, unique=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now, server_default=text("now()"))
@@ -234,6 +239,10 @@ class IntegrationEvent(Base):
     aggregate_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     dedupe_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    routing_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    routing_target_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    routing_config_error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    routing_config_error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
 
 
@@ -249,7 +258,7 @@ class IntegrationEventLink(Base):
             name="integration_event_links_relation_kind",
         ),
         Index(
-            "uq_integration_event_links_event_id_entity_type_entity_id_relation_kind",
+            "uq_integration_event_links_event_entity_relation",
             "event_id",
             "entity_type",
             "entity_id",
@@ -273,6 +282,18 @@ class IntegrationEventTarget(Base):
     __table_args__ = (
         CheckConstraint(f"target_kind IN {_enum_sql(INTEGRATION_TARGET_KINDS)}", name="integration_event_targets_target_kind"),
         CheckConstraint(
+            f"recipient_reason IS NULL OR recipient_reason IN {_enum_sql(SLACK_RECIPIENT_REASONS)}",
+            name="integration_event_targets_recipient_reason",
+        ),
+        CheckConstraint(
+            "(target_kind = 'slack_dm') = (recipient_user_id IS NOT NULL)",
+            name="integration_event_targets_recipient_user_id_matches_target_kind",
+        ),
+        CheckConstraint(
+            "(target_kind = 'slack_dm') = (recipient_reason IS NOT NULL)",
+            name="integration_event_targets_recipient_reason_matches_target_kind",
+        ),
+        CheckConstraint(
             f"delivery_status IN {_enum_sql(INTEGRATION_DELIVERY_STATUSES)}",
             name="integration_event_targets_delivery_status",
         ),
@@ -295,15 +316,61 @@ class IntegrationEventTarget(Base):
     event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("integration_events.id"), nullable=False)
     target_name: Mapped[str] = mapped_column(Text, nullable=False)
     target_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    recipient_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    recipient_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     delivery_status: Mapped[str] = mapped_column(Text, nullable=False)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     locked_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     dead_lettered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+
+
+class SlackDMSettings(Base):
+    __tablename__ = "slack_dm_settings"
+    __table_args__ = (
+        CheckConstraint("singleton_key = 'default'", name="slack_dm_settings_singleton_key"),
+        CheckConstraint("message_preview_max_chars >= 4", name="slack_dm_settings_message_preview_max_chars"),
+        CheckConstraint(
+            "http_timeout_seconds >= 1 AND http_timeout_seconds <= 30",
+            name="slack_dm_settings_http_timeout_seconds",
+        ),
+        CheckConstraint("delivery_batch_size >= 1", name="slack_dm_settings_delivery_batch_size"),
+        CheckConstraint("delivery_max_attempts >= 1", name="slack_dm_settings_delivery_max_attempts"),
+        CheckConstraint(
+            "delivery_stale_lock_seconds > http_timeout_seconds",
+            name="slack_dm_settings_delivery_stale_lock_seconds",
+        ),
+    )
+
+    singleton_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    bot_token_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    team_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    team_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bot_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    notify_ticket_created: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    notify_public_message_added: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    notify_status_changed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    message_preview_max_chars: Mapped[int] = mapped_column(Integer, nullable=False, default=200, server_default=text("200"))
+    http_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default=text("10"))
+    delivery_batch_size: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default=text("10"))
+    delivery_max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5, server_default=text("5"))
+    delivery_stale_lock_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=120, server_default=text("120"))
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        onupdate=utc_now,
+        server_default=text("now()"),
+    )
 
 
 class AIRun(Base):

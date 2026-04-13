@@ -12,6 +12,10 @@ def is_requester(user: User) -> bool:
     return user.role == REQUESTER_ROLE
 
 
+def is_admin_user(user: User) -> bool:
+    return user.role == ADMIN_ROLE
+
+
 def is_ops_user(user: User) -> bool:
     return user.role in OPS_ROLES
 

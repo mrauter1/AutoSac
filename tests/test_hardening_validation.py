@@ -11,7 +11,8 @@ import sys
 import pytest
 
 from shared.agent_specs import load_all_agent_specs
-from shared.config import Settings
+from shared.config import Settings, SettingsError
+from shared.contracts import WORKSPACE_BOOTSTRAP_VERSION
 from shared.contracts import WORKSPACE_AGENTS_CONTENT
 
 
@@ -21,7 +22,7 @@ def _make_settings(tmp_path: Path) -> Settings:
         app_base_url="http://localhost:8000",
         app_secret_key="test-secret",
         database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=workspace_dir / "attachments_store",
         triage_workspace_dir=workspace_dir,
         repo_mount_dir=workspace_dir / "app",
         manuals_mount_dir=workspace_dir / "manuals",
@@ -69,6 +70,7 @@ def _load_web_stack():
 
 
 def _seed_workspace_contract(settings: Settings) -> None:
+    settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     settings.workspace_agents_path.write_text(WORKSPACE_AGENTS_CONTENT, encoding="utf-8")
     for spec in load_all_agent_specs():
         path = settings.workspace_skill_file_path(spec.skill_id)
@@ -257,17 +259,6 @@ def test_env_example_and_readme_capture_acceptance_contract():
         "TRIAGE_WORKSPACE_DIR",
         "REPO_MOUNT_DIR",
         "MANUALS_MOUNT_DIR",
-        "SLACK_ENABLED",
-        "SLACK_DEFAULT_TARGET_NAME",
-        "SLACK_TARGETS_JSON",
-        "SLACK_NOTIFY_TICKET_CREATED",
-        "SLACK_NOTIFY_PUBLIC_MESSAGE_ADDED",
-        "SLACK_NOTIFY_STATUS_CHANGED",
-        "SLACK_MESSAGE_PREVIEW_MAX_CHARS",
-        "SLACK_HTTP_TIMEOUT_SECONDS",
-        "SLACK_DELIVERY_BATCH_SIZE",
-        "SLACK_DELIVERY_MAX_ATTEMPTS",
-        "SLACK_DELIVERY_STALE_LOCK_SECONDS",
     ):
         assert f"{name}=" in env_source
 
@@ -289,9 +280,11 @@ def test_env_example_and_readme_capture_acceptance_contract():
     assert "bootstrap_version" in readme_source
     assert "pytest" in readme_source
     assert "Leave `CODEX_API_KEY` empty" in readme_source
-    assert "SLACK_ENABLED=false" in readme_source
-    assert "SLACK_TARGETS_JSON" in readme_source
-    assert "structured invalid-config state" in readme_source
+    assert "/ops/integrations/slack" in env_source
+    assert "/ops/integrations/slack" in readme_source
+    assert "/ops/users" in readme_source
+    assert "chat.postMessage" in readme_source
+    assert "no authoritative `SLACK_*` runtime env vars" in readme_source
 
 
 def test_slack_docs_capture_phase1_rollout_posture():
@@ -299,13 +292,19 @@ def test_slack_docs_capture_phase1_rollout_posture():
     readme_source = Path("README.md").read_text(encoding="utf-8")
     deployment_source = Path("docs_deployment.md").read_text(encoding="utf-8")
 
-    assert "SLACK_ENABLED=false" in env_source
-    assert "SLACK_DELIVERY_STALE_LOCK_SECONDS=120" in env_source
-    assert "SLACK_ENABLED=false" in readme_source
-    assert "SLACK_NOTIFY_*" in readme_source
+    assert "SLACK_ENABLED=" not in env_source
+    assert "SLACK_TARGETS_JSON" not in env_source
+    assert "/ops/integrations/slack" in env_source
+    assert "does not backfill historical ticket activity" in env_source
+    assert "/ops/integrations/slack" in readme_source
+    assert "/ops/users" in readme_source
+    assert "config-first" in readme_source
+    assert "disposable data" in readme_source
     assert "does not backfill historical ticket activity" in readme_source
-    assert "SLACK_ENABLED=false" in deployment_source
-    assert "SLACK_TARGETS_JSON" in deployment_source
+    assert "/ops/integrations/slack" in deployment_source
+    assert "/ops/users" in deployment_source
+    assert "DM-capable release" in deployment_source
+    assert "disposable pre-launch data" in deployment_source
     assert "does not backfill old ticket activity" in deployment_source
 
 
@@ -313,7 +312,7 @@ def _script_env(tmp_path: Path) -> dict[str, str]:
     workspace_dir = tmp_path / "workspace"
     repo_mount_dir = workspace_dir / "app"
     manuals_mount_dir = workspace_dir / "manuals"
-    uploads_dir = tmp_path / "uploads"
+    uploads_dir = workspace_dir / "attachments_store"
     repo_mount_dir.mkdir(parents=True)
     manuals_mount_dir.mkdir(parents=True)
     uploads_dir.mkdir(parents=True)
@@ -412,7 +411,7 @@ def _create_runtime_schema(db_path: Path) -> None:
 
 def test_get_settings_allows_missing_codex_api_key(monkeypatch, tmp_path):
     workspace_dir = tmp_path / "workspace"
-    uploads_dir = tmp_path / "uploads"
+    uploads_dir = workspace_dir / "attachments_store"
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
     monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}")
@@ -443,9 +442,9 @@ def test_get_settings_allows_missing_codex_api_key(monkeypatch, tmp_path):
     get_settings.cache_clear()
 
 
-def test_get_settings_parses_valid_slack_runtime_config(monkeypatch, tmp_path):
+def test_get_settings_ignores_legacy_slack_env_runtime_config(monkeypatch, tmp_path):
     workspace_dir = tmp_path / "workspace"
-    uploads_dir = tmp_path / "uploads"
+    uploads_dir = workspace_dir / "attachments_store"
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
     monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}")
@@ -467,19 +466,9 @@ def test_get_settings_parses_valid_slack_runtime_config(monkeypatch, tmp_path):
     monkeypatch.setenv("SESSION_REMEMBER_DAYS", "30")
     monkeypatch.setenv("SLACK_ENABLED", "true")
     monkeypatch.setenv("SLACK_DEFAULT_TARGET_NAME", "ops_primary")
-    monkeypatch.setenv(
-        "SLACK_TARGETS_JSON",
-        json.dumps(
-            {
-                "ops_primary": {
-                    "enabled": True,
-                    "webhook_url": "https://hooks.slack.com/services/T000/B000/XXXX",
-                }
-            }
-        ),
-    )
+    monkeypatch.setenv("SLACK_TARGETS_JSON", '{"ops_primary":{"enabled":true,"webhook_url":"https://hooks.slack.com/services/T000/B000/XXXX"}}')
     monkeypatch.setenv("SLACK_NOTIFY_TICKET_CREATED", "true")
-    monkeypatch.setenv("SLACK_NOTIFY_PUBLIC_MESSAGE_ADDED", "false")
+    monkeypatch.setenv("SLACK_NOTIFY_PUBLIC_MESSAGE_ADDED", "true")
     monkeypatch.setenv("SLACK_NOTIFY_STATUS_CHANGED", "true")
     monkeypatch.setenv("SLACK_MESSAGE_PREVIEW_MAX_CHARS", "240")
     monkeypatch.setenv("SLACK_HTTP_TIMEOUT_SECONDS", "12")
@@ -492,26 +481,22 @@ def test_get_settings_parses_valid_slack_runtime_config(monkeypatch, tmp_path):
     get_settings.cache_clear()
     settings = get_settings()
 
-    assert settings.slack.enabled is True
+    assert settings.slack.enabled is False
     assert settings.slack.is_valid is True
-    assert settings.slack.default_target_name == "ops_primary"
-    assert settings.slack.any_notify_enabled is True
-    assert settings.slack.get_target("ops_primary") is not None
-    assert settings.slack.get_target("ops_primary").webhook_url == "https://hooks.slack.com/services/T000/B000/XXXX"
-    assert settings.slack.notify_ticket_created is True
-    assert settings.slack.notify_public_message_added is False
-    assert settings.slack.notify_status_changed is True
-    assert settings.slack.message_preview_max_chars == 240
-    assert settings.slack.http_timeout_seconds == 12
-    assert settings.slack.delivery_batch_size == 8
-    assert settings.slack.delivery_max_attempts == 6
-    assert settings.slack.delivery_stale_lock_seconds == 90
+    assert settings.slack.default_target_name is None
+    assert settings.slack.targets == ()
+    assert settings.slack.any_notify_enabled is False
+    assert settings.slack.message_preview_max_chars == 200
+    assert settings.slack.http_timeout_seconds == 10
+    assert settings.slack.delivery_batch_size == 10
+    assert settings.slack.delivery_max_attempts == 5
+    assert settings.slack.delivery_stale_lock_seconds == 120
     get_settings.cache_clear()
 
 
-def test_get_settings_soft_reports_invalid_slack_config_without_raising(monkeypatch, tmp_path):
+def test_get_settings_ignores_invalid_legacy_slack_env_runtime_config(monkeypatch, tmp_path):
     workspace_dir = tmp_path / "workspace"
-    uploads_dir = tmp_path / "uploads"
+    uploads_dir = workspace_dir / "attachments_store"
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
     monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}")
@@ -531,204 +516,46 @@ def test_get_settings_soft_reports_invalid_slack_config_without_raising(monkeypa
     monkeypatch.setenv("MAX_IMAGE_BYTES", str(5 * 1024 * 1024))
     monkeypatch.setenv("SESSION_DEFAULT_HOURS", "12")
     monkeypatch.setenv("SESSION_REMEMBER_DAYS", "30")
-    monkeypatch.setenv("SLACK_ENABLED", "true")
-    monkeypatch.setenv("SLACK_DEFAULT_TARGET_NAME", "ops_primary")
-    monkeypatch.setenv("SLACK_NOTIFY_TICKET_CREATED", "true")
+    monkeypatch.setenv("SLACK_ENABLED", "definitely-not-a-bool")
     monkeypatch.setenv("SLACK_TARGETS_JSON", "{not-json")
+    monkeypatch.setenv("SLACK_HTTP_TIMEOUT_SECONDS", "999")
 
     from shared.config import get_settings
 
     get_settings.cache_clear()
     settings = get_settings()
 
-    assert settings.slack.enabled is True
-    assert settings.slack.is_valid is False
-    assert settings.slack.config_error_code == "slack_targets_json_parse_error"
-    assert settings.slack.config_error_summary == "SLACK_TARGETS_JSON must be a valid JSON object"
+    assert settings.slack.enabled is False
+    assert settings.slack.is_valid is True
     settings.validate_contracts()
     get_settings.cache_clear()
 
 
-@pytest.mark.parametrize("raw_targets", [None, ""])
-def test_get_settings_soft_reports_missing_or_empty_slack_targets_json_when_enabled(monkeypatch, tmp_path, raw_targets):
+def test_settings_validate_contracts_rejects_uploads_dir_outside_workspace(tmp_path):
     workspace_dir = tmp_path / "workspace"
-    uploads_dir = tmp_path / "uploads"
-    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
-    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
-    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}")
-    monkeypatch.setenv("UI_DEFAULT_LOCALE", "pt-BR")
-    monkeypatch.setenv("UPLOADS_DIR", str(uploads_dir))
-    monkeypatch.setenv("TRIAGE_WORKSPACE_DIR", str(workspace_dir))
-    monkeypatch.setenv("REPO_MOUNT_DIR", str(workspace_dir / "app"))
-    monkeypatch.setenv("MANUALS_MOUNT_DIR", str(workspace_dir / "manuals"))
-    monkeypatch.setenv("CODEX_BIN", "codex")
-    monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    monkeypatch.setenv("CODEX_MODEL", "")
-    monkeypatch.setenv("CODEX_TIMEOUT_SECONDS", "3600")
-    monkeypatch.setenv("WORKER_POLL_SECONDS", "10")
-    monkeypatch.setenv("AUTO_SUPPORT_REPLY_MIN_CONFIDENCE", "0.85")
-    monkeypatch.setenv("AUTO_CONFIRM_INTENT_MIN_CONFIDENCE", "0.90")
-    monkeypatch.setenv("MAX_IMAGES_PER_MESSAGE", "3")
-    monkeypatch.setenv("MAX_IMAGE_BYTES", str(5 * 1024 * 1024))
-    monkeypatch.setenv("SESSION_DEFAULT_HOURS", "12")
-    monkeypatch.setenv("SESSION_REMEMBER_DAYS", "30")
-    monkeypatch.setenv("SLACK_ENABLED", "true")
-    if raw_targets is None:
-        monkeypatch.delenv("SLACK_TARGETS_JSON", raising=False)
-    else:
-        monkeypatch.setenv("SLACK_TARGETS_JSON", raw_targets)
-
-    from shared.config import get_settings
-
-    get_settings.cache_clear()
-    settings = get_settings()
-
-    assert settings.slack.enabled is True
-    assert settings.slack.is_valid is False
-    assert settings.slack.config_error_code == "slack_targets_json_missing"
-    assert settings.slack.config_error_summary == "SLACK_TARGETS_JSON is required when SLACK_ENABLED=true"
-    settings.validate_contracts()
-    get_settings.cache_clear()
-
-
-def test_get_settings_soft_reports_non_object_slack_targets_json_when_enabled(monkeypatch, tmp_path):
-    workspace_dir = tmp_path / "workspace"
-    uploads_dir = tmp_path / "uploads"
-    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
-    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
-    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}")
-    monkeypatch.setenv("UI_DEFAULT_LOCALE", "pt-BR")
-    monkeypatch.setenv("UPLOADS_DIR", str(uploads_dir))
-    monkeypatch.setenv("TRIAGE_WORKSPACE_DIR", str(workspace_dir))
-    monkeypatch.setenv("REPO_MOUNT_DIR", str(workspace_dir / "app"))
-    monkeypatch.setenv("MANUALS_MOUNT_DIR", str(workspace_dir / "manuals"))
-    monkeypatch.setenv("CODEX_BIN", "codex")
-    monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    monkeypatch.setenv("CODEX_MODEL", "")
-    monkeypatch.setenv("CODEX_TIMEOUT_SECONDS", "3600")
-    monkeypatch.setenv("WORKER_POLL_SECONDS", "10")
-    monkeypatch.setenv("AUTO_SUPPORT_REPLY_MIN_CONFIDENCE", "0.85")
-    monkeypatch.setenv("AUTO_CONFIRM_INTENT_MIN_CONFIDENCE", "0.90")
-    monkeypatch.setenv("MAX_IMAGES_PER_MESSAGE", "3")
-    monkeypatch.setenv("MAX_IMAGE_BYTES", str(5 * 1024 * 1024))
-    monkeypatch.setenv("SESSION_DEFAULT_HOURS", "12")
-    monkeypatch.setenv("SESSION_REMEMBER_DAYS", "30")
-    monkeypatch.setenv("SLACK_ENABLED", "true")
-    monkeypatch.setenv("SLACK_TARGETS_JSON", "[]")
-
-    from shared.config import get_settings
-
-    get_settings.cache_clear()
-    settings = get_settings()
-
-    assert settings.slack.enabled is True
-    assert settings.slack.is_valid is False
-    assert settings.slack.config_error_code == "slack_targets_json_not_object"
-    assert settings.slack.config_error_summary == "SLACK_TARGETS_JSON must decode to a JSON object"
-    settings.validate_contracts()
-    get_settings.cache_clear()
-
-
-def test_get_settings_soft_reports_missing_default_target_when_notify_enabled(monkeypatch, tmp_path):
-    workspace_dir = tmp_path / "workspace"
-    uploads_dir = tmp_path / "uploads"
-    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
-    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
-    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}")
-    monkeypatch.setenv("UI_DEFAULT_LOCALE", "pt-BR")
-    monkeypatch.setenv("UPLOADS_DIR", str(uploads_dir))
-    monkeypatch.setenv("TRIAGE_WORKSPACE_DIR", str(workspace_dir))
-    monkeypatch.setenv("REPO_MOUNT_DIR", str(workspace_dir / "app"))
-    monkeypatch.setenv("MANUALS_MOUNT_DIR", str(workspace_dir / "manuals"))
-    monkeypatch.setenv("CODEX_BIN", "codex")
-    monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    monkeypatch.setenv("CODEX_MODEL", "")
-    monkeypatch.setenv("CODEX_TIMEOUT_SECONDS", "3600")
-    monkeypatch.setenv("WORKER_POLL_SECONDS", "10")
-    monkeypatch.setenv("AUTO_SUPPORT_REPLY_MIN_CONFIDENCE", "0.85")
-    monkeypatch.setenv("AUTO_CONFIRM_INTENT_MIN_CONFIDENCE", "0.90")
-    monkeypatch.setenv("MAX_IMAGES_PER_MESSAGE", "3")
-    monkeypatch.setenv("MAX_IMAGE_BYTES", str(5 * 1024 * 1024))
-    monkeypatch.setenv("SESSION_DEFAULT_HOURS", "12")
-    monkeypatch.setenv("SESSION_REMEMBER_DAYS", "30")
-    monkeypatch.setenv("SLACK_ENABLED", "true")
-    monkeypatch.setenv("SLACK_NOTIFY_TICKET_CREATED", "true")
-    monkeypatch.delenv("SLACK_DEFAULT_TARGET_NAME", raising=False)
-    monkeypatch.setenv(
-        "SLACK_TARGETS_JSON",
-        json.dumps(
-            {
-                "ops_primary": {
-                    "enabled": True,
-                    "webhook_url": "https://hooks.slack.com/services/T000/B000/XXXX",
-                }
-            }
-        ),
+    settings = Settings(
+        app_base_url="http://localhost:8000",
+        app_secret_key="test-secret",
+        database_url=f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}",
+        uploads_dir=tmp_path / "uploads",
+        triage_workspace_dir=workspace_dir,
+        repo_mount_dir=workspace_dir / "app",
+        manuals_mount_dir=workspace_dir / "manuals",
+        codex_bin="codex",
+        codex_api_key=None,
+        codex_model="",
+        codex_timeout_seconds=3600,
+        worker_poll_seconds=10,
+        auto_support_reply_min_confidence=0.85,
+        auto_confirm_intent_min_confidence=0.90,
+        max_images_per_message=3,
+        max_image_bytes=5 * 1024 * 1024,
+        session_default_hours=12,
+        session_remember_days=30,
     )
 
-    from shared.config import get_settings
-
-    get_settings.cache_clear()
-    settings = get_settings()
-
-    assert settings.slack.enabled is True
-    assert settings.slack.is_valid is False
-    assert settings.slack.config_error_code == "slack_default_target_missing"
-    assert settings.slack.config_error_summary == (
-        "SLACK_DEFAULT_TARGET_NAME is required when Slack delivery and any SLACK_NOTIFY_* flag are enabled"
-    )
-    settings.validate_contracts()
-    get_settings.cache_clear()
-
-
-def test_get_settings_soft_reports_invalid_target_webhook_url(monkeypatch, tmp_path):
-    workspace_dir = tmp_path / "workspace"
-    uploads_dir = tmp_path / "uploads"
-    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
-    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
-    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}")
-    monkeypatch.setenv("UI_DEFAULT_LOCALE", "pt-BR")
-    monkeypatch.setenv("UPLOADS_DIR", str(uploads_dir))
-    monkeypatch.setenv("TRIAGE_WORKSPACE_DIR", str(workspace_dir))
-    monkeypatch.setenv("REPO_MOUNT_DIR", str(workspace_dir / "app"))
-    monkeypatch.setenv("MANUALS_MOUNT_DIR", str(workspace_dir / "manuals"))
-    monkeypatch.setenv("CODEX_BIN", "codex")
-    monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    monkeypatch.setenv("CODEX_MODEL", "")
-    monkeypatch.setenv("CODEX_TIMEOUT_SECONDS", "3600")
-    monkeypatch.setenv("WORKER_POLL_SECONDS", "10")
-    monkeypatch.setenv("AUTO_SUPPORT_REPLY_MIN_CONFIDENCE", "0.85")
-    monkeypatch.setenv("AUTO_CONFIRM_INTENT_MIN_CONFIDENCE", "0.90")
-    monkeypatch.setenv("MAX_IMAGES_PER_MESSAGE", "3")
-    monkeypatch.setenv("MAX_IMAGE_BYTES", str(5 * 1024 * 1024))
-    monkeypatch.setenv("SESSION_DEFAULT_HOURS", "12")
-    monkeypatch.setenv("SESSION_REMEMBER_DAYS", "30")
-    monkeypatch.setenv("SLACK_ENABLED", "true")
-    monkeypatch.setenv(
-        "SLACK_TARGETS_JSON",
-        json.dumps(
-            {
-                "ops_primary": {
-                    "enabled": True,
-                    "webhook_url": "http://hooks.slack.com/services/T000/B000/XXXX",
-                }
-            }
-        ),
-    )
-
-    from shared.config import get_settings
-
-    get_settings.cache_clear()
-    settings = get_settings()
-
-    assert settings.slack.enabled is True
-    assert settings.slack.is_valid is False
-    assert settings.slack.config_error_code == "slack_target_webhook_url_invalid"
-    assert settings.slack.config_error_summary == (
-        "Slack target ops_primary must define a valid absolute HTTPS webhook_url"
-    )
-    settings.validate_contracts()
-    get_settings.cache_clear()
+    with pytest.raises(SettingsError, match="UPLOADS_DIR must be inside TRIAGE_WORKSPACE_DIR"):
+        settings.validate_contracts()
 
 
 def _run_script(args: list[str], *, env: dict[str, str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -758,7 +585,7 @@ def test_bootstrap_web_and_worker_scripts_validate_end_to_end(tmp_path):
     _create_runtime_schema(db_path)
 
     bootstrap = _run_script(["scripts/bootstrap_workspace.py"], env=env)
-    assert '"bootstrap_version": "stage1-v5"' in bootstrap.stdout
+    assert f'"bootstrap_version": "{WORKSPACE_BOOTSTRAP_VERSION}"' in bootstrap.stdout
     with sqlite3.connect(db_path) as connection:
         rows = dict(connection.execute("SELECT key, value_json FROM system_state").fetchall())
     assert "bootstrap_version" in rows

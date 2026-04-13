@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import uuid
 
@@ -17,7 +19,7 @@ from shared.routing_registry import RoutingRegistryError, load_routing_registry
 from shared.security import utc_now
 from worker.artifacts import StepArtifactPaths, build_run_dir, build_step_artifact_paths, write_run_manifest, write_step_manifest
 from worker.output_contracts import OutputContractError, RouterResult, SpecialistResult, SpecialistSelectorResult, validate_contract_output, schema_json_for_contract
-from worker.prompt_renderer import render_agent_prompt
+from worker.prompt_renderer import PromptAttachment, render_agent_prompt
 from worker.run_ownership import RunOwnershipLost, load_owned_running_run
 from worker.ticket_loader import LoadedTicketContext
 
@@ -37,6 +39,8 @@ class PreparedStepRun:
     paths: StepArtifactPaths
     prompt: str
     schema_json: str
+    attachment_root: Path
+    public_attachments: tuple[PromptAttachment, ...]
     image_paths: list[Path]
     model_name: str | None
     timeout_seconds: int
@@ -56,6 +60,76 @@ def _is_image_attachment(attachment) -> bool:
     return getattr(attachment, "width", None) is not None and getattr(attachment, "height", None) is not None
 
 
+def _sanitize_workspace_attachment_stem(original_filename: str) -> str:
+    stem = Path(original_filename).stem.strip()
+    if not stem:
+        return "attachment"
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    return sanitized[:64] or "attachment"
+
+
+def _safe_workspace_attachment_filename(*, attachment_id, original_filename: str, source_path: Path) -> str:
+    extension = source_path.suffix
+    if not re.fullmatch(r"\.[A-Za-z0-9]{1,16}", extension):
+        extension = ""
+    stem = _sanitize_workspace_attachment_stem(original_filename)
+    return f"{attachment_id}__{stem}{extension}"
+
+
+def _path_within_workspace(settings: Settings, path: Path) -> bool:
+    try:
+        return path.resolve(strict=False).is_relative_to(settings.triage_workspace_dir.resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _workspace_relative_path(settings: Settings, path: Path) -> str:
+    return str(path.resolve(strict=False).relative_to(settings.triage_workspace_dir.resolve(strict=False)))
+
+
+def _materialize_public_attachments(
+    settings: Settings,
+    *,
+    run_dir: Path,
+    ticket_id,
+    public_attachments,
+) -> tuple[Path, tuple[PromptAttachment, ...]]:
+    attachment_root = run_dir / "attachments"
+    if not public_attachments:
+        return attachment_root, ()
+    attachment_root.mkdir(parents=True, exist_ok=True)
+    materialized: list[PromptAttachment] = []
+    for attachment in public_attachments:
+        source_path = Path(attachment.stored_path)
+        if not source_path.is_file():
+            raise StepRunError(
+                f"Attachment file is missing for ticket {ticket_id}: "
+                f"{attachment.original_filename} ({source_path})"
+            )
+        target_path = attachment_root / _safe_workspace_attachment_filename(
+            attachment_id=attachment.id,
+            original_filename=attachment.original_filename,
+            source_path=source_path,
+        )
+        if not _path_within_workspace(settings, target_path):
+            raise StepRunError(f"Materialized attachment path escaped the workspace: {target_path}")
+        if source_path.resolve(strict=False) != target_path.resolve(strict=False) and not target_path.exists():
+            shutil.copy2(source_path, target_path)
+        materialized.append(
+            PromptAttachment(
+                attachment_id=str(attachment.id),
+                original_filename=attachment.original_filename,
+                mime_type=attachment.mime_type,
+                size_bytes=attachment.size_bytes,
+                sha256=attachment.sha256,
+                workspace_path=_workspace_relative_path(settings, target_path),
+                absolute_path=str(target_path.resolve(strict=False)),
+                is_image=_is_image_attachment(attachment),
+            )
+        )
+    return attachment_root, tuple(materialized)
+
+
 def prepare_step_run(
     settings: Settings,
     *,
@@ -73,9 +147,17 @@ def prepare_step_run(
 ) -> PreparedStepRun:
     resolved_route_target_id = target_route_target_id
     paths = build_step_artifact_paths(settings, ticket_id=ticket_id, run_id=run_id, step_index=step_index, spec=spec)
+    attachment_root, public_attachments = _materialize_public_attachments(
+        settings,
+        run_dir=paths.run_dir,
+        ticket_id=ticket_id,
+        public_attachments=context.public_attachments,
+    )
     prompt = render_agent_prompt(
         spec,
         context=context,
+        public_attachments=public_attachments,
+        attachments_root=_workspace_relative_path(settings, attachment_root) if public_attachments else "(none)",
         router_result=router_result,
         target_route_target_id=resolved_route_target_id,
         candidate_specialist_ids=candidate_specialist_ids,
@@ -83,11 +165,7 @@ def prepare_step_run(
     schema_json = schema_json_for_contract(spec.output_contract)
     paths.prompt_path.write_text(prompt, encoding="utf-8")
     paths.schema_path.write_text(schema_json, encoding="utf-8")
-    image_paths = [
-        Path(attachment.stored_path)
-        for attachment in context.public_attachments
-        if _is_image_attachment(attachment)
-    ]
+    image_paths = [Path(attachment.absolute_path) for attachment in public_attachments if attachment.is_image]
     model_name = spec.model_override or settings.codex_model or None
     timeout_seconds = spec.timeout_seconds_override or settings.codex_timeout_seconds
     return PreparedStepRun(
@@ -100,6 +178,8 @@ def prepare_step_run(
         paths=paths,
         prompt=prompt,
         schema_json=schema_json,
+        attachment_root=attachment_root,
+        public_attachments=public_attachments,
         image_paths=image_paths,
         model_name=model_name,
         timeout_seconds=timeout_seconds,
@@ -235,6 +315,8 @@ def _step_manifest_metadata(
         metadata["selected_specialist_id"] = prepared.selected_specialist_id
     if prepared.candidate_specialist_ids is not None:
         metadata["candidate_specialist_ids"] = list(prepared.candidate_specialist_ids)
+    metadata["attachments_root"] = _normalize_stream_contents(str(prepared.attachment_root))
+    metadata["public_attachments"] = [attachment.as_payload() for attachment in prepared.public_attachments]
     if output_payload is None:
         return metadata
     if prepared.step_kind == "router":
@@ -465,6 +547,8 @@ def record_synthetic_step_success(
         paths=paths,
         prompt=prompt_text,
         schema_json=schema_json,
+        attachment_root=paths.run_dir / "attachments",
+        public_attachments=(),
         image_paths=[],
         model_name=None,
         timeout_seconds=0,

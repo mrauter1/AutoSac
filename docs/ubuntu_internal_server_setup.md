@@ -91,11 +91,11 @@ python -m pip install -r requirements.txt
 
 ## 5. Create the runtime directories
 
-Create the directories that AutoSac expects for uploads and the read-only worker workspace:
+Create the directories that AutoSac expects for the read-only worker workspace, the workspace-local upload store, and the mount points:
 
 ```bash
 mkdir -p \
-  "$HOME/autosac-data/uploads" \
+  "$HOME/autosac-data/triage_workspace/attachments_store" \
   "$HOME/autosac-data/triage_workspace/app" \
   "$HOME/autosac-data/triage_workspace/manuals"
 ```
@@ -125,7 +125,7 @@ DATABASE_URL=postgresql+psycopg://triage:CHOOSE_A_DB_PASSWORD@localhost:5432/tri
 CODEX_BIN=codex
 CODEX_API_KEY=
 
-UPLOADS_DIR=/home/YOUR_USER/autosac-data/uploads
+UPLOADS_DIR=/home/YOUR_USER/autosac-data/triage_workspace/attachments_store
 TRIAGE_WORKSPACE_DIR=/home/YOUR_USER/autosac-data/triage_workspace
 REPO_MOUNT_DIR=/home/YOUR_USER/autosac-data/triage_workspace/app
 MANUALS_MOUNT_DIR=/home/YOUR_USER/autosac-data/triage_workspace/manuals
@@ -134,6 +134,7 @@ MANUALS_MOUNT_DIR=/home/YOUR_USER/autosac-data/triage_workspace/manuals
 Important:
 
 - Use absolute paths in `.env`. Do not use `$HOME` in these values.
+- Keep `UPLOADS_DIR` inside `TRIAGE_WORKSPACE_DIR` so ticket attachments remain directly accessible to the agent runtime.
 - If `command -v codex` returns a path outside the normal system PATH, set `CODEX_BIN` to that full path instead of `codex`.
 - Leave `CODEX_API_KEY` empty if you already ran `codex login` as the service user.
 
@@ -157,7 +158,7 @@ python scripts/bootstrap_workspace.py
 
 What this does:
 
-- ensures the upload and workspace directories exist
+- ensures the workspace, upload, and runs directories exist
 - provisions the local PostgreSQL role and database from `DATABASE_URL`
 - applies the Alembic schema
 - backfills historical AI run rows into the current step-based structure
@@ -173,6 +174,13 @@ python scripts/create_admin.py \
 ```
 
 You can add more local users later with `python scripts/create_user.py`.
+
+Slack DM rollout note:
+
+- Slack DM settings are DB-backed, not `.env`-backed.
+- After you can sign in as the admin, use `/ops/integrations/slack` to store the bot token and enable delivery, and use `/ops/users` to set `slack_user_id` mappings.
+- Keep Slack disabled or disconnected there until both web and worker are running the same DM-capable build.
+- Enabling Slack later does not backfill historical ticket activity.
 
 ## 9. Run readiness checks
 
