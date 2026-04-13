@@ -24,7 +24,7 @@ services:
       - key: CODEX_API_KEY
         sync: false
       - key: UPLOADS_DIR
-        value: /opt/triage/data/uploads
+        value: /opt/triage/triage_workspace/attachments_store
       - key: TRIAGE_WORKSPACE_DIR
         value: /opt/triage/triage_workspace
       - key: REPO_MOUNT_DIR

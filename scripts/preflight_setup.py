@@ -27,6 +27,7 @@ def _ensure_local_paths(settings: Settings) -> None:
     for path in (
         settings.uploads_dir,
         settings.triage_workspace_dir,
+        settings.runs_dir,
         settings.repo_mount_dir,
         settings.manuals_mount_dir,
     ):
@@ -61,7 +62,7 @@ def main() -> None:
     parser.add_argument(
         "--ensure-workspace-dirs",
         action="store_true",
-        help="Create uploads/workspace mount directories if they do not already exist.",
+        help="Create uploads, workspace, runs, and mount directories if they do not already exist.",
     )
     parser.add_argument(
         "--setup-postgres-local",
@@ -101,11 +102,14 @@ def main() -> None:
     summary["paths"] = {
         "uploads_dir": str(settings.uploads_dir),
         "triage_workspace_dir": str(settings.triage_workspace_dir),
+        "runs_dir": str(settings.runs_dir),
         "repo_mount_dir": str(settings.repo_mount_dir),
         "manuals_mount_dir": str(settings.manuals_mount_dir),
+        "triage_workspace_exists": settings.triage_workspace_dir.is_dir(),
         "repo_mount_exists": settings.repo_mount_dir.is_dir(),
         "manuals_mount_exists": settings.manuals_mount_dir.is_dir(),
         "uploads_dir_exists": settings.uploads_dir.is_dir(),
+        "runs_dir_exists": settings.runs_dir.is_dir(),
     }
 
     database_ok, database_error = _check_database(settings)
@@ -127,9 +131,15 @@ def main() -> None:
         "python scripts/bootstrap_workspace.py",
     ]
 
-    ready = bool(summary["codex_bin"]["ok"]) and bool(summary["paths"]["repo_mount_exists"]) and bool(
-        summary["paths"]["manuals_mount_exists"]
-    ) and bool(summary["paths"]["uploads_dir_exists"]) and database_ok
+    ready = (
+        bool(summary["codex_bin"]["ok"])
+        and bool(summary["paths"]["triage_workspace_exists"])
+        and bool(summary["paths"]["repo_mount_exists"])
+        and bool(summary["paths"]["manuals_mount_exists"])
+        and bool(summary["paths"]["uploads_dir_exists"])
+        and bool(summary["paths"]["runs_dir_exists"])
+        and database_ok
+    )
 
     summary["status"] = "ok" if ready else "not_ready"
     print(json.dumps(summary))

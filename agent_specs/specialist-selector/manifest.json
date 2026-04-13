@@ -1,6 +1,6 @@
 {
   "id": "specialist-selector",
-  "version": "1",
+  "version": "2",
   "kind": "selector",
   "description": "Choose the best specialist from the allowed candidates for a selected route target.",
   "skill_id": "triage-specialist-selector",

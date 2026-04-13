@@ -12,7 +12,7 @@ from shared.agent_specs import load_agent_spec
 from shared.config import Settings
 from shared.routing_registry import RoutingRegistryError, load_routing_registry
 from worker.output_contracts import OutputContractError, RouterResult, validate_contract_output
-from worker.prompt_renderer import PromptRenderError, render_agent_prompt
+from worker.prompt_renderer import PromptAttachment, PromptRenderError, render_agent_prompt
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +35,7 @@ def _make_settings(tmp_path: Path) -> Settings:
         app_base_url="http://localhost:8000",
         app_secret_key="test-secret",
         database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=workspace_dir / "attachments_store",
         triage_workspace_dir=workspace_dir,
         repo_mount_dir=workspace_dir / "app",
         manuals_mount_dir=workspace_dir / "manuals",
@@ -453,6 +453,41 @@ def test_render_specialist_prompt_includes_route_target_context() -> None:
     assert "ROUTER_TICKET_CLASS" not in prompt
     assert "ticket class" not in prompt.lower()
     assert "classified the ticket as" not in prompt
+
+
+def test_render_specialist_prompt_includes_public_attachment_catalog() -> None:
+    prompt = render_agent_prompt(
+        load_agent_spec("support"),
+        context=_make_context(),
+        public_attachments=(
+            PromptAttachment(
+                attachment_id="a-1",
+                original_filename="report.xls",
+                mime_type="application/vnd.ms-excel",
+                size_bytes=42,
+                sha256="sha-report",
+                workspace_path="runs/ticket/run/attachments/a-1__report.xls",
+                absolute_path="/tmp/workspace/runs/ticket/run/attachments/a-1__report.xls",
+                is_image=False,
+            ),
+        ),
+        attachments_root="runs/ticket/run/attachments",
+        router_result=RouterResult.model_validate(
+            {
+                "route_target_id": "support",
+                "routing_rationale": "The requester needs low-risk usage guidance.",
+            }
+        ),
+        target_route_target_id="support",
+    )
+
+    assert "Attachment workspace root:" in prompt
+    assert "runs/ticket/run/attachments" in prompt
+    assert "Public attachments:" in prompt
+    assert "report.xls" in prompt
+    assert "workspace_path=runs/ticket/run/attachments/a-1__report.xls" in prompt
+    assert "absolute_path=/tmp/workspace/runs/ticket/run/attachments/a-1__report.xls" in prompt
+    assert "image_attachment=no" in prompt
 
 
 def test_render_software_architect_prompt_includes_expected_assessment_structure() -> None:

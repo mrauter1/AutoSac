@@ -11,7 +11,8 @@ import sys
 import pytest
 
 from shared.agent_specs import load_all_agent_specs
-from shared.config import Settings
+from shared.config import Settings, SettingsError
+from shared.contracts import WORKSPACE_BOOTSTRAP_VERSION
 from shared.contracts import WORKSPACE_AGENTS_CONTENT
 
 
@@ -21,7 +22,7 @@ def _make_settings(tmp_path: Path) -> Settings:
         app_base_url="http://localhost:8000",
         app_secret_key="test-secret",
         database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=workspace_dir / "attachments_store",
         triage_workspace_dir=workspace_dir,
         repo_mount_dir=workspace_dir / "app",
         manuals_mount_dir=workspace_dir / "manuals",
@@ -69,6 +70,7 @@ def _load_web_stack():
 
 
 def _seed_workspace_contract(settings: Settings) -> None:
+    settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     settings.workspace_agents_path.write_text(WORKSPACE_AGENTS_CONTENT, encoding="utf-8")
     for spec in load_all_agent_specs():
         path = settings.workspace_skill_file_path(spec.skill_id)
@@ -310,7 +312,7 @@ def _script_env(tmp_path: Path) -> dict[str, str]:
     workspace_dir = tmp_path / "workspace"
     repo_mount_dir = workspace_dir / "app"
     manuals_mount_dir = workspace_dir / "manuals"
-    uploads_dir = tmp_path / "uploads"
+    uploads_dir = workspace_dir / "attachments_store"
     repo_mount_dir.mkdir(parents=True)
     manuals_mount_dir.mkdir(parents=True)
     uploads_dir.mkdir(parents=True)
@@ -409,7 +411,7 @@ def _create_runtime_schema(db_path: Path) -> None:
 
 def test_get_settings_allows_missing_codex_api_key(monkeypatch, tmp_path):
     workspace_dir = tmp_path / "workspace"
-    uploads_dir = tmp_path / "uploads"
+    uploads_dir = workspace_dir / "attachments_store"
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
     monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}")
@@ -442,7 +444,7 @@ def test_get_settings_allows_missing_codex_api_key(monkeypatch, tmp_path):
 
 def test_get_settings_ignores_legacy_slack_env_runtime_config(monkeypatch, tmp_path):
     workspace_dir = tmp_path / "workspace"
-    uploads_dir = tmp_path / "uploads"
+    uploads_dir = workspace_dir / "attachments_store"
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
     monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}")
@@ -494,7 +496,7 @@ def test_get_settings_ignores_legacy_slack_env_runtime_config(monkeypatch, tmp_p
 
 def test_get_settings_ignores_invalid_legacy_slack_env_runtime_config(monkeypatch, tmp_path):
     workspace_dir = tmp_path / "workspace"
-    uploads_dir = tmp_path / "uploads"
+    uploads_dir = workspace_dir / "attachments_store"
     monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
     monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
     monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}")
@@ -529,6 +531,33 @@ def test_get_settings_ignores_invalid_legacy_slack_env_runtime_config(monkeypatc
     get_settings.cache_clear()
 
 
+def test_settings_validate_contracts_rejects_uploads_dir_outside_workspace(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    settings = Settings(
+        app_base_url="http://localhost:8000",
+        app_secret_key="test-secret",
+        database_url=f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}",
+        uploads_dir=tmp_path / "uploads",
+        triage_workspace_dir=workspace_dir,
+        repo_mount_dir=workspace_dir / "app",
+        manuals_mount_dir=workspace_dir / "manuals",
+        codex_bin="codex",
+        codex_api_key=None,
+        codex_model="",
+        codex_timeout_seconds=3600,
+        worker_poll_seconds=10,
+        auto_support_reply_min_confidence=0.85,
+        auto_confirm_intent_min_confidence=0.90,
+        max_images_per_message=3,
+        max_image_bytes=5 * 1024 * 1024,
+        session_default_hours=12,
+        session_remember_days=30,
+    )
+
+    with pytest.raises(SettingsError, match="UPLOADS_DIR must be inside TRIAGE_WORKSPACE_DIR"):
+        settings.validate_contracts()
+
+
 def _run_script(args: list[str], *, env: dict[str, str], check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, *args],
@@ -556,7 +585,7 @@ def test_bootstrap_web_and_worker_scripts_validate_end_to_end(tmp_path):
     _create_runtime_schema(db_path)
 
     bootstrap = _run_script(["scripts/bootstrap_workspace.py"], env=env)
-    assert '"bootstrap_version": "stage1-v5"' in bootstrap.stdout
+    assert f'"bootstrap_version": "{WORKSPACE_BOOTSTRAP_VERSION}"' in bootstrap.stdout
     with sqlite3.connect(db_path) as connection:
         rows = dict(connection.execute("SELECT key, value_json FROM system_state").fetchall())
     assert "bootstrap_version" in rows

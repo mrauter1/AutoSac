@@ -56,6 +56,8 @@ Unauthenticated browser navigation to protected HTML pages redirects to `/login`
    Runtime scripts load `.env` automatically from the repository root.
 
 4. Ensure the workspace mount directories exist before bootstrapping:
+   - `TRIAGE_WORKSPACE_DIR`
+   - `UPLOADS_DIR` inside `TRIAGE_WORKSPACE_DIR`
    - `REPO_MOUNT_DIR`
    - `MANUALS_MOUNT_DIR`
 
@@ -65,7 +67,7 @@ Unauthenticated browser navigation to protected HTML pages redirects to `/login`
    python scripts/preflight_setup.py --ensure-workspace-dirs --setup-postgres-local
    ```
 
-   This can create the local workspace mount directories and, when `DATABASE_URL` points at localhost PostgreSQL, call `scripts/setup_postgres_local.sh` to install/start PostgreSQL and create the configured role/database.
+   This can create the local workspace, uploads, runs, and mount directories and, when `DATABASE_URL` points at localhost PostgreSQL, call `scripts/setup_postgres_local.sh` to install/start PostgreSQL and create the configured role/database.
 
 6. Apply the schema:
 
@@ -83,13 +85,13 @@ Unauthenticated browser navigation to protected HTML pages redirects to `/login`
 
 Run these steps in order on a new environment:
 
-1. Bootstrap the workspace files and runs directory:
+1. Bootstrap the workspace files, attachment store, and runs directory:
 
    ```bash
    python scripts/bootstrap_workspace.py
    ```
 
-   The script creates the workspace contract files, syncs all required AI skills, initializes the workspace git repository if needed, and prints a JSON snapshot that includes `"bootstrap_version": "stage1-v2"`.
+   The script creates the workspace contract files, syncs all required AI skills, ensures the workspace-local attachment store exists, initializes the workspace git repository if needed, and prints a JSON snapshot that includes `"bootstrap_version": "stage1-v6"`.
 
 2. Create the initial admin account:
 

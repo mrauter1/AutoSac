@@ -61,6 +61,13 @@ def _env_path(name: str, default: Path) -> Path:
     return Path(raw).expanduser()
 
 
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        return path.resolve(strict=False).is_relative_to(root.resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def _normalize_ui_locale(value: str) -> str:
     candidate = value.strip()
     lowered = candidate.lower()
@@ -201,6 +208,8 @@ class Settings:
             raise SettingsError("AI_RUN_STALE_TIMEOUT_SECONDS must be greater than WORKER_HEARTBEAT_SECONDS")
         if self.ai_run_max_recovery_attempts < 0:
             raise SettingsError("AI_RUN_MAX_RECOVERY_ATTEMPTS must be zero or positive")
+        if not _path_is_within(self.uploads_dir, self.triage_workspace_dir):
+            raise SettingsError("UPLOADS_DIR must be inside TRIAGE_WORKSPACE_DIR")
         _normalize_ui_locale(self.default_ui_locale)
 
 

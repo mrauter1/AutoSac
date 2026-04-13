@@ -107,7 +107,7 @@ def _make_settings(tmp_path: Path) -> Settings:
         app_base_url="https://triage.example.test",
         app_secret_key="secret",
         database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=workspace_dir / "attachments_store",
         triage_workspace_dir=workspace_dir,
         repo_mount_dir=workspace_dir / "app",
         manuals_mount_dir=workspace_dir / "manuals",
@@ -241,6 +241,7 @@ def test_create_requester_ticket_creates_initial_records(monkeypatch, tmp_path):
     assert len(attachments) == 1
     assert str(ticket.id) in attachments[0].stored_path
     assert attachments[0].stored_path.endswith(".png")
+    assert Path(attachments[0].stored_path).resolve().is_relative_to(settings.uploads_dir.resolve())
     assert history[0].from_status is None
     assert history[0].to_status == "new"
     assert views[0].user_id == requester.id
@@ -341,6 +342,7 @@ def test_create_requester_ticket_persists_non_image_attachment_on_created_messag
     assert attachments[0].height is None
     assert attachments[0].stored_path.endswith(".pdf")
     assert str(ticket.id) in attachments[0].stored_path
+    assert Path(attachments[0].stored_path).resolve().is_relative_to(settings.uploads_dir.resolve())
 
 
 def test_add_requester_reply_accepts_mixed_attachments(monkeypatch, tmp_path):
@@ -380,6 +382,7 @@ def test_add_requester_reply_accepts_mixed_attachments(monkeypatch, tmp_path):
     assert [attachment.mime_type for attachment in attachments] == ["image/png", "application/pdf"]
     _assert_flush_before_attachments(fake_db, attachments)
     assert all(attachment.message_id == message.id for attachment in attachments)
+    assert all(Path(attachment.stored_path).resolve().is_relative_to(settings.uploads_dir.resolve()) for attachment in attachments)
 
 
 def test_resolve_ticket_for_requester_updates_status_and_view():

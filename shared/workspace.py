@@ -62,6 +62,7 @@ def verify_workspace_contract_paths(settings: Settings) -> None:
     for label, path in (
         ("workspace", settings.triage_workspace_dir),
         ("runs", settings.runs_dir),
+        ("uploads", settings.uploads_dir),
     ):
         if not path.exists():
             raise FileNotFoundError(f"Required {label} directory does not exist: {path}")
@@ -83,6 +84,7 @@ def bootstrap_workspace(settings: Settings) -> None:
     specs = tuple(load_all_agent_specs())
     settings.triage_workspace_dir.mkdir(parents=True, exist_ok=True)
     settings.runs_dir.mkdir(parents=True, exist_ok=True)
+    settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     verify_workspace_mounts(settings)
     _write_exact_file(settings.triage_workspace_dir / WORKSPACE_AGENTS_RELATIVE_PATH, WORKSPACE_AGENTS_CONTENT)
     for spec in specs:
@@ -99,6 +101,8 @@ def workspace_contract_snapshot(settings: Settings) -> dict[str, str]:
     return {
         "bootstrap_version": WORKSPACE_BOOTSTRAP_VERSION,
         "workspace_dir": str(settings.triage_workspace_dir),
+        "uploads_dir": str(settings.uploads_dir),
+        "runs_dir": str(settings.runs_dir),
         "repo_mount_dir": str(settings.repo_mount_dir),
         "manuals_mount_dir": str(settings.manuals_mount_dir),
         "agents_path": str(settings.triage_workspace_dir / WORKSPACE_AGENTS_RELATIVE_PATH),

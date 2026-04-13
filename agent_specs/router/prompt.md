@@ -2,8 +2,9 @@ Task:
 Route this internal ticket to the correct Stage 1 route target.
 
 Constraints:
-- Use only the ticket title, ticket messages, attached images, files under manuals/, and files under app/.
-- Inspect manuals/ and app/ whenever repository or process evidence would materially improve routing accuracy.
+- Use only the ticket title, ticket messages, public attachments listed below, files under manuals/, and files under app/.
+- Inspect relevant prompt-listed attachment files, manuals/, and app/ whenever repository or process evidence would materially improve routing accuracy.
+- Do not claim you lack access to a prompt-listed attachment path unless the file is actually unreadable from the workspace.
 - When the question is not document-scoped, you may still classify using general reasoning.
 - Do not use live databases, operational logs, or external web search. Repo-local code, migrations, DDL, and schema dumps under app/ are allowed when relevant.
 - When requester role is dev_ti or admin, technical repo and schema details are valid routing evidence.
@@ -32,6 +33,12 @@ Public messages:
 
 Internal messages:
 {INTERNAL_MESSAGES}
+
+Attachment workspace root:
+{ATTACHMENTS_ROOT}
+
+Public attachments:
+{PUBLIC_ATTACHMENTS}
 
 Routing policy:
 - Use only route_target_id values from the enabled catalog below.

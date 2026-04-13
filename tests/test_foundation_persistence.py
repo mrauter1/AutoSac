@@ -17,6 +17,7 @@ from shared.contracts import (
     APP_ROUTES,
     CLI_COMMAND_NAMES,
     WORKSPACE_AGENTS_CONTENT,
+    WORKSPACE_BOOTSTRAP_VERSION,
 )
 from shared.workspace import bootstrap_workspace
 
@@ -77,7 +78,7 @@ def _make_settings(tmp_path: Path) -> Settings:
         app_base_url="http://localhost:8000",
         app_secret_key="test-secret",
         database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=workspace_dir / "attachments_store",
         triage_workspace_dir=workspace_dir,
         repo_mount_dir=workspace_dir / "app",
         manuals_mount_dir=workspace_dir / "manuals",
@@ -1085,7 +1086,7 @@ def test_create_admin_script_reports_matching_admin_as_success(monkeypatch, caps
 
     create_admin.main()
 
-    assert observed["defaults"] == ("db", "stage1-v5")
+    assert observed["defaults"] == ("db", WORKSPACE_BOOTSTRAP_VERSION)
     assert capsys.readouterr().out.strip() == "Admin user admin@example.com already matched the requested bootstrap state"
 
 
@@ -1120,7 +1121,7 @@ def test_bootstrap_workspace_script_seeds_system_state_defaults(monkeypatch, cap
     monkeypatch.setattr(
         bootstrap_script,
         "workspace_contract_snapshot",
-        lambda resolved_settings: {"bootstrap_version": "stage1-v5", "workspace_dir": str(resolved_settings.triage_workspace_dir)},
+        lambda resolved_settings: {"bootstrap_version": WORKSPACE_BOOTSTRAP_VERSION, "workspace_dir": str(resolved_settings.triage_workspace_dir)},
     )
 
     bootstrap_script.main()
@@ -1129,10 +1130,10 @@ def test_bootstrap_workspace_script_seeds_system_state_defaults(monkeypatch, cap
         ("ensure_uploads_dir", settings),
         ("bootstrap_workspace", settings),
         ("session_scope", settings),
-        ("ensure_system_state_defaults", "db", "stage1-v5"),
+        ("ensure_system_state_defaults", "db", WORKSPACE_BOOTSTRAP_VERSION),
     ]
     assert json.loads(capsys.readouterr().out) == {
-        "bootstrap_version": "stage1-v5",
+        "bootstrap_version": WORKSPACE_BOOTSTRAP_VERSION,
         "workspace_dir": str(settings.triage_workspace_dir),
     }
 
@@ -1145,7 +1146,7 @@ def test_preflight_setup_script_can_prepare_dirs_and_report_ready(monkeypatch, c
         app_base_url=settings.app_base_url,
         app_secret_key=settings.app_secret_key,
         database_url=settings.database_url,
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=tmp_path / "workspace" / "attachments_store",
         triage_workspace_dir=tmp_path / "workspace",
         repo_mount_dir=tmp_path / "workspace" / "app",
         manuals_mount_dir=tmp_path / "workspace" / "manuals",
@@ -1173,6 +1174,7 @@ def test_preflight_setup_script_can_prepare_dirs_and_report_ready(monkeypatch, c
     assert payload["status"] == "ok"
     assert payload["database"]["ok"] is True
     assert settings.uploads_dir.is_dir()
+    assert settings.runs_dir.is_dir()
     assert settings.repo_mount_dir.is_dir()
     assert settings.manuals_mount_dir.is_dir()
 
@@ -1184,7 +1186,7 @@ def test_preflight_setup_script_can_run_local_postgres_setup(monkeypatch, capsys
         app_base_url="http://localhost:8000",
         app_secret_key="test-secret",
         database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
-        uploads_dir=tmp_path / "uploads",
+        uploads_dir=tmp_path / "workspace" / "attachments_store",
         triage_workspace_dir=tmp_path / "workspace",
         repo_mount_dir=tmp_path / "workspace" / "app",
         manuals_mount_dir=tmp_path / "workspace" / "manuals",
