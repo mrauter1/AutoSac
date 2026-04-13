@@ -258,7 +258,7 @@ class IntegrationEventLink(Base):
             name="integration_event_links_relation_kind",
         ),
         Index(
-            "uq_integration_event_links_event_id_entity_type_entity_id_relation_kind",
+            "uq_integration_event_links_event_entity_relation",
             "event_id",
             "entity_type",
             "entity_id",

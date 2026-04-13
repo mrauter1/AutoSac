@@ -29,11 +29,11 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.CheckConstraint(
             "event_type IN ('ticket.created', 'ticket.public_message_added', 'ticket.status_changed')",
-            name=op.f("ck_integration_events_integration_events_event_type"),
+            name="integration_events_event_type",
         ),
         sa.CheckConstraint(
             "aggregate_type IN ('ticket')",
-            name=op.f("ck_integration_events_integration_events_aggregate_type"),
+            name="integration_events_aggregate_type",
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_integration_events")),
         sa.UniqueConstraint("dedupe_key", name=op.f("uq_integration_events_dedupe_key")),
@@ -56,11 +56,11 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.CheckConstraint(
             "entity_type IN ('ticket', 'ticket_message', 'ticket_status_history')",
-            name=op.f("ck_integration_event_links_integration_event_links_entity_type"),
+            name="integration_event_links_entity_type",
         ),
         sa.CheckConstraint(
             "relation_kind IN ('primary', 'message', 'status_history')",
-            name=op.f("ck_integration_event_links_integration_event_links_relation_kind"),
+            name="integration_event_links_relation_kind",
         ),
         sa.ForeignKeyConstraint(
             ["event_id"],
@@ -70,7 +70,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id", name=op.f("pk_integration_event_links")),
     )
     op.create_index(
-        "uq_integration_event_links_event_id_entity_type_entity_id_relation_kind",
+        "uq_integration_event_links_event_entity_relation",
         "integration_event_links",
         ["event_id", "entity_type", "entity_id", "relation_kind"],
         unique=True,
@@ -100,27 +100,27 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.CheckConstraint(
             "target_kind IN ('slack_webhook')",
-            name=op.f("ck_integration_event_targets_integration_event_targets_target_kind"),
+            name="integration_event_targets_target_kind",
         ),
         sa.CheckConstraint(
             "delivery_status IN ('pending', 'processing', 'sent', 'failed', 'dead_letter')",
-            name=op.f("ck_integration_event_targets_integration_event_targets_delivery_status"),
+            name="integration_event_targets_delivery_status",
         ),
         sa.CheckConstraint(
             "attempt_count >= 0",
-            name=op.f("ck_integration_event_targets_integration_event_targets_attempt_count_non_negative"),
+            name="integration_event_targets_attempt_count_non_negative",
         ),
         sa.CheckConstraint(
             "(delivery_status = 'sent') = (sent_at IS NOT NULL)",
-            name=op.f("ck_integration_event_targets_integration_event_targets_sent_at_matches_status"),
+            name="integration_event_targets_sent_at_matches_status",
         ),
         sa.CheckConstraint(
             "(delivery_status = 'dead_letter') = (dead_lettered_at IS NOT NULL)",
-            name=op.f("ck_integration_event_targets_integration_event_targets_dead_lettered_at_matches_status"),
+            name="integration_event_targets_dead_lettered_at_matches_status",
         ),
         sa.CheckConstraint(
             "NOT (sent_at IS NOT NULL AND dead_lettered_at IS NOT NULL)",
-            name=op.f("ck_integration_event_targets_integration_event_targets_terminal_timestamps"),
+            name="integration_event_targets_terminal_timestamps",
         ),
         sa.ForeignKeyConstraint(
             ["event_id"],
@@ -152,7 +152,7 @@ def downgrade() -> None:
 
     op.drop_index("ix_integration_event_links_entity_type_entity_id", table_name="integration_event_links")
     op.drop_index("ix_integration_event_links_event_id", table_name="integration_event_links")
-    op.drop_index("uq_integration_event_links_event_id_entity_type_entity_id_relation_kind", table_name="integration_event_links")
+    op.drop_index("uq_integration_event_links_event_entity_relation", table_name="integration_event_links")
     op.drop_table("integration_event_links")
 
     op.drop_index("ix_integration_events_aggregate_type_aggregate_id_created_at", table_name="integration_events")

@@ -41,26 +41,26 @@ def upgrade() -> None:
         sa.Column("updated_by_user_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.CheckConstraint("singleton_key = 'default'", name=op.f("ck_slack_dm_settings_slack_dm_settings_singleton_key")),
+        sa.CheckConstraint("singleton_key = 'default'", name="slack_dm_settings_singleton_key"),
         sa.CheckConstraint(
             "message_preview_max_chars >= 4",
-            name=op.f("ck_slack_dm_settings_slack_dm_settings_message_preview_max_chars"),
+            name="slack_dm_settings_message_preview_max_chars",
         ),
         sa.CheckConstraint(
             "http_timeout_seconds >= 1 AND http_timeout_seconds <= 30",
-            name=op.f("ck_slack_dm_settings_slack_dm_settings_http_timeout_seconds"),
+            name="slack_dm_settings_http_timeout_seconds",
         ),
         sa.CheckConstraint(
             "delivery_batch_size >= 1",
-            name=op.f("ck_slack_dm_settings_slack_dm_settings_delivery_batch_size"),
+            name="slack_dm_settings_delivery_batch_size",
         ),
         sa.CheckConstraint(
             "delivery_max_attempts >= 1",
-            name=op.f("ck_slack_dm_settings_slack_dm_settings_delivery_max_attempts"),
+            name="slack_dm_settings_delivery_max_attempts",
         ),
         sa.CheckConstraint(
             "delivery_stale_lock_seconds > http_timeout_seconds",
-            name=op.f("ck_slack_dm_settings_slack_dm_settings_delivery_stale_lock_seconds"),
+            name="slack_dm_settings_delivery_stale_lock_seconds",
         ),
         sa.ForeignKeyConstraint(
             ["updated_by_user_id"],
@@ -73,7 +73,7 @@ def upgrade() -> None:
     op.add_column("users", sa.Column("slack_user_id", sa.Text(), nullable=True))
     op.create_unique_constraint(op.f("uq_users_slack_user_id"), "users", ["slack_user_id"])
     op.create_check_constraint(
-        op.f("ck_users_users_slack_user_id_not_blank"),
+        "users_slack_user_id_not_blank",
         "users",
         "slack_user_id IS NULL OR btrim(slack_user_id) <> ''",
     )
@@ -88,27 +88,27 @@ def upgrade() -> None:
         ["id"],
     )
     op.drop_constraint(
-        op.f("ck_integration_event_targets_integration_event_targets_target_kind"),
+        "integration_event_targets_target_kind",
         "integration_event_targets",
         type_="check",
     )
     op.create_check_constraint(
-        op.f("ck_integration_event_targets_integration_event_targets_target_kind"),
+        "integration_event_targets_target_kind",
         "integration_event_targets",
         "target_kind IN ('slack_dm')",
     )
     op.create_check_constraint(
-        op.f("ck_integration_event_targets_integration_event_targets_recipient_reason"),
+        "integration_event_targets_recipient_reason",
         "integration_event_targets",
         "recipient_reason IS NULL OR recipient_reason IN ('requester', 'assignee', 'requester_assignee')",
     )
     op.create_check_constraint(
-        op.f("ck_integration_event_targets_integration_event_targets_recipient_user_id_matches_target_kind"),
+        "integration_event_targets_recipient_user_id_matches_target_kind",
         "integration_event_targets",
         "(target_kind = 'slack_dm') = (recipient_user_id IS NOT NULL)",
     )
     op.create_check_constraint(
-        op.f("ck_integration_event_targets_integration_event_targets_recipient_reason_matches_target_kind"),
+        "integration_event_targets_recipient_reason_matches_target_kind",
         "integration_event_targets",
         "(target_kind = 'slack_dm') = (recipient_reason IS NOT NULL)",
     )
@@ -116,27 +116,27 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_constraint(
-        op.f("ck_integration_event_targets_integration_event_targets_recipient_reason_matches_target_kind"),
+        "integration_event_targets_recipient_reason_matches_target_kind",
         "integration_event_targets",
         type_="check",
     )
     op.drop_constraint(
-        op.f("ck_integration_event_targets_integration_event_targets_recipient_user_id_matches_target_kind"),
+        "integration_event_targets_recipient_user_id_matches_target_kind",
         "integration_event_targets",
         type_="check",
     )
     op.drop_constraint(
-        op.f("ck_integration_event_targets_integration_event_targets_recipient_reason"),
+        "integration_event_targets_recipient_reason",
         "integration_event_targets",
         type_="check",
     )
     op.drop_constraint(
-        op.f("ck_integration_event_targets_integration_event_targets_target_kind"),
+        "integration_event_targets_target_kind",
         "integration_event_targets",
         type_="check",
     )
     op.create_check_constraint(
-        op.f("ck_integration_event_targets_integration_event_targets_target_kind"),
+        "integration_event_targets_target_kind",
         "integration_event_targets",
         "target_kind IN ('slack_webhook')",
     )
@@ -148,7 +148,7 @@ def downgrade() -> None:
     op.drop_column("integration_event_targets", "recipient_reason")
     op.drop_column("integration_event_targets", "recipient_user_id")
 
-    op.drop_constraint(op.f("ck_users_users_slack_user_id_not_blank"), "users", type_="check")
+    op.drop_constraint("users_slack_user_id_not_blank", "users", type_="check")
     op.drop_constraint(op.f("uq_users_slack_user_id"), "users", type_="unique")
     op.drop_column("users", "slack_user_id")
 
