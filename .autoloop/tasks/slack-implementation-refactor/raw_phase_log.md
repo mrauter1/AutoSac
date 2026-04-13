@@ -2166,3 +2166,51 @@ Open issues / next step
   - `python3 -m compileall worker/slack_delivery.py tests/test_slack_delivery.py`
   - `pytest tests/test_slack_delivery.py tests/test_hardening_validation.py tests/test_ai_worker.py -q`
 - Ready for verifier rerun.
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=verifier | cycle=3 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_verifier.md
+session_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=3 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+Running the final review pass on the updated worker cycle. I’m checking the reordered stale-recovery path, the tightened missing-scope regression, and the current reviewer artifacts so I can either clear the phase or record any remaining issues.
+
+The ordering and regression now match the reviewer intent. I’m running the same targeted validation slice the producer reported so I can clear the phase with current evidence rather than just reading the diff.
+
+The targeted validation passed. I’m marking the criteria complete now and appending a final follow-up note in the feedback that `IMP-003` is resolved and no remaining findings are blocking the phase.
+
+The reviewer artifacts are updated. I’m doing a quick read-back so the criteria, the final feedback note, and the complete promise all line up cleanly.
+
+Scope considered
+- Worker DM delivery and regression-completion phase only.
+- The final producer follow-up in `worker/slack_delivery.py`, the tightened delivery regression in `tests/test_slack_delivery.py`, and the phase-local reviewer artifacts.
+
+What I analyzed
+- The current `_run_delivery_cycle_with_runtime()` ordering after the stale-recovery fix.
+- The `missing_scope` cycle regression to confirm it now covers both claimed-row restoration and skipped stale-lock recovery.
+- The producer’s phase notes and shared decisions for consistency with the implemented behavior.
+- Targeted validation: `pytest tests/test_slack_delivery.py tests/test_hardening_validation.py tests/test_ai_worker.py -q`.
+
+What I reviewed
+- Updated [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/worker-dm-delivery-and-regression/criteria.md) to all checked, because the phase now satisfies the review criteria.
+- Appended a final follow-up note to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/worker-dm-delivery-and-regression/feedback.md) recording that `IMP-003` is resolved and that no remaining findings are in phase scope.
+
+Key findings / decisions
+- No remaining blocking or non-blocking findings in phase scope.
+- The final worker ordering now matches the PRD and the decision ledger: `auth.test` runs before row mutation, send-time auth or scope failures restore still-owned claims and skip stale-lock recovery for the affected cycle, and stale recovery only runs after a send pass completes without that halt.
+- The regression coverage now explicitly proves the stale rows remain unchanged in the `missing_scope` path.
+
+Open issues / next step
+- None in phase scope.
+- Reviewer artifacts are complete and the phase is ready to close.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
+</loop-control>
