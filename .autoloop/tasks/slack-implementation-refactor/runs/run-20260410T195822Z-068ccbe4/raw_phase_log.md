@@ -1087,3 +1087,136 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=producer | cycle=1 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+provider=codex
+mode=start
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_producer.md
+session_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+I’m treating this as the worker-delivery phase only: first I’ll inspect the active phase artifacts and the current Slack worker paths, then I’ll patch the runtime/tests/docs to match the DB-backed DM contract without widening scope.
+
+I’m pulling the phase contract, prior notes, and the existing worker/test surfaces together now so I can keep the edit set tight and avoid fighting earlier phase decisions.
+
+The current worker is still webhook-based, so I’m widening the read a bit into the shared Slack helper, models, and existing tests to line up the delivery rewrite with the earlier phases instead of patching blind.
+
+I have the runtime shape now. Next I’m reading the delivery tests and rollout docs that still mention webhooks or env knobs, because those need to move in lockstep with the worker rewrite.
+
+The repo still has contract tests pinned to `SLACK_*` docs, so I’m reading those assertions before editing. That will let me update the docs and tests together instead of leaving a false contract behind.
+
+I’ve isolated the biggest delta: delivery still assumes named webhook targets and never does per-cycle auth. I’m checking the DB session semantics once before patching because the worker will need a few short transactions for health, recovery, claim, and finalization.
+
+The worker phase splits cleanly into three edits:
+
+1. Replace webhook delivery with DM Web API delivery in `worker/slack_delivery.py`.
+   That includes per-cycle DB reload, `auth.test` health gating, send-time recipient lookup, `conversations.open` plus `chat.postMessage`, ok-response validation, failure classification, `Retry-After` flooring, and richer recipient logging.
+
+2. Align the worker tests with the DM contract.
+   I need to rewrite the webhook-oriented cases in `tests/test_slack_delivery.py`, keep the existing claim/finalization coverage, and tighten the worker-level regression checks around health persistence and cycle suppression.
+
+3. Remove stale rollout guidance from `.env.example`, `README.md`, `docs_deployment.md`, and the hardening assertions.
+   The repo currently advertises `SLACK_*` env knobs as runtime control, which conflicts with the DB-backed admin page already merged in earlier phases.
+
+I have enough context to patch safely. I’m editing the worker delivery path now: first the runtime and transport logic in `worker/slack_delivery.py`, then the delivery tests, then the rollout docs and hardening assertions that still describe webhook/env behavior.
+
+The delivery runtime patch is in place. I’m compiling and then reading the rewritten file once for obvious mistakes before I touch the tests.
+
+The worker code compiles. I’m replacing the delivery test file now because the existing suite is anchored to webhook targets; adapting it piecemeal would leave a lot of dead contract behind.
+
+The test rewrite is in place. I’m compiling it immediately; there are a couple of import and expectation edges I want to catch before running pytest.
+
+I found one hidden issue in the new test harness: the symbol loader was still trying to import `start_slack_delivery_thread` from the wrong module. I’m cleaning that up and adding one small preflight regression to pin the auth-test transport behavior.
+
+I’m on the first execution pass now. If the delivery tests shake out runtime edge cases, I’ll fix those before I touch the docs and hardening checks.
+
+The code path is stable now. I’m switching to the contract cleanup: `.env.example`, README, and deployment docs still describe Slack as env-driven, which would leave the repo documenting the wrong rollout.
+
+I’ve cleaned up the public contract. Next pass is regression: worker delivery, hardening checks, and the worker heartbeat suite, since those are the places most likely to notice any accidental contract drift.
+
+The broader regression run is still in flight. If anything fails outside the delivery tests, it’s most likely going to be a hardening assertion or a worker-thread import path, not the DM logic itself.
+
+The code and focused regressions are green. I’m doing the bookkeeping pass now: updating the phase notes and recording the non-obvious delivery decisions so later turns don’t drift back toward webhook or env behavior.
+
+I’ve reached the end-state for this phase. I’m writing down the two non-obvious runtime choices now so later turns don’t accidentally “fix” them back into the wrong behavior.
+
+**Scope considered**
+- Worker DM delivery and regression-completion phase only: runtime delivery, worker observability, targeted docs, targeted tests, and phase-local notes.
+
+**What I analyzed**
+- Current worker delivery flow in [worker/slack_delivery.py](/home/marcelo/code/AutoSac/worker/slack_delivery.py), the DB-backed Slack helper in [shared/slack_dm.py](/home/marcelo/code/AutoSac/shared/slack_dm.py), related worker wiring, rollout docs, and the existing Slack delivery/hardening tests.
+
+**What I changed**
+- Replaced webhook delivery in [worker/slack_delivery.py](/home/marcelo/code/AutoSac/worker/slack_delivery.py) with DB-backed Slack DM delivery: per-cycle `auth.test`, send-time recipient lookup by `recipient_user_id`, `conversations.open` then `chat.postMessage`, `ok=true` validation on both responses, recipient-aware logging, auth/scope suppression, recipient dead-lettering, and `Retry-After` flooring.
+- Rewrote [tests/test_slack_delivery.py](/home/marcelo/code/AutoSac/tests/test_slack_delivery.py) around the DM contract and updated [tests/test_hardening_validation.py](/home/marcelo/code/AutoSac/tests/test_hardening_validation.py) for the DB-backed rollout docs.
+- Updated rollout docs in [.env.example](/home/marcelo/code/AutoSac/.env.example), [README.md](/home/marcelo/code/AutoSac/README.md), [docs_deployment.md](/home/marcelo/code/AutoSac/docs_deployment.md), and [docs/ubuntu_internal_server_setup.md](/home/marcelo/code/AutoSac/docs/ubuntu_internal_server_setup.md), then refreshed the phase notes and decision ledger.
+
+**Key findings / decisions**
+- `auth.test` now suppresses a whole cycle only for auth-level or scope-level invalid config; transport failures during the preflight do not globally suppress the cycle.
+- Send-time auth or scope failures halt the current cycle and leave already-claimed rows unchanged instead of finalizing them.
+- Slack rollout docs now describe one contract only: DB-backed settings via `/ops/integrations/slack` and user mappings via `/ops/users`, not `SLACK_*` env knobs.
+
+**Open issues / next step**
+- Validation passed: `pytest tests/test_slack_delivery.py -q`, `pytest tests/test_slack_delivery.py tests/test_hardening_validation.py tests/test_ai_worker.py -q`, `pytest tests/test_slack_dm_foundation.py tests/test_slack_event_emission.py -q`, and `python3 -m compileall worker tests shared app`.
+- `tasks/slack_dm_integration_PRD.md` is present but currently untracked in this worktree; I left it untouched, but if README should keep pointing to it, it needs to be included by the owner.
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=implement | phase=verifier | cycle=1 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/implement_verifier.md
+session_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=implement | phase=verifier | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+I found one material contract violation in the worker flow and one smaller docs risk. I’m recording both in the phase feedback now and leaving the criteria incomplete.
+
+Reviewing the delivery-phase diff against the PRD and prior decisions now. I’m checking the changed worker path and the phase artifacts, then I’ll update the review criteria and feedback with any concrete findings.
+
+I’ve confirmed the phase artifacts are still empty and checked the shared decision log. Next I’m reading the worker delivery path and the targeted docs/tests to pin down whether the current code actually satisfies the cycle-halting and row-state requirements.
+
+The main worker path confirms the risk I was looking for: the cycle preflight is auth-only, then the worker batch-claims rows before any send-time scope/auth error can be seen. I’m checking the regression tests now to see whether that gap is covered or currently missed.
+
+The existing tests cover preflight suppression and per-target invalid-config classification, but they stop short of the batch-claim row-state scenario the PRD calls out. I’m doing one more pass over the worker entrypoint to make sure there isn’t already a compensating behavior elsewhere before I write the blocking note.
+
+I’ve finished the review pass. I found one blocking runtime mismatch in the claim/send orchestration and one smaller docs issue, and I’m writing those into the phase feedback plus updating the criteria checkboxes to match the current state.
+
+The review artifacts are updated. I’m doing a quick read-back now to make sure the findings are precise and the criteria state matches the promise I’ll return.
+
+Scope considered
+- Worker DM delivery and regression-completion phase only.
+- Request-relevant runtime paths in `worker/slack_delivery.py`, worker wiring in `worker/main.py`, targeted regression tests, the rollout docs in scope, and the phase-local review artifacts.
+
+What I analyzed
+- The current delivery-cycle orchestration from preflight through stale-lock recovery, claim, send, and finalization.
+- The shared decision log for this phase, especially the runtime invalid-config handling requirement.
+- Targeted tests covering preflight suppression, send-time invalid-config classification, and claim/finalization behavior.
+- The new README Slack DM contract reference.
+
+What I reviewed
+- Updated [criteria.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/worker-dm-delivery-and-regression/criteria.md) checkboxes to reflect the current state.
+- Appended prioritized findings to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/implement/phases/worker-dm-delivery-and-regression/feedback.md):
+  - `IMP-001` blocking: send-time scope/auth invalid-config can strand already-claimed rows in `processing`.
+  - `IMP-002` non-blocking: README references an untracked PRD file.
+
+Key findings / decisions
+- Blocking: `worker/slack_delivery.py::_run_delivery_cycle_with_runtime` still batch-claims rows after an `auth.test`-only preflight, so a later `missing_scope` or similar send-time failure halts the cycle after rows have already been mutated to `processing`. That contradicts the PRD and the shared decision that invalid-config suppression must leave pending/failed/processing rows unchanged until config is usable again.
+- Non-blocking: `README.md:184` points to `tasks/slack_dm_integration_PRD.md`, but that file is not tracked in git in this worktree.
+
+Open issues / next step
+- Rework the claim/send orchestration so send-time invalid-config either cannot strand a batch or explicitly reverts unfinalized claims, then add a cycle-level regression test for the `auth.test` success plus `missing_scope` path.
+- Either add `tasks/slack_dm_integration_PRD.md` to the repo in the same rollout or retarget the README link to a tracked document.
+
+<loop-control>
+{"schema":"docloop.loop_control/v1","kind":"promise","promise":"INCOMPLETE"}
+</loop-control>
