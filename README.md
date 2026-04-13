@@ -181,7 +181,7 @@ Operational notes:
 - Slack does not backfill historical ticket activity. Only newly emitted events can create new Slack delivery targets.
 - Deploy the web request path and worker together before enabling Slack. The rollout treats any pre-launch Slack integration rows from earlier dry runs as disposable data.
 
-For the full DM contract, see `tasks/slack_dm_integration_PRD.md`. The original webhook PRD remains the payload-snapshot reference in `tasks/slack_integration_PRD.md`.
+The original webhook PRD remains the payload-snapshot reference in `tasks/slack_integration_PRD.md`; the current DM rollout contract is the DB-backed, admin-managed behavior described above.
 
 ## Notes For Operators
 

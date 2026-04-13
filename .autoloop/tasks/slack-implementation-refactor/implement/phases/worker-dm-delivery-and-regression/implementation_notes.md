@@ -22,6 +22,7 @@
 - `worker.slack_delivery.ClaimedDeliveryTarget`
 - `worker.slack_delivery.deliver_claimed_target`
 - `worker.slack_delivery.classify_delivery_attempt`
+- `worker.slack_delivery.restore_claimed_delivery_targets`
 - `worker.slack_delivery.run_delivery_cycle_preflight`
 - `worker.slack_delivery.run_delivery_cycle`
 - `worker.slack_delivery.load_delivery_runtime`
@@ -33,9 +34,9 @@
 
 ## Checklist mapping
 
-- `AC-1`: the worker now reloads DB-backed Slack runtime each cycle, resolves the stored bot token, runs `auth.test` before stale-lock recovery or claim work, persists auth health snapshots, and skips claim/send/recovery cycles when auth or scope failures mark Slack invalid.
+- `AC-1`: the worker now reloads DB-backed Slack runtime each cycle, resolves the stored bot token, runs `auth.test` before stale-lock recovery or claim work, persists auth health snapshots, and restores still-owned batch claims to their pre-claim state when a send-time auth or scope failure halts the cycle.
 - `AC-2`: delivery now resolves the current recipient by `recipient_user_id`, dead-letters missing or inactive recipients without Slack calls, opens DMs with `conversations.open`, sends text with `chat.postMessage`, requires `ok=true` on both responses, and honors `Retry-After` as a floor on retry scheduling.
-- `AC-3`: worker claim/result logs now include `recipient_user_id` and `recipient_reason`, and the rollout docs plus hardening checks now describe one DB-backed Slack DM contract with config-first rollback and no backfill.
+- `AC-3`: worker claim/result logs now include `recipient_user_id` and `recipient_reason`, and the rollout docs plus hardening checks now describe one DB-backed Slack DM contract with config-first rollback, tracked-doc references, and no backfill.
 
 ## Assumptions
 
@@ -51,7 +52,7 @@
 ## Intended behavior changes
 
 - Webhook delivery is replaced with Slack Web API DM delivery.
-- The worker now validates Slack credentials every cycle, persists healthy or invalid-config auth snapshots, and halts a cycle when send-time auth or scope failures are discovered.
+- The worker now validates Slack credentials every cycle, persists healthy or invalid-config auth snapshots, and halts a cycle when send-time auth or scope failures are discovered after first restoring still-owned claims from the current batch back to their pre-claim state.
 - Rollout-facing docs no longer describe `SLACK_*` env vars as the Slack runtime contract; Slack DM configuration is now described as UI and PostgreSQL-backed.
 
 ## Known non-changes
@@ -62,17 +63,16 @@
 ## Expected side effects
 
 - Successful `auth.test` checks refresh the stored Slack delivery health snapshot with current workspace metadata.
-- Send-time auth or scope failures leave already-claimed rows untouched in `processing` until configuration is fixed and a later healthy cycle can recover them.
+- Send-time auth or scope failures restore any still-owned claims from the current batch to their pre-claim `pending` or `failed` state while leaving already-finalized rows unchanged.
 - `.env.example` documents Slack rollout posture only; operators must use `/ops/integrations/slack` and `/ops/users` for Slack administration.
 
 ## Validation performed
 
-- `python3 -m compileall worker tests shared app`
-- `pytest tests/test_slack_delivery.py -q`
-- `pytest tests/test_slack_delivery.py tests/test_hardening_validation.py tests/test_ai_worker.py -q`
-- `pytest tests/test_slack_dm_foundation.py tests/test_slack_event_emission.py -q`
+- `python3 -m compileall worker/slack_delivery.py tests/test_slack_delivery.py`
+- `pytest tests/test_slack_delivery.py tests/test_hardening_validation.py -q`
+- `pytest tests/test_ai_worker.py -q`
 
 ## Deduplication / centralization
 
 - Centralized Slack Web API failure parsing, auth or scope suppression, recipient dead-lettering, and `Retry-After` handling inside `worker/slack_delivery.py` instead of scattering it across the worker loop and tests.
-- Reused helper boundaries for per-cycle runtime load, send-time recipient lookup, and delivery-health persistence so tests can pin the DB-backed contract without duplicating session plumbing.
+- Reused helper boundaries for per-cycle runtime load, send-time recipient lookup, delivery-health persistence, and claim-token-based claim restoration so tests can pin the DB-backed contract without duplicating session plumbing.

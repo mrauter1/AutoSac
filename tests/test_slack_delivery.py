@@ -116,6 +116,7 @@ def _load_symbols():
         load_claimed_processing_target,
         recover_stale_delivery_targets,
         render_slack_message,
+        restore_claimed_delivery_targets,
         run_delivery_cycle,
         run_delivery_cycle_preflight,
     )
@@ -132,6 +133,7 @@ def _load_symbols():
         "load_claimed_processing_target": load_claimed_processing_target,
         "recover_stale_delivery_targets": recover_stale_delivery_targets,
         "render_slack_message": render_slack_message,
+        "restore_claimed_delivery_targets": restore_claimed_delivery_targets,
         "run_delivery_cycle": run_delivery_cycle,
         "run_delivery_cycle_preflight": run_delivery_cycle_preflight,
         "start_slack_delivery_thread": start_slack_delivery_thread,
@@ -186,7 +188,15 @@ class _TargetStateDb:
         return _FakeScalarOneOrNoneResult(self.target)
 
 
-def _make_claimed_target(symbols, *, attempt_count: int = 1):
+def _make_claimed_target(
+    symbols,
+    *,
+    attempt_count: int = 1,
+    previous_delivery_status: str = "pending",
+    previous_attempt_count: int | None = None,
+):
+    if previous_attempt_count is None:
+        previous_attempt_count = max(attempt_count - 1, 0)
     recipient_user_id = uuid.uuid4()
     event_id = uuid.uuid4()
     return symbols["ClaimedDeliveryTarget"](
@@ -196,6 +206,8 @@ def _make_claimed_target(symbols, *, attempt_count: int = 1):
         target_name=f"user:{recipient_user_id}",
         recipient_user_id=recipient_user_id,
         recipient_reason="requester",
+        previous_delivery_status=previous_delivery_status,
+        previous_attempt_count=previous_attempt_count,
         attempt_count=attempt_count,
         locked_by="worker-test",
         claim_token=uuid.uuid4(),
@@ -861,6 +873,54 @@ def test_finalize_delivery_claim_returns_ownership_lost_without_mutation(monkeyp
     assert target_row.last_error == "keep-me"
 
 
+def test_restore_claimed_delivery_targets_restores_preclaim_state_for_owned_rows(monkeypatch, tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path)
+    claimed_target = _make_claimed_target(
+        symbols,
+        attempt_count=3,
+        previous_delivery_status="failed",
+        previous_attempt_count=2,
+    )
+    target_row = SimpleNamespace(
+        id=claimed_target.target_id,
+        delivery_status="processing",
+        attempt_count=claimed_target.attempt_count,
+        next_attempt_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
+        locked_at=datetime(2026, 4, 10, 14, 5, tzinfo=timezone.utc),
+        locked_by=claimed_target.locked_by,
+        claim_token=claimed_target.claim_token,
+        last_error="keep-me",
+        sent_at=None,
+        dead_lettered_at=None,
+    )
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield SimpleNamespace()
+
+    def fake_load_claimed_processing_target(_db, *, target_id, claim_token):
+        assert target_id == claimed_target.target_id
+        assert claim_token == claimed_target.claim_token
+        return target_row
+
+    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.slack_delivery.load_claimed_processing_target", fake_load_claimed_processing_target)
+    slack_runtime = _make_slack_runtime(settings)
+
+    symbols["restore_claimed_delivery_targets"](
+        slack_runtime,
+        claimed_targets=[claimed_target],
+    )
+
+    assert target_row.delivery_status == "failed"
+    assert target_row.attempt_count == 2
+    assert target_row.locked_at is None
+    assert target_row.locked_by is None
+    assert target_row.claim_token is None
+    assert target_row.last_error == "keep-me"
+
+
 def test_deliver_claimed_target_logs_ownership_lost_with_recipient_fields(monkeypatch, tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path)
@@ -1102,6 +1162,147 @@ def test_run_delivery_cycle_suppresses_on_auth_test_invalid_config_and_persists_
                 "config_error_summary": "Slack auth.test returned invalid_auth",
             },
         )
+    ]
+
+
+def test_run_delivery_cycle_restores_unfinalized_claims_when_send_hits_missing_scope(monkeypatch, tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path, slack=_make_slack_settings(delivery_batch_size=2))
+    slack_runtime = _make_slack_runtime(settings)
+    first_claimed = _make_claimed_target(
+        symbols,
+        attempt_count=1,
+        previous_delivery_status="pending",
+        previous_attempt_count=0,
+    )
+    second_claimed = _make_claimed_target(
+        symbols,
+        attempt_count=3,
+        previous_delivery_status="failed",
+        previous_attempt_count=2,
+    )
+    first_row = SimpleNamespace(
+        id=first_claimed.target_id,
+        delivery_status="processing",
+        attempt_count=first_claimed.attempt_count,
+        next_attempt_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
+        locked_at=datetime(2026, 4, 10, 14, 5, tzinfo=timezone.utc),
+        locked_by=first_claimed.locked_by,
+        claim_token=first_claimed.claim_token,
+        last_error=None,
+        sent_at=None,
+        dead_lettered_at=None,
+    )
+    second_row = SimpleNamespace(
+        id=second_claimed.target_id,
+        delivery_status="processing",
+        attempt_count=second_claimed.attempt_count,
+        next_attempt_at=datetime(2026, 4, 10, 14, 1, tzinfo=timezone.utc),
+        locked_at=datetime(2026, 4, 10, 14, 6, tzinfo=timezone.utc),
+        locked_by=second_claimed.locked_by,
+        claim_token=second_claimed.claim_token,
+        last_error="retryable",
+        sent_at=None,
+        dead_lettered_at=None,
+    )
+    rows_by_id = {
+        first_claimed.target_id: first_row,
+        second_claimed.target_id: second_row,
+    }
+    observed = []
+    persisted = []
+    open_calls = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield SimpleNamespace()
+
+    def fake_load_claimed_processing_target(_db, *, target_id, claim_token):
+        row = rows_by_id.get(target_id)
+        if row is None or row.delivery_status != "processing" or row.claim_token != claim_token:
+            return None
+        return row
+
+    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        "worker.slack_delivery.recover_stale_delivery_targets",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "worker.slack_delivery.claim_delivery_targets",
+        lambda *_args, **_kwargs: [first_claimed, second_claimed],
+    )
+    monkeypatch.setattr(
+        "worker.slack_delivery.load_claimed_processing_target",
+        fake_load_claimed_processing_target,
+    )
+    monkeypatch.setattr(
+        "worker.slack_delivery.load_delivery_recipient",
+        lambda _settings, *, recipient_user_id: SimpleNamespace(
+            id=recipient_user_id,
+            is_active=True,
+            slack_user_id="U123",
+        ),
+    )
+    monkeypatch.setattr(
+        "worker.slack_delivery.slack_api_auth_test",
+        lambda **_kwargs: _make_web_api_response("auth.test", ok=True),
+    )
+
+    def fake_open_conversation(**kwargs):
+        open_calls.append(kwargs)
+        return _make_web_api_response("conversations.open", ok=False, error="missing_scope")
+
+    monkeypatch.setattr("worker.slack_delivery.slack_api_conversations_open", fake_open_conversation)
+    monkeypatch.setattr(
+        "worker.slack_delivery.slack_api_chat_post_message",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("chat.postMessage should not be called")),
+    )
+    monkeypatch.setattr("worker.slack_delivery.persist_delivery_health_snapshot", lambda _runtime, *, snapshot: persisted.append(snapshot))
+    monkeypatch.setattr("worker.slack_delivery.log_worker_event", lambda event, **payload: observed.append((event, payload)))
+
+    symbols["run_delivery_cycle"](slack_runtime, worker_instance_id="worker-test")
+
+    assert len(open_calls) == 1
+    assert [snapshot.status for snapshot in persisted] == ["healthy", "invalid_config"]
+    assert persisted[1].error_code == "missing_scope"
+    assert persisted[1].summary == "Slack conversations.open returned missing_scope"
+    assert first_row.delivery_status == "pending"
+    assert first_row.attempt_count == 0
+    assert first_row.locked_at is None
+    assert first_row.locked_by is None
+    assert first_row.claim_token is None
+    assert second_row.delivery_status == "failed"
+    assert second_row.attempt_count == 2
+    assert second_row.locked_at is None
+    assert second_row.locked_by is None
+    assert second_row.claim_token is None
+    assert second_row.last_error == "retryable"
+    assert observed == [
+        (
+            "slack_target_claimed",
+            {
+                "event_id": str(first_claimed.event_id),
+                "target_name": first_claimed.target_name,
+                "recipient_user_id": str(first_claimed.recipient_user_id),
+                "recipient_reason": first_claimed.recipient_reason,
+                "delivery_status": "processing",
+                "attempt_count": first_claimed.attempt_count,
+                "locked_by": first_claimed.locked_by,
+                "claim_token": str(first_claimed.claim_token),
+            },
+        ),
+        (
+            "slack_delivery_suppressed",
+            {
+                "suppression_reason": "invalid_config",
+                "claim_skipped": False,
+                "stale_lock_recovery_skipped": False,
+                "delivery_halted": True,
+                "config_error_code": "missing_scope",
+                "config_error_summary": "Slack conversations.open returned missing_scope",
+            },
+        ),
     ]
 
 

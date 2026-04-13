@@ -71,6 +71,8 @@ class ClaimedDeliveryTarget:
     target_name: str
     recipient_user_id: Any
     recipient_reason: str | None
+    previous_delivery_status: str
+    previous_attempt_count: int
     attempt_count: int
     locked_by: str
     claim_token: uuid.UUID
@@ -282,6 +284,8 @@ def claim_delivery_targets(
         event = db.get(IntegrationEvent, target.event_id)
         if event is None:
             continue
+        previous_delivery_status = target.delivery_status
+        previous_attempt_count = target.attempt_count
         target.delivery_status = "processing"
         target.attempt_count += 1
         target.locked_at = claimed_at
@@ -296,6 +300,8 @@ def claim_delivery_targets(
                 target_name=target.target_name,
                 recipient_user_id=target.recipient_user_id,
                 recipient_reason=target.recipient_reason,
+                previous_delivery_status=previous_delivery_status,
+                previous_attempt_count=previous_attempt_count,
                 attempt_count=target.attempt_count,
                 locked_by=locked_by,
                 claim_token=claim_token,
@@ -544,6 +550,29 @@ def finalize_delivery_claim(
         )
 
 
+def restore_claimed_delivery_targets(
+    slack_runtime: SlackRuntimeContext,
+    *,
+    claimed_targets: list[ClaimedDeliveryTarget],
+) -> None:
+    if not claimed_targets:
+        return
+    with session_scope(slack_runtime.settings) as db:
+        for claimed_target in claimed_targets:
+            target = load_claimed_processing_target(
+                db,
+                target_id=claimed_target.target_id,
+                claim_token=claimed_target.claim_token,
+            )
+            if target is None:
+                continue
+            target.delivery_status = claimed_target.previous_delivery_status
+            target.attempt_count = claimed_target.previous_attempt_count
+            target.locked_at = None
+            target.locked_by = None
+            target.claim_token = None
+
+
 def run_delivery_cycle_preflight(
     slack_runtime: SlackRuntimeContext,
     *,
@@ -612,7 +641,7 @@ def _run_delivery_cycle_with_runtime(slack_runtime: SlackRuntimeContext, *, work
             locked_by=worker_instance_id,
         )
 
-    for claimed_target in claimed_targets:
+    for index, claimed_target in enumerate(claimed_targets):
         _log_worker_runtime_event(
             slack_runtime,
             "slack_target_claimed",
@@ -632,6 +661,10 @@ def _run_delivery_cycle_with_runtime(slack_runtime: SlackRuntimeContext, *, work
         )
         if delivery_suppression is None:
             continue
+        restore_claimed_delivery_targets(
+            slack_runtime,
+            claimed_targets=claimed_targets[index:],
+        )
         persist_delivery_health_snapshot(
             slack_runtime,
             snapshot=_build_invalid_config_health_snapshot(slack_runtime, delivery_suppression),
