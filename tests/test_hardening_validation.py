@@ -257,17 +257,6 @@ def test_env_example_and_readme_capture_acceptance_contract():
         "TRIAGE_WORKSPACE_DIR",
         "REPO_MOUNT_DIR",
         "MANUALS_MOUNT_DIR",
-        "SLACK_ENABLED",
-        "SLACK_DEFAULT_TARGET_NAME",
-        "SLACK_TARGETS_JSON",
-        "SLACK_NOTIFY_TICKET_CREATED",
-        "SLACK_NOTIFY_PUBLIC_MESSAGE_ADDED",
-        "SLACK_NOTIFY_STATUS_CHANGED",
-        "SLACK_MESSAGE_PREVIEW_MAX_CHARS",
-        "SLACK_HTTP_TIMEOUT_SECONDS",
-        "SLACK_DELIVERY_BATCH_SIZE",
-        "SLACK_DELIVERY_MAX_ATTEMPTS",
-        "SLACK_DELIVERY_STALE_LOCK_SECONDS",
     ):
         assert f"{name}=" in env_source
 
@@ -289,9 +278,11 @@ def test_env_example_and_readme_capture_acceptance_contract():
     assert "bootstrap_version" in readme_source
     assert "pytest" in readme_source
     assert "Leave `CODEX_API_KEY` empty" in readme_source
-    assert "SLACK_ENABLED=false" in readme_source
-    assert "SLACK_TARGETS_JSON" in readme_source
-    assert "structured invalid-config state" in readme_source
+    assert "/ops/integrations/slack" in env_source
+    assert "/ops/integrations/slack" in readme_source
+    assert "/ops/users" in readme_source
+    assert "chat.postMessage" in readme_source
+    assert "no authoritative `SLACK_*` runtime env vars" in readme_source
 
 
 def test_slack_docs_capture_phase1_rollout_posture():
@@ -299,17 +290,18 @@ def test_slack_docs_capture_phase1_rollout_posture():
     readme_source = Path("README.md").read_text(encoding="utf-8")
     deployment_source = Path("docs_deployment.md").read_text(encoding="utf-8")
 
-    assert "SLACK_ENABLED=false" in env_source
-    assert "same refactor-era build" in env_source
-    assert "SLACK_DELIVERY_STALE_LOCK_SECONDS=120" in env_source
-    assert "SLACK_ENABLED=false" in readme_source
-    assert "SLACK_NOTIFY_*" in readme_source
-    assert "refactor-aware build" in readme_source
-    assert "pre-refactor Slack integration rows" in readme_source
+    assert "SLACK_ENABLED=" not in env_source
+    assert "SLACK_TARGETS_JSON" not in env_source
+    assert "/ops/integrations/slack" in env_source
+    assert "does not backfill historical ticket activity" in env_source
+    assert "/ops/integrations/slack" in readme_source
+    assert "/ops/users" in readme_source
+    assert "config-first" in readme_source
+    assert "disposable data" in readme_source
     assert "does not backfill historical ticket activity" in readme_source
-    assert "SLACK_ENABLED=false" in deployment_source
-    assert "SLACK_TARGETS_JSON" in deployment_source
-    assert "refactor-aware release" in deployment_source
+    assert "/ops/integrations/slack" in deployment_source
+    assert "/ops/users" in deployment_source
+    assert "DM-capable release" in deployment_source
     assert "disposable pre-launch data" in deployment_source
     assert "does not backfill old ticket activity" in deployment_source
 

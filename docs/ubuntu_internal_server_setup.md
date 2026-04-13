@@ -174,6 +174,13 @@ python scripts/create_admin.py \
 
 You can add more local users later with `python scripts/create_user.py`.
 
+Slack DM rollout note:
+
+- Slack DM settings are DB-backed, not `.env`-backed.
+- After you can sign in as the admin, use `/ops/integrations/slack` to store the bot token and enable delivery, and use `/ops/users` to set `slack_user_id` mappings.
+- Keep Slack disabled or disconnected there until both web and worker are running the same DM-capable build.
+- Enabling Slack later does not backfill historical ticket activity.
+
 ## 9. Run readiness checks
 
 Before enabling systemd services, make sure both checks pass:

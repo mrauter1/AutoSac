@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,36 +10,23 @@ import uuid
 import httpx
 import pytest
 
-from shared.config import Settings, SlackSettings, SlackTargetSettings
+from shared.config import Settings, SlackSettings
+from shared.slack_dm import SlackWebApiResponse, encrypt_slack_bot_token
 
 
 def _make_slack_settings(
     *,
     enabled: bool = True,
-    default_target_name: str | None = "ops_primary",
-    targets: tuple[SlackTargetSettings, ...] | None = None,
     is_valid: bool = True,
     config_error_code: str | None = None,
     config_error_summary: str | None = None,
     delivery_batch_size: int = 5,
     delivery_max_attempts: int = 3,
     delivery_stale_lock_seconds: int = 120,
+    bot_token: str | None = "xoxb-test-token",
 ) -> SlackSettings:
-    resolved_targets = (
-        (
-            SlackTargetSettings(
-                name="ops_primary",
-                enabled=True,
-                webhook_url="https://hooks.slack.com/services/T000/B000/XXXX",
-            ),
-        )
-        if targets is None
-        else targets
-    )
     return SlackSettings(
         enabled=enabled,
-        default_target_name=default_target_name,
-        targets=resolved_targets,
         notify_ticket_created=True,
         notify_public_message_added=True,
         notify_status_changed=True,
@@ -48,9 +34,17 @@ def _make_slack_settings(
         delivery_batch_size=delivery_batch_size,
         delivery_max_attempts=delivery_max_attempts,
         delivery_stale_lock_seconds=delivery_stale_lock_seconds,
+        has_stored_token=bot_token is not None,
+        bot_token_ciphertext=(
+            encrypt_slack_bot_token("test-secret", bot_token) if bot_token is not None else None
+        ),
+        team_id="T123",
+        team_name="AutoSac",
+        bot_user_id="B123",
         is_valid=is_valid,
         config_error_code=config_error_code,
         config_error_summary=config_error_summary,
+        routing_mode="dm",
     )
 
 
@@ -86,13 +80,34 @@ def _make_slack_runtime(settings: Settings):
     return build_worker_slack_runtime_context(settings)
 
 
+def _make_web_api_response(
+    method: str,
+    *,
+    http_status: int = 200,
+    ok: bool,
+    error: str | None = None,
+    body_extra: dict | None = None,
+    retry_after_seconds: int | None = None,
+) -> SlackWebApiResponse:
+    body_json: dict[str, object] = {"ok": ok}
+    if error is not None:
+        body_json["error"] = error
+    if body_extra:
+        body_json.update(body_extra)
+    return SlackWebApiResponse(
+        method=method,
+        http_status=http_status,
+        body_json=body_json,
+        retry_after_seconds=retry_after_seconds,
+    )
+
+
 def _load_symbols():
     pytest.importorskip("sqlalchemy")
     from worker.main import WorkerIdentity, start_slack_delivery_thread
     from worker.slack_delivery import (
         ClaimedDeliveryTarget,
         DeliveryOutcome,
-        build_worker_slack_runtime_context,
         claim_delivery_targets,
         classify_delivery_attempt,
         delivery_loop,
@@ -102,14 +117,13 @@ def _load_symbols():
         recover_stale_delivery_targets,
         render_slack_message,
         run_delivery_cycle,
-        send_slack_webhook,
+        run_delivery_cycle_preflight,
     )
 
     return {
         "ClaimedDeliveryTarget": ClaimedDeliveryTarget,
         "DeliveryOutcome": DeliveryOutcome,
         "WorkerIdentity": WorkerIdentity,
-        "build_worker_slack_runtime_context": build_worker_slack_runtime_context,
         "claim_delivery_targets": claim_delivery_targets,
         "classify_delivery_attempt": classify_delivery_attempt,
         "delivery_loop": delivery_loop,
@@ -119,7 +133,7 @@ def _load_symbols():
         "recover_stale_delivery_targets": recover_stale_delivery_targets,
         "render_slack_message": render_slack_message,
         "run_delivery_cycle": run_delivery_cycle,
-        "send_slack_webhook": send_slack_webhook,
+        "run_delivery_cycle_preflight": run_delivery_cycle_preflight,
         "start_slack_delivery_thread": start_slack_delivery_thread,
     }
 
@@ -172,13 +186,16 @@ class _TargetStateDb:
         return _FakeScalarOneOrNoneResult(self.target)
 
 
-def _make_claimed_target(symbols, *, attempt_count: int = 1, target_name: str = "ops_primary"):
+def _make_claimed_target(symbols, *, attempt_count: int = 1):
+    recipient_user_id = uuid.uuid4()
     event_id = uuid.uuid4()
     return symbols["ClaimedDeliveryTarget"](
         target_id=uuid.uuid4(),
         event_id=event_id,
         event_type="ticket.public_message_added",
-        target_name=target_name,
+        target_name=f"user:{recipient_user_id}",
+        recipient_user_id=recipient_user_id,
+        recipient_reason="requester",
         attempt_count=attempt_count,
         locked_by="worker-test",
         claim_token=uuid.uuid4(),
@@ -211,26 +228,6 @@ def test_render_slack_message_escapes_user_derived_fields(tmp_path):
     assert "<!channel>" not in text
 
 
-def test_send_slack_webhook_enforces_total_timeout(monkeypatch, tmp_path):
-    symbols = _load_symbols()
-
-    async def fake_post_slack_webhook_async(*, webhook_url: str, text: str, timeout_seconds: int) -> int:
-        assert webhook_url == "https://hooks.slack.com/services/T000/B000/XXXX"
-        assert text == "hello"
-        assert timeout_seconds == 0.01
-        await asyncio.sleep(0.05)
-        return 200
-
-    monkeypatch.setattr("worker.slack_delivery._post_slack_webhook_async", fake_post_slack_webhook_async)
-
-    with pytest.raises(httpx.ReadTimeout):
-        symbols["send_slack_webhook"](
-            webhook_url="https://hooks.slack.com/services/T000/B000/XXXX",
-            text="hello",
-            timeout_seconds=0.01,
-        )
-
-
 def test_sanitize_operator_summary_redacts_urls():
     from worker.slack_delivery import _sanitize_operator_summary
 
@@ -242,56 +239,20 @@ def test_sanitize_operator_summary_redacts_urls():
     assert sanitized.count("[redacted-url]") == 2
 
 
-def test_deliver_claimed_target_redacts_urls_from_retryable_errors(monkeypatch, tmp_path):
-    symbols = _load_symbols()
-    fixed_now = datetime(2026, 4, 10, 14, 6, tzinfo=timezone.utc)
-    settings = _make_settings(tmp_path)
-    claimed_target = _make_claimed_target(symbols)
-    target_row = SimpleNamespace(
-        id=claimed_target.target_id,
-        delivery_status="processing",
-        attempt_count=claimed_target.attempt_count,
-        next_attempt_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
-        locked_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
-        locked_by="worker-test",
-        claim_token=claimed_target.claim_token,
-        last_error=None,
-        sent_at=None,
-        dead_lettered_at=None,
-    )
-    fake_db = _TargetStateDb(target=target_row)
-
-    @contextmanager
-    def fake_session_scope(_settings):
-        yield fake_db
-
-    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
-    monkeypatch.setattr("worker.slack_delivery.utc_now", lambda: fixed_now)
-    slack_runtime = _make_slack_runtime(settings)
-
-    symbols["deliver_claimed_target"](
-        slack_runtime,
-        claimed_target=claimed_target,
-        send_webhook=lambda **_kwargs: (_ for _ in ()).throw(
-            httpx.TransportError("boom https://hooks.slack.com/services/T000/B000/SECRET failed")
-        ),
-    )
-
-    assert target_row.delivery_status == "failed"
-    assert "[redacted-url]" in target_row.last_error
-    assert "hooks.slack.com/services" not in target_row.last_error
-
-
 def test_claim_delivery_targets_marks_rows_processing_and_uses_skip_locked(tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings(delivery_batch_size=2))
     slack_runtime = _make_slack_runtime(settings)
     first_event_id = uuid.uuid4()
     second_event_id = uuid.uuid4()
+    first_recipient = uuid.uuid4()
+    second_recipient = uuid.uuid4()
     first_target = SimpleNamespace(
         id=uuid.uuid4(),
         event_id=first_event_id,
-        target_name="ops_primary",
+        target_name=f"user:{first_recipient}",
+        recipient_user_id=first_recipient,
+        recipient_reason="requester",
         delivery_status="pending",
         attempt_count=0,
         next_attempt_at=datetime(2026, 4, 10, 12, 0, tzinfo=timezone.utc),
@@ -303,7 +264,9 @@ def test_claim_delivery_targets_marks_rows_processing_and_uses_skip_locked(tmp_p
     second_target = SimpleNamespace(
         id=uuid.uuid4(),
         event_id=second_event_id,
-        target_name="ops_primary",
+        target_name=f"user:{second_recipient}",
+        recipient_user_id=second_recipient,
+        recipient_reason="assignee",
         delivery_status="failed",
         attempt_count=2,
         next_attempt_at=datetime(2026, 4, 10, 12, 1, tzinfo=timezone.utc),
@@ -315,8 +278,14 @@ def test_claim_delivery_targets_marks_rows_processing_and_uses_skip_locked(tmp_p
     db = _ClaimDb(
         targets=[first_target, second_target],
         events_by_id={
-            first_event_id: SimpleNamespace(event_type="ticket.created", payload_json={"ticket_reference": "T-1", "ticket_url": "https://x", "ticket_title": "A"}),
-            second_event_id: SimpleNamespace(event_type="ticket.status_changed", payload_json={"ticket_reference": "T-2", "ticket_url": "https://x", "status_from": "new", "status_to": "resolved"}),
+            first_event_id: SimpleNamespace(
+                event_type="ticket.created",
+                payload_json={"ticket_reference": "T-1", "ticket_url": "https://x", "ticket_title": "A"},
+            ),
+            second_event_id: SimpleNamespace(
+                event_type="ticket.status_changed",
+                payload_json={"ticket_reference": "T-2", "ticket_url": "https://x", "status_from": "new", "status_to": "resolved"},
+            ),
         },
     )
 
@@ -327,8 +296,10 @@ def test_claim_delivery_targets_marks_rows_processing_and_uses_skip_locked(tmp_p
     )
 
     assert [item.event_type for item in claimed] == ["ticket.created", "ticket.status_changed"]
-    assert claimed[0].payload_json["ticket_reference"] == "T-1"
-    assert claimed[1].payload_json["ticket_reference"] == "T-2"
+    assert claimed[0].recipient_user_id == first_recipient
+    assert claimed[0].recipient_reason == "requester"
+    assert claimed[1].recipient_user_id == second_recipient
+    assert claimed[1].recipient_reason == "assignee"
     assert first_target.delivery_status == "processing"
     assert first_target.attempt_count == 1
     assert first_target.locked_by == "worker-test"
@@ -349,7 +320,9 @@ def test_recover_stale_delivery_targets_preserves_attempt_count_and_clears_lock(
     stale_target = SimpleNamespace(
         id=uuid.uuid4(),
         event_id=uuid.uuid4(),
-        target_name="ops_primary",
+        target_name=f"user:{uuid.uuid4()}",
+        recipient_user_id=uuid.uuid4(),
+        recipient_reason="requester",
         delivery_status="processing",
         attempt_count=4,
         next_attempt_at=datetime(2026, 4, 10, 13, 0, tzinfo=timezone.utc),
@@ -374,11 +347,28 @@ def test_recover_stale_delivery_targets_preserves_attempt_count_and_clears_lock(
     assert stale_target.claim_token is None
     assert stale_target.next_attempt_at == fixed_now
     assert "stale_lock_recovered" in stale_target.last_error
-    assert "\n" not in stale_target.last_error
+    assert "recipient_user_id=" in stale_target.last_error
     assert db.statements[0]._for_update_arg.skip_locked is True
 
 
-def test_deliver_claimed_target_marks_sent_on_success(monkeypatch, tmp_path):
+def test_load_claimed_processing_target_uses_claim_token_and_for_update(tmp_path):
+    symbols = _load_symbols()
+    target_row = SimpleNamespace(id=uuid.uuid4())
+    fake_db = _TargetStateDb(target=target_row)
+    claim_token = uuid.uuid4()
+
+    loaded = symbols["load_claimed_processing_target"](
+        fake_db,
+        target_id=target_row.id,
+        claim_token=claim_token,
+    )
+
+    assert loaded is target_row
+    assert fake_db.statements[0]._for_update_arg is not None
+    assert "claim_token" in str(fake_db.statements[0])
+
+
+def test_deliver_claimed_target_marks_sent_on_success_and_uses_current_recipient_slack_id(monkeypatch, tmp_path):
     symbols = _load_symbols()
     fixed_now = datetime(2026, 4, 10, 14, 5, tzinfo=timezone.utc)
     settings = _make_settings(tmp_path)
@@ -397,10 +387,36 @@ def test_deliver_claimed_target_marks_sent_on_success(monkeypatch, tmp_path):
     )
     fake_db = _TargetStateDb(target=target_row)
     observed = []
+    calls = {}
 
     @contextmanager
     def fake_session_scope(_settings):
         yield fake_db
+
+    def fake_load_recipient(_settings, *, recipient_user_id):
+        assert recipient_user_id == claimed_target.recipient_user_id
+        return SimpleNamespace(id=recipient_user_id, is_active=True, slack_user_id="U999")
+
+    def fake_open_conversation(*, bot_token: str, slack_user_id: str, timeout_seconds: int):
+        calls["open"] = {
+            "bot_token": bot_token,
+            "slack_user_id": slack_user_id,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _make_web_api_response(
+            "conversations.open",
+            ok=True,
+            body_extra={"channel": {"id": "D123"}},
+        )
+
+    def fake_post_message(*, bot_token: str, channel_id: str, text: str, timeout_seconds: int):
+        calls["post"] = {
+            "bot_token": bot_token,
+            "channel_id": channel_id,
+            "text": text,
+            "timeout_seconds": timeout_seconds,
+        }
+        return _make_web_api_response("chat.postMessage", ok=True)
 
     monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
     monkeypatch.setattr("worker.slack_delivery.utc_now", lambda: fixed_now)
@@ -410,9 +426,20 @@ def test_deliver_claimed_target_marks_sent_on_success(monkeypatch, tmp_path):
     symbols["deliver_claimed_target"](
         slack_runtime,
         claimed_target=claimed_target,
-        send_webhook=lambda **_kwargs: 200,
+        bot_token="xoxb-token",
+        load_recipient=fake_load_recipient,
+        open_conversation=fake_open_conversation,
+        post_message=fake_post_message,
     )
 
+    assert calls["open"] == {
+        "bot_token": "xoxb-token",
+        "slack_user_id": "U999",
+        "timeout_seconds": 10,
+    }
+    assert calls["post"]["bot_token"] == "xoxb-token"
+    assert calls["post"]["channel_id"] == "D123"
+    assert "Nova mensagem publica em T-000123 por requester" in calls["post"]["text"]
     assert target_row.delivery_status == "sent"
     assert target_row.sent_at == fixed_now
     assert target_row.dead_lettered_at is None
@@ -426,6 +453,8 @@ def test_deliver_claimed_target_marks_sent_on_success(monkeypatch, tmp_path):
             {
                 "event_id": str(claimed_target.event_id),
                 "target_name": claimed_target.target_name,
+                "recipient_user_id": str(claimed_target.recipient_user_id),
+                "recipient_reason": claimed_target.recipient_reason,
                 "delivery_status": "sent",
                 "attempt_count": claimed_target.attempt_count,
                 "locked_by": claimed_target.locked_by,
@@ -436,69 +465,318 @@ def test_deliver_claimed_target_marks_sent_on_success(monkeypatch, tmp_path):
     ]
 
 
-def test_load_claimed_processing_target_uses_claim_token_and_for_update(tmp_path):
-    _load_symbols()
-    from worker.slack_delivery import load_claimed_processing_target
+def test_classify_delivery_attempt_requires_ok_true_for_conversations_open(tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path)
+    claimed_target = _make_claimed_target(symbols)
+    slack_runtime = _make_slack_runtime(settings)
 
-    target_row = SimpleNamespace(id=uuid.uuid4())
-    fake_db = _TargetStateDb(target=target_row)
-    claim_token = uuid.uuid4()
-
-    loaded = load_claimed_processing_target(
-        fake_db,
-        target_id=target_row.id,
-        claim_token=claim_token,
+    outcome = symbols["classify_delivery_attempt"](
+        slack_runtime,
+        claimed_target=claimed_target,
+        bot_token="xoxb-token",
+        load_recipient=lambda _settings, *, recipient_user_id: SimpleNamespace(
+            id=recipient_user_id,
+            is_active=True,
+            slack_user_id="U123",
+        ),
+        open_conversation=lambda **_kwargs: _make_web_api_response(
+            "conversations.open",
+            ok=False,
+            error="user_not_found",
+        ),
     )
 
-    assert loaded is target_row
-    assert fake_db.statements[0]._for_update_arg is not None
-    assert "claim_token" in str(fake_db.statements[0])
+    assert outcome.kind == "dead_letter_terminal"
+    assert outcome.failure_class == "user_not_found"
+    assert outcome.terminal_reason == "terminal_failure"
 
 
-def test_classify_delivery_attempt_builds_retryable_outcome_before_finalization(monkeypatch, tmp_path):
+def test_classify_delivery_attempt_requires_ok_true_for_chat_post_message(monkeypatch, tmp_path):
     symbols = _load_symbols()
     fixed_now = datetime(2026, 4, 10, 14, 6, tzinfo=timezone.utc)
     settings = _make_settings(tmp_path, slack=_make_slack_settings(delivery_max_attempts=4))
     claimed_target = _make_claimed_target(symbols, attempt_count=2)
-
     monkeypatch.setattr("worker.slack_delivery.utc_now", lambda: fixed_now)
     slack_runtime = _make_slack_runtime(settings)
 
     outcome = symbols["classify_delivery_attempt"](
         slack_runtime,
         claimed_target=claimed_target,
-        send_webhook=lambda **_kwargs: 500,
+        bot_token="xoxb-token",
+        load_recipient=lambda _settings, *, recipient_user_id: SimpleNamespace(
+            id=recipient_user_id,
+            is_active=True,
+            slack_user_id="U123",
+        ),
+        open_conversation=lambda **_kwargs: _make_web_api_response(
+            "conversations.open",
+            ok=True,
+            body_extra={"channel": {"id": "D123"}},
+        ),
+        post_message=lambda **_kwargs: _make_web_api_response(
+            "chat.postMessage",
+            ok=False,
+            error="internal_error",
+        ),
     )
 
     assert outcome.kind == "retryable_failure"
-    assert outcome.http_status == 500
-    assert outcome.failure_class == "http_5xx"
-    assert outcome.terminal_reason is None
+    assert outcome.failure_class == "internal_error"
     assert outcome.next_attempt_at == fixed_now + timedelta(seconds=120)
-    assert "retryable_http_status=500" in outcome.last_error
 
 
-def test_classify_delivery_attempt_converts_retry_exhaustion_before_finalization(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("recipient", "expected_failure_class"),
+    [
+        (None, "missing_recipient_user"),
+        (SimpleNamespace(is_active=False, slack_user_id="U123"), "inactive_recipient_user"),
+        (SimpleNamespace(is_active=True, slack_user_id="   "), "missing_recipient_slack_user_id"),
+    ],
+)
+def test_deliver_claimed_target_dead_letters_invalid_recipients_without_slack_calls(
+    monkeypatch,
+    tmp_path,
+    recipient,
+    expected_failure_class,
+):
     symbols = _load_symbols()
-    fixed_now = datetime(2026, 4, 10, 14, 9, tzinfo=timezone.utc)
-    settings = _make_settings(tmp_path, slack=_make_slack_settings(delivery_max_attempts=3))
-    claimed_target = _make_claimed_target(symbols, attempt_count=3)
+    fixed_now = datetime(2026, 4, 10, 14, 7, tzinfo=timezone.utc)
+    settings = _make_settings(tmp_path)
+    claimed_target = _make_claimed_target(symbols)
+    target_row = SimpleNamespace(
+        id=claimed_target.target_id,
+        delivery_status="processing",
+        attempt_count=claimed_target.attempt_count,
+        next_attempt_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
+        locked_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
+        locked_by="worker-test",
+        claim_token=claimed_target.claim_token,
+        last_error=None,
+        sent_at=None,
+        dead_lettered_at=None,
+    )
+    fake_db = _TargetStateDb(target=target_row)
+    send_calls = {"open": 0, "post": 0}
 
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.slack_delivery.utc_now", lambda: fixed_now)
+    slack_runtime = _make_slack_runtime(settings)
+
+    symbols["deliver_claimed_target"](
+        slack_runtime,
+        claimed_target=claimed_target,
+        bot_token="xoxb-token",
+        load_recipient=lambda _settings, *, recipient_user_id: recipient,
+        open_conversation=lambda **_kwargs: send_calls.__setitem__("open", send_calls["open"] + 1),
+        post_message=lambda **_kwargs: send_calls.__setitem__("post", send_calls["post"] + 1),
+    )
+
+    assert send_calls == {"open": 0, "post": 0}
+    assert target_row.delivery_status == "dead_letter"
+    assert target_row.dead_lettered_at == fixed_now
+    assert expected_failure_class in target_row.last_error
+
+
+def test_deliver_claimed_target_retries_transport_errors(monkeypatch, tmp_path):
+    symbols = _load_symbols()
+    fixed_now = datetime(2026, 4, 10, 14, 6, tzinfo=timezone.utc)
+    settings = _make_settings(tmp_path)
+    claimed_target = _make_claimed_target(symbols, attempt_count=2)
+    target_row = SimpleNamespace(
+        id=claimed_target.target_id,
+        delivery_status="processing",
+        attempt_count=claimed_target.attempt_count,
+        next_attempt_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
+        locked_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
+        locked_by="worker-test",
+        claim_token=claimed_target.claim_token,
+        last_error=None,
+        sent_at=None,
+        dead_lettered_at=None,
+    )
+    fake_db = _TargetStateDb(target=target_row)
+    observed = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    request = httpx.Request("POST", "https://slack.com/api/conversations.open")
+
+    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.slack_delivery.utc_now", lambda: fixed_now)
+    monkeypatch.setattr("worker.slack_delivery.log_worker_event", lambda event, **payload: observed.append((event, payload)))
+    slack_runtime = _make_slack_runtime(settings)
+
+    symbols["deliver_claimed_target"](
+        slack_runtime,
+        claimed_target=claimed_target,
+        bot_token="xoxb-token",
+        load_recipient=lambda _settings, *, recipient_user_id: SimpleNamespace(
+            id=recipient_user_id,
+            is_active=True,
+            slack_user_id="U123",
+        ),
+        open_conversation=lambda **_kwargs: (_ for _ in ()).throw(httpx.ReadTimeout("timed out", request=request)),
+    )
+
+    assert target_row.delivery_status == "failed"
+    assert target_row.sent_at is None
+    assert target_row.dead_lettered_at is None
+    assert target_row.locked_at is None
+    assert target_row.locked_by is None
+    assert target_row.claim_token is None
+    assert target_row.next_attempt_at == fixed_now + timedelta(seconds=120)
+    assert "ReadTimeout" in target_row.last_error
+    assert observed == [
+        (
+            "slack_delivery_retry_scheduled",
+            {
+                "event_id": str(claimed_target.event_id),
+                "target_name": claimed_target.target_name,
+                "recipient_user_id": str(claimed_target.recipient_user_id),
+                "recipient_reason": claimed_target.recipient_reason,
+                "delivery_status": "failed",
+                "attempt_count": claimed_target.attempt_count,
+                "locked_by": claimed_target.locked_by,
+                "claim_token": str(claimed_target.claim_token),
+                "next_attempt_at": (fixed_now + timedelta(seconds=120)).isoformat(),
+                "failure_class": "ReadTimeout",
+            },
+        )
+    ]
+
+
+def test_classify_delivery_attempt_honors_retry_after_floor_for_429(monkeypatch, tmp_path):
+    symbols = _load_symbols()
+    fixed_now = datetime(2026, 4, 10, 14, 6, tzinfo=timezone.utc)
+    settings = _make_settings(tmp_path, slack=_make_slack_settings(delivery_max_attempts=4))
+    claimed_target = _make_claimed_target(symbols, attempt_count=2)
     monkeypatch.setattr("worker.slack_delivery.utc_now", lambda: fixed_now)
     slack_runtime = _make_slack_runtime(settings)
 
     outcome = symbols["classify_delivery_attempt"](
         slack_runtime,
         claimed_target=claimed_target,
-        send_webhook=lambda **_kwargs: 500,
+        bot_token="xoxb-token",
+        load_recipient=lambda _settings, *, recipient_user_id: SimpleNamespace(
+            id=recipient_user_id,
+            is_active=True,
+            slack_user_id="U123",
+        ),
+        open_conversation=lambda **_kwargs: _make_web_api_response(
+            "conversations.open",
+            ok=True,
+            body_extra={"channel": {"id": "D123"}},
+        ),
+        post_message=lambda **_kwargs: _make_web_api_response(
+            "chat.postMessage",
+            http_status=429,
+            ok=False,
+            error="ratelimited",
+            retry_after_seconds=240,
+        ),
     )
 
-    assert outcome.kind == "dead_letter_terminal"
-    assert outcome.http_status == 500
-    assert outcome.failure_class == "http_5xx"
-    assert outcome.terminal_reason == "retry_exhausted"
-    assert outcome.next_attempt_at is None
-    assert "retryable_http_status=500" in outcome.last_error
+    assert outcome.kind == "retryable_failure"
+    assert outcome.failure_class == "http_429"
+    assert outcome.next_attempt_at == fixed_now + timedelta(seconds=240)
+
+
+def test_deliver_claimed_target_dead_letters_recipient_specific_slack_errors(monkeypatch, tmp_path):
+    symbols = _load_symbols()
+    fixed_now = datetime(2026, 4, 10, 14, 8, tzinfo=timezone.utc)
+    settings = _make_settings(tmp_path)
+    claimed_target = _make_claimed_target(symbols)
+    target_row = SimpleNamespace(
+        id=claimed_target.target_id,
+        delivery_status="processing",
+        attempt_count=claimed_target.attempt_count,
+        next_attempt_at=datetime(2026, 4, 10, 15, 0, tzinfo=timezone.utc),
+        locked_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
+        locked_by="worker-test",
+        claim_token=claimed_target.claim_token,
+        last_error=None,
+        sent_at=None,
+        dead_lettered_at=None,
+    )
+    fake_db = _TargetStateDb(target=target_row)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.slack_delivery.utc_now", lambda: fixed_now)
+    slack_runtime = _make_slack_runtime(settings)
+
+    symbols["deliver_claimed_target"](
+        slack_runtime,
+        claimed_target=claimed_target,
+        bot_token="xoxb-token",
+        load_recipient=lambda _settings, *, recipient_user_id: SimpleNamespace(
+            id=recipient_user_id,
+            is_active=True,
+            slack_user_id="U123",
+        ),
+        open_conversation=lambda **_kwargs: _make_web_api_response(
+            "conversations.open",
+            ok=True,
+            body_extra={"channel": {"id": "D123"}},
+        ),
+        post_message=lambda **_kwargs: _make_web_api_response(
+            "chat.postMessage",
+            ok=False,
+            error="channel_not_found",
+        ),
+    )
+
+    assert target_row.delivery_status == "dead_letter"
+    assert target_row.dead_lettered_at == fixed_now
+    assert "recipient_error=channel_not_found" in target_row.last_error
+
+
+def test_deliver_claimed_target_returns_suppression_and_skips_finalization_when_send_finds_invalid_auth(monkeypatch, tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path)
+    claimed_target = _make_claimed_target(symbols)
+    finalize_calls = {"count": 0}
+    slack_runtime = _make_slack_runtime(settings)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        finalize_calls["count"] += 1
+        yield SimpleNamespace()
+
+    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
+
+    suppression = symbols["deliver_claimed_target"](
+        slack_runtime,
+        claimed_target=claimed_target,
+        bot_token="xoxb-token",
+        load_recipient=lambda _settings, *, recipient_user_id: SimpleNamespace(
+            id=recipient_user_id,
+            is_active=True,
+            slack_user_id="U123",
+        ),
+        open_conversation=lambda **_kwargs: _make_web_api_response(
+            "conversations.open",
+            ok=False,
+            error="invalid_auth",
+        ),
+    )
+
+    assert suppression is not None
+    assert suppression.reason == "invalid_config"
+    assert suppression.config_error_code == "invalid_auth"
+    assert suppression.config_error_summary == "Slack conversations.open returned invalid_auth"
+    assert suppression.delivery_halted is True
+    assert finalize_calls["count"] == 0
 
 
 def test_finalize_delivery_claim_uses_supplied_retryable_outcome_without_recomputing(monkeypatch, tmp_path):
@@ -583,7 +861,7 @@ def test_finalize_delivery_claim_returns_ownership_lost_without_mutation(monkeyp
     assert target_row.last_error == "keep-me"
 
 
-def test_deliver_claimed_target_skips_sent_update_when_ownership_is_lost(monkeypatch, tmp_path):
+def test_deliver_claimed_target_logs_ownership_lost_with_recipient_fields(monkeypatch, tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path)
     claimed_target = _make_claimed_target(symbols)
@@ -613,14 +891,20 @@ def test_deliver_claimed_target_skips_sent_update_when_ownership_is_lost(monkeyp
     symbols["deliver_claimed_target"](
         slack_runtime,
         claimed_target=claimed_target,
-        send_webhook=lambda **_kwargs: 200,
+        bot_token="xoxb-token",
+        load_recipient=lambda _settings, *, recipient_user_id: SimpleNamespace(
+            id=recipient_user_id,
+            is_active=True,
+            slack_user_id="U123",
+        ),
+        open_conversation=lambda **_kwargs: _make_web_api_response(
+            "conversations.open",
+            ok=True,
+            body_extra={"channel": {"id": "D123"}},
+        ),
+        post_message=lambda **_kwargs: _make_web_api_response("chat.postMessage", ok=True),
     )
 
-    assert target_row.delivery_status == "processing"
-    assert target_row.attempt_count == claimed_target.attempt_count + 1
-    assert target_row.locked_by == "worker-new"
-    assert target_row.last_error == "keep-me"
-    assert target_row.sent_at is None
     assert observed == [
         (
             "slack_delivery_ownership_lost",
@@ -629,341 +913,8 @@ def test_deliver_claimed_target_skips_sent_update_when_ownership_is_lost(monkeyp
                 "event_id": str(claimed_target.event_id),
                 "target_id": str(claimed_target.target_id),
                 "target_name": claimed_target.target_name,
-                "claimed_attempt_count": claimed_target.attempt_count,
-                "claimed_locked_by": claimed_target.locked_by,
-                "claim_token": str(claimed_target.claim_token),
-            },
-        )
-    ]
-
-
-def test_deliver_claimed_target_retries_retryable_failures(monkeypatch, tmp_path):
-    symbols = _load_symbols()
-    fixed_now = datetime(2026, 4, 10, 14, 6, tzinfo=timezone.utc)
-    settings = _make_settings(tmp_path)
-    claimed_target = _make_claimed_target(symbols, attempt_count=2)
-    target_row = SimpleNamespace(
-        id=claimed_target.target_id,
-        delivery_status="processing",
-        attempt_count=claimed_target.attempt_count,
-        next_attempt_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
-        locked_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
-        locked_by="worker-test",
-        claim_token=claimed_target.claim_token,
-        last_error=None,
-        sent_at=None,
-        dead_lettered_at=None,
-    )
-    fake_db = _TargetStateDb(target=target_row)
-    observed = []
-
-    @contextmanager
-    def fake_session_scope(_settings):
-        yield fake_db
-
-    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
-    monkeypatch.setattr("worker.slack_delivery.utc_now", lambda: fixed_now)
-    monkeypatch.setattr("worker.slack_delivery.log_worker_event", lambda event, **payload: observed.append((event, payload)))
-    slack_runtime = _make_slack_runtime(settings)
-
-    request = httpx.Request("POST", "https://hooks.slack.com/services/T000/B000/XXXX")
-
-    symbols["deliver_claimed_target"](
-        slack_runtime,
-        claimed_target=claimed_target,
-        send_webhook=lambda **_kwargs: (_ for _ in ()).throw(httpx.ReadTimeout("timed out", request=request)),
-    )
-
-    assert target_row.delivery_status == "failed"
-    assert target_row.sent_at is None
-    assert target_row.dead_lettered_at is None
-    assert target_row.locked_at is None
-    assert target_row.locked_by is None
-    assert target_row.claim_token is None
-    assert target_row.next_attempt_at == fixed_now + timedelta(seconds=120)
-    assert "ReadTimeout" in target_row.last_error
-    assert observed == [
-        (
-            "slack_delivery_retry_scheduled",
-            {
-                "event_id": str(claimed_target.event_id),
-                "target_name": claimed_target.target_name,
-                "delivery_status": "failed",
-                "attempt_count": claimed_target.attempt_count,
-                "locked_by": claimed_target.locked_by,
-                "claim_token": str(claimed_target.claim_token),
-                "next_attempt_at": (fixed_now + timedelta(seconds=120)).isoformat(),
-                "failure_class": "ReadTimeout",
-            },
-        )
-    ]
-
-
-def test_deliver_claimed_target_skips_retry_update_when_ownership_is_lost(monkeypatch, tmp_path):
-    symbols = _load_symbols()
-    settings = _make_settings(tmp_path)
-    claimed_target = _make_claimed_target(symbols, attempt_count=2)
-    target_row = SimpleNamespace(
-        id=claimed_target.target_id,
-        delivery_status="processing",
-        attempt_count=claimed_target.attempt_count + 1,
-        next_attempt_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
-        locked_at=datetime(2026, 4, 10, 14, 5, tzinfo=timezone.utc),
-        locked_by="worker-new",
-        claim_token=uuid.uuid4(),
-        last_error="keep-me",
-        sent_at=None,
-        dead_lettered_at=None,
-    )
-    fake_db = _TargetStateDb(target=target_row, owned=False)
-    observed = []
-
-    @contextmanager
-    def fake_session_scope(_settings):
-        yield fake_db
-
-    request = httpx.Request("POST", "https://hooks.slack.com/services/T000/B000/XXXX")
-
-    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
-    monkeypatch.setattr("worker.slack_delivery.log_worker_event", lambda event, **payload: observed.append((event, payload)))
-    slack_runtime = _make_slack_runtime(settings)
-
-    symbols["deliver_claimed_target"](
-        slack_runtime,
-        claimed_target=claimed_target,
-        send_webhook=lambda **_kwargs: (_ for _ in ()).throw(httpx.ReadTimeout("timed out", request=request)),
-    )
-
-    assert target_row.delivery_status == "processing"
-    assert target_row.attempt_count == claimed_target.attempt_count + 1
-    assert target_row.locked_by == "worker-new"
-    assert target_row.last_error == "keep-me"
-    assert target_row.next_attempt_at == datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc)
-    assert observed == [
-        (
-            "slack_delivery_ownership_lost",
-            {
-                "level": "warning",
-                "event_id": str(claimed_target.event_id),
-                "target_id": str(claimed_target.target_id),
-                "target_name": claimed_target.target_name,
-                "claimed_attempt_count": claimed_target.attempt_count,
-                "claimed_locked_by": claimed_target.locked_by,
-                "claim_token": str(claimed_target.claim_token),
-            },
-        )
-    ]
-
-
-@pytest.mark.parametrize(
-    ("targets", "target_name", "expected_error"),
-    [
-        ((), "ops_primary", "missing_target_config"),
-        ((SlackTargetSettings(name="ops_primary", enabled=False, webhook_url="https://hooks.slack.com/services/T000/B000/XXXX"),), "ops_primary", "target_disabled"),
-    ],
-)
-def test_deliver_claimed_target_dead_letters_when_target_is_missing_or_disabled(
-    monkeypatch,
-    tmp_path,
-    targets,
-    target_name,
-    expected_error,
-):
-    symbols = _load_symbols()
-    fixed_now = datetime(2026, 4, 10, 14, 7, tzinfo=timezone.utc)
-    settings = _make_settings(tmp_path, slack=_make_slack_settings(targets=targets))
-    claimed_target = _make_claimed_target(symbols, target_name=target_name)
-    target_row = SimpleNamespace(
-        id=claimed_target.target_id,
-        delivery_status="processing",
-        attempt_count=claimed_target.attempt_count,
-        next_attempt_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
-        locked_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
-        locked_by="worker-test",
-        claim_token=claimed_target.claim_token,
-        last_error=None,
-        sent_at=None,
-        dead_lettered_at=None,
-    )
-    fake_db = _TargetStateDb(target=target_row)
-    send_calls = {"count": 0}
-
-    @contextmanager
-    def fake_session_scope(_settings):
-        yield fake_db
-
-    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
-    monkeypatch.setattr("worker.slack_delivery.utc_now", lambda: fixed_now)
-    slack_runtime = _make_slack_runtime(settings)
-
-    symbols["deliver_claimed_target"](
-        slack_runtime,
-        claimed_target=claimed_target,
-        send_webhook=lambda **_kwargs: send_calls.__setitem__("count", send_calls["count"] + 1),
-    )
-
-    assert send_calls["count"] == 0
-    assert target_row.delivery_status == "dead_letter"
-    assert target_row.dead_lettered_at == fixed_now
-    assert target_row.sent_at is None
-    assert target_row.locked_at is None
-    assert target_row.locked_by is None
-    assert target_row.claim_token is None
-    assert expected_error in target_row.last_error
-
-
-def test_deliver_claimed_target_dead_letters_terminal_http_and_preserves_next_attempt(monkeypatch, tmp_path):
-    symbols = _load_symbols()
-    fixed_now = datetime(2026, 4, 10, 14, 8, tzinfo=timezone.utc)
-    settings = _make_settings(tmp_path)
-    claimed_target = _make_claimed_target(symbols)
-    original_next_attempt_at = datetime(2026, 4, 10, 15, 0, tzinfo=timezone.utc)
-    target_row = SimpleNamespace(
-        id=claimed_target.target_id,
-        delivery_status="processing",
-        attempt_count=claimed_target.attempt_count,
-        next_attempt_at=original_next_attempt_at,
-        locked_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
-        locked_by="worker-test",
-        claim_token=claimed_target.claim_token,
-        last_error=None,
-        sent_at=None,
-        dead_lettered_at=None,
-    )
-    fake_db = _TargetStateDb(target=target_row)
-
-    @contextmanager
-    def fake_session_scope(_settings):
-        yield fake_db
-
-    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
-    monkeypatch.setattr("worker.slack_delivery.utc_now", lambda: fixed_now)
-    slack_runtime = _make_slack_runtime(settings)
-
-    symbols["deliver_claimed_target"](
-        slack_runtime,
-        claimed_target=claimed_target,
-        send_webhook=lambda **_kwargs: 302,
-    )
-
-    assert target_row.delivery_status == "dead_letter"
-    assert target_row.dead_lettered_at == fixed_now
-    assert target_row.next_attempt_at == original_next_attempt_at
-    assert target_row.claim_token is None
-    assert "terminal_http_status=302" in target_row.last_error
-
-
-def test_deliver_claimed_target_dead_letters_malformed_payload_without_http(monkeypatch, tmp_path):
-    symbols = _load_symbols()
-    fixed_now = datetime(2026, 4, 10, 14, 8, tzinfo=timezone.utc)
-    settings = _make_settings(tmp_path)
-    original_next_attempt_at = datetime(2026, 4, 10, 15, 0, tzinfo=timezone.utc)
-    claimed_target = symbols["ClaimedDeliveryTarget"](
-        target_id=uuid.uuid4(),
-        event_id=uuid.uuid4(),
-        event_type="ticket.public_message_added",
-        target_name="ops_primary",
-        attempt_count=2,
-        locked_by="worker-test",
-        claim_token=uuid.uuid4(),
-        payload_json={
-            "ticket_url": "https://autosac.example.local/ops/tickets/T-000123",
-            "message_author_type": "requester",
-            "message_preview": "missing reference",
-        },
-    )
-    target_row = SimpleNamespace(
-        id=claimed_target.target_id,
-        delivery_status="processing",
-        attempt_count=claimed_target.attempt_count,
-        next_attempt_at=original_next_attempt_at,
-        locked_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
-        locked_by="worker-test",
-        claim_token=claimed_target.claim_token,
-        last_error=None,
-        sent_at=None,
-        dead_lettered_at=None,
-    )
-    fake_db = _TargetStateDb(target=target_row)
-    send_calls = {"count": 0}
-
-    @contextmanager
-    def fake_session_scope(_settings):
-        yield fake_db
-
-    def fake_send_webhook(**_kwargs):
-        send_calls["count"] += 1
-        return 200
-
-    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
-    monkeypatch.setattr("worker.slack_delivery.utc_now", lambda: fixed_now)
-    slack_runtime = _make_slack_runtime(settings)
-
-    symbols["deliver_claimed_target"](
-        slack_runtime,
-        claimed_target=claimed_target,
-        send_webhook=fake_send_webhook,
-    )
-
-    assert send_calls["count"] == 0
-    assert target_row.delivery_status == "dead_letter"
-    assert target_row.attempt_count == claimed_target.attempt_count
-    assert target_row.dead_lettered_at == fixed_now
-    assert target_row.sent_at is None
-    assert target_row.locked_at is None
-    assert target_row.locked_by is None
-    assert target_row.claim_token is None
-    assert target_row.next_attempt_at == original_next_attempt_at
-    assert "ticket_reference must be a non-empty string" in target_row.last_error
-
-
-def test_deliver_claimed_target_skips_dead_letter_update_when_ownership_is_lost(monkeypatch, tmp_path):
-    symbols = _load_symbols()
-    settings = _make_settings(tmp_path)
-    claimed_target = _make_claimed_target(symbols)
-    original_dead_lettered_at = datetime(2026, 4, 10, 13, 45, tzinfo=timezone.utc)
-    target_row = SimpleNamespace(
-        id=claimed_target.target_id,
-        delivery_status="dead_letter",
-        attempt_count=claimed_target.attempt_count + 1,
-        next_attempt_at=datetime(2026, 4, 10, 15, 0, tzinfo=timezone.utc),
-        locked_at=None,
-        locked_by=None,
-        claim_token=uuid.uuid4(),
-        last_error="terminal_http_status=302",
-        sent_at=None,
-        dead_lettered_at=original_dead_lettered_at,
-    )
-    fake_db = _TargetStateDb(target=target_row, owned=False)
-    observed = []
-
-    @contextmanager
-    def fake_session_scope(_settings):
-        yield fake_db
-
-    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
-    monkeypatch.setattr("worker.slack_delivery.log_worker_event", lambda event, **payload: observed.append((event, payload)))
-    slack_runtime = _make_slack_runtime(settings)
-
-    symbols["deliver_claimed_target"](
-        slack_runtime,
-        claimed_target=claimed_target,
-        send_webhook=lambda **_kwargs: 302,
-    )
-
-    assert target_row.delivery_status == "dead_letter"
-    assert target_row.attempt_count == claimed_target.attempt_count + 1
-    assert target_row.locked_by is None
-    assert target_row.last_error == "terminal_http_status=302"
-    assert target_row.dead_lettered_at == original_dead_lettered_at
-    assert observed == [
-        (
-            "slack_delivery_ownership_lost",
-            {
-                "level": "warning",
-                "event_id": str(claimed_target.event_id),
-                "target_id": str(claimed_target.target_id),
-                "target_name": claimed_target.target_name,
+                "recipient_user_id": str(claimed_target.recipient_user_id),
+                "recipient_reason": claimed_target.recipient_reason,
                 "claimed_attempt_count": claimed_target.attempt_count,
                 "claimed_locked_by": claimed_target.locked_by,
                 "claim_token": str(claimed_target.claim_token),
@@ -1004,7 +955,22 @@ def test_deliver_claimed_target_dead_letters_when_retry_budget_is_exhausted(monk
     symbols["deliver_claimed_target"](
         slack_runtime,
         claimed_target=claimed_target,
-        send_webhook=lambda **_kwargs: 500,
+        bot_token="xoxb-token",
+        load_recipient=lambda _settings, *, recipient_user_id: SimpleNamespace(
+            id=recipient_user_id,
+            is_active=True,
+            slack_user_id="U123",
+        ),
+        open_conversation=lambda **_kwargs: _make_web_api_response(
+            "conversations.open",
+            ok=True,
+            body_extra={"channel": {"id": "D123"}},
+        ),
+        post_message=lambda **_kwargs: _make_web_api_response(
+            "chat.postMessage",
+            http_status=500,
+            ok=False,
+        ),
     )
 
     assert target_row.delivery_status == "dead_letter"
@@ -1017,6 +983,8 @@ def test_deliver_claimed_target_dead_letters_when_retry_budget_is_exhausted(monk
             {
                 "event_id": str(claimed_target.event_id),
                 "target_name": claimed_target.target_name,
+                "recipient_user_id": str(claimed_target.recipient_user_id),
+                "recipient_reason": claimed_target.recipient_reason,
                 "delivery_status": "dead_letter",
                 "attempt_count": claimed_target.attempt_count,
                 "locked_by": claimed_target.locked_by,
@@ -1029,12 +997,13 @@ def test_deliver_claimed_target_dead_letters_when_retry_budget_is_exhausted(monk
     ]
 
 
-def test_run_delivery_cycle_logs_claim_with_claim_token_and_passes_runtime(monkeypatch, tmp_path):
+def test_run_delivery_cycle_uses_db_loaded_runtime_and_logs_claim_with_recipient_fields(monkeypatch, tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path)
     slack_runtime = _make_slack_runtime(settings)
     claimed_target = _make_claimed_target(symbols)
     observed = []
+    built_dbs = []
     recovered = []
     claimed = []
     delivered = []
@@ -1042,6 +1011,14 @@ def test_run_delivery_cycle_logs_claim_with_claim_token_and_passes_runtime(monke
     @contextmanager
     def fake_session_scope(_settings):
         yield SimpleNamespace()
+
+    def fake_build_runtime(_settings, *, db=None, slack=None):
+        built_dbs.append(db)
+        return slack_runtime
+
+    def fake_preflight(passed_runtime, *, auth_test=None):
+        assert passed_runtime is slack_runtime
+        return "xoxb-token", None
 
     def fake_recover_stale_delivery_targets(_db, *, slack_runtime):
         recovered.append(slack_runtime)
@@ -1051,26 +1028,32 @@ def test_run_delivery_cycle_logs_claim_with_claim_token_and_passes_runtime(monke
         claimed.append((slack_runtime, locked_by))
         return [claimed_target]
 
-    def fake_deliver_claimed_target(passed_runtime, *, claimed_target, send_webhook=None):
-        delivered.append((passed_runtime, claimed_target))
+    def fake_deliver_claimed_target(passed_runtime, *, claimed_target, bot_token, **_kwargs):
+        delivered.append((passed_runtime, claimed_target, bot_token))
+        return None
 
     monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.slack_delivery.build_worker_slack_runtime_context", fake_build_runtime)
+    monkeypatch.setattr("worker.slack_delivery.run_delivery_cycle_preflight", fake_preflight)
     monkeypatch.setattr("worker.slack_delivery.recover_stale_delivery_targets", fake_recover_stale_delivery_targets)
     monkeypatch.setattr("worker.slack_delivery.claim_delivery_targets", fake_claim_delivery_targets)
     monkeypatch.setattr("worker.slack_delivery.deliver_claimed_target", fake_deliver_claimed_target)
     monkeypatch.setattr("worker.slack_delivery.log_worker_event", lambda event, **payload: observed.append((event, payload)))
 
-    symbols["run_delivery_cycle"](slack_runtime, worker_instance_id="worker-test")
+    symbols["run_delivery_cycle"](settings, worker_instance_id="worker-test")
 
+    assert len(built_dbs) == 1
     assert recovered == [slack_runtime]
     assert claimed == [(slack_runtime, "worker-test")]
-    assert delivered == [(slack_runtime, claimed_target)]
+    assert delivered == [(slack_runtime, claimed_target, "xoxb-token")]
     assert observed == [
         (
             "slack_target_claimed",
             {
                 "event_id": str(claimed_target.event_id),
                 "target_name": claimed_target.target_name,
+                "recipient_user_id": str(claimed_target.recipient_user_id),
+                "recipient_reason": claimed_target.recipient_reason,
                 "delivery_status": "processing",
                 "attempt_count": claimed_target.attempt_count,
                 "locked_by": claimed_target.locked_by,
@@ -1080,31 +1063,34 @@ def test_run_delivery_cycle_logs_claim_with_claim_token_and_passes_runtime(monke
     ]
 
 
-def test_run_delivery_cycle_logs_invalid_config_suppression_without_row_state(monkeypatch, tmp_path):
+def test_run_delivery_cycle_suppresses_on_auth_test_invalid_config_and_persists_health(monkeypatch, tmp_path):
     symbols = _load_symbols()
-    settings = _make_settings(
-        tmp_path,
-        slack=_make_slack_settings(
-            is_valid=False,
-            config_error_code="slack_targets_json_parse_error",
-            config_error_summary="SLACK_TARGETS_JSON must be a valid JSON object",
-        ),
-    )
+    settings = _make_settings(tmp_path)
     observed = []
-    session_scope_calls = {"count": 0}
+    persisted = []
 
-    @contextmanager
-    def fake_session_scope(_settings):
-        session_scope_calls["count"] += 1
-        yield SimpleNamespace()
-
-    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        "worker.slack_delivery.slack_api_auth_test",
+        lambda **_kwargs: _make_web_api_response("auth.test", ok=False, error="invalid_auth"),
+    )
+    monkeypatch.setattr("worker.slack_delivery.persist_delivery_health_snapshot", lambda _runtime, *, snapshot: persisted.append(snapshot))
+    monkeypatch.setattr(
+        "worker.slack_delivery.recover_stale_delivery_targets",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stale recovery should be skipped")),
+    )
+    monkeypatch.setattr(
+        "worker.slack_delivery.claim_delivery_targets",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("claim should be skipped")),
+    )
     monkeypatch.setattr("worker.slack_delivery.log_worker_event", lambda event, **payload: observed.append((event, payload)))
     slack_runtime = _make_slack_runtime(settings)
 
     symbols["run_delivery_cycle"](slack_runtime, worker_instance_id="worker-test")
 
-    assert session_scope_calls["count"] == 0
+    assert len(persisted) == 1
+    assert persisted[0].status == "invalid_config"
+    assert persisted[0].error_code == "invalid_auth"
+    assert persisted[0].summary == "Slack auth.test returned invalid_auth"
     assert observed == [
         (
             "slack_delivery_suppressed",
@@ -1112,37 +1098,75 @@ def test_run_delivery_cycle_logs_invalid_config_suppression_without_row_state(mo
                 "suppression_reason": "invalid_config",
                 "claim_skipped": True,
                 "stale_lock_recovery_skipped": True,
-                "config_error_code": "slack_targets_json_parse_error",
-                "config_error_summary": "SLACK_TARGETS_JSON must be a valid JSON object",
+                "config_error_code": "invalid_auth",
+                "config_error_summary": "Slack auth.test returned invalid_auth",
             },
         )
     ]
-    assert "event_id" not in observed[0][1]
-    assert "target_name" not in observed[0][1]
-    assert "delivery_status" not in observed[0][1]
-    assert "attempt_count" not in observed[0][1]
-    assert "locked_by" not in observed[0][1]
 
 
 def test_run_delivery_cycle_skips_disabled_slack_without_mutating_rows(monkeypatch, tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings(enabled=False))
     observed = []
-    session_scope_calls = {"count": 0}
 
-    @contextmanager
-    def fake_session_scope(_settings):
-        session_scope_calls["count"] += 1
-        yield SimpleNamespace()
-
-    monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        "worker.slack_delivery.recover_stale_delivery_targets",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("disabled slack should skip row work")),
+    )
+    monkeypatch.setattr(
+        "worker.slack_delivery.claim_delivery_targets",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("disabled slack should skip row work")),
+    )
     monkeypatch.setattr("worker.slack_delivery.log_worker_event", lambda event, **payload: observed.append((event, payload)))
     slack_runtime = _make_slack_runtime(settings)
 
     symbols["run_delivery_cycle"](slack_runtime, worker_instance_id="worker-test")
 
-    assert session_scope_calls["count"] == 0
     assert observed == []
+
+
+def test_run_delivery_cycle_preflight_persists_healthy_snapshot_on_success(monkeypatch, tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path)
+    persisted = []
+    slack_runtime = _make_slack_runtime(settings)
+
+    monkeypatch.setattr(
+        "worker.slack_delivery.slack_api_auth_test",
+        lambda **_kwargs: _make_web_api_response(
+            "auth.test",
+            ok=True,
+            body_extra={"team_id": "T999", "team": "Workspace", "user_id": "B999"},
+        ),
+    )
+    monkeypatch.setattr("worker.slack_delivery.persist_delivery_health_snapshot", lambda _runtime, *, snapshot: persisted.append(snapshot))
+
+    bot_token, suppression = symbols["run_delivery_cycle_preflight"](slack_runtime)
+
+    assert suppression is None
+    assert bot_token == "xoxb-test-token"
+    assert len(persisted) == 1
+    assert persisted[0].status == "healthy"
+    assert persisted[0].team_id == "T999"
+    assert persisted[0].team_name == "Workspace"
+    assert persisted[0].bot_user_id == "B999"
+
+
+def test_run_delivery_cycle_preflight_allows_transport_errors_to_continue(monkeypatch, tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path)
+    slack_runtime = _make_slack_runtime(settings)
+
+    monkeypatch.setattr(
+        "worker.slack_delivery.slack_api_auth_test",
+        lambda **_kwargs: (_ for _ in ()).throw(httpx.ConnectError("boom")),
+    )
+
+    bot_token, suppression = symbols["run_delivery_cycle_preflight"](slack_runtime)
+
+    assert bot_token == "xoxb-test-token"
+    assert suppression is None
 
 
 def test_delivery_loop_runs_until_stop_event(monkeypatch, tmp_path):

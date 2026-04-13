@@ -24,7 +24,7 @@ On platforms where shared disks across two services are hard, run both in one se
    - `APP_BASE_URL` (use your Render URL, e.g. `https://autosac.onrender.com`)
    - `UI_DEFAULT_LOCALE=pt-BR` if you want Portuguese as the server-side fallback UI language
    - `CODEX_API_KEY` if the deployment will not already have authenticated Codex CLI access. In most cloud runtimes, set it.
-   - Keep `SLACK_ENABLED=false` for the initial Phase 1 rollout. Deploy the web request path and worker together from the same refactor-aware release, then enable `SLACK_TARGETS_JSON`, `SLACK_DEFAULT_TARGET_NAME`, and the `SLACK_NOTIFY_*` flags only after the migration is live and integration rows look correct in a non-production environment.
+   - Slack DM settings are DB-backed. After the first admin signs in, use `/ops/integrations/slack` to store the bot token and notify flags. Leave Slack disabled or disconnected there until the migration is live and both web and worker are on the same DM-capable release.
 5. Deploy.
 
 ## One-time bootstrap after first deploy
@@ -38,6 +38,11 @@ python scripts/create_admin.py --email admin@example.com --display-name "Admin" 
 ```
 
 Then restart the service.
+
+After the admin account exists, sign in and configure Slack only when you are ready to test it:
+
+- `/ops/integrations/slack` for the bot token, enablement, notify flags, and delivery tuning
+- `/ops/users` for user `slack_user_id` mappings
 
 ## Validation
 
@@ -60,11 +65,11 @@ bash scripts/start_all.sh
 
 Then set the same env vars from `.env.example`, plus persistent storage mounted to `/opt/triage`.
 
-Slack rollout posture is the same on Railway: start with `SLACK_ENABLED=false`, deploy the web request path and worker together from the same refactor-aware release, verify the new integration tables and rows first, then turn on one target and the desired notify flags gradually.
+Slack rollout posture is the same on Railway: deploy the web request path and worker together, verify the migration first, then enable Slack from `/ops/integrations/slack` only after an admin can also populate `/ops/users` Slack IDs.
 
-If the environment already contains pre-refactor Slack integration rows from earlier dry runs, clear that Slack-specific integration state before enabling Slack. Those rows are disposable pre-launch data and are not a compatibility target for the refactored delivery worker.
+If the environment already contains earlier dry-run Slack integration rows, treat that Slack-specific state as disposable pre-launch data before enabling Slack. Those rows are not a compatibility target for the DM delivery worker.
 
-Rollback posture is also config-first: set `SLACK_ENABLED=false` to stop delivery without deleting the integration tables or mutating stored event state. Turning Slack back on later still does not backfill old ticket activity; only new events emitted after re-enable can create fresh target rows.
+Rollback posture is also config-first: disable Slack or disconnect the bot token on `/ops/integrations/slack` without deleting the integration tables or mutating stored event state. Turning Slack back on later still does not backfill old ticket activity; only new events emitted after re-enable can create fresh target rows.
 
 ## If you want me to do the actual cloud deploy for you
 
