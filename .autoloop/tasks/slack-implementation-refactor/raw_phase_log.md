@@ -2214,3 +2214,47 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=test | phase=producer | cycle=1 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/test_producer.md
+session_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=test | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d8732-a3ab-7c50-992f-ae79ad3df083
+---
+I’m checking the test-phase artifacts and the current Slack delivery regressions first. Then I’ll decide whether the repo tests need one more edge-case addition or only the behavior-to-test mapping and test feedback updates.
+
+The existing cycle tests cover immediate `missing_scope` and stale-recovery skip, but they don’t yet pin the mixed batch case where one target finalizes successfully before a later target hits `missing_scope`. I’m adding that edge-case regression now, then I’ll update the test strategy and test feedback to map the covered behaviors explicitly.
+
+I’ve added the mixed-batch regression. Next I’m documenting the behavior-to-test mapping in the phase strategy, recording the added coverage in test feedback, and then I’ll run the targeted suite to confirm the new case passes cleanly.
+
+The strategy and feedback artifacts are updated. I’m running the targeted suite now to verify the new mixed-batch regression passes and to keep the phase notes grounded in an actual green test run.
+
+Scope considered
+- Test-phase coverage for the `worker-dm-delivery-and-regression` slice only: Slack worker orchestration, regression tests, and the phase-local test artifacts.
+
+What I analyzed
+- The current send-time invalid-config orchestration in [worker/slack_delivery.py](/home/marcelo/code/AutoSac/worker/slack_delivery.py).
+- Existing Slack delivery regressions in [tests/test_slack_delivery.py](/home/marcelo/code/AutoSac/tests/test_slack_delivery.py).
+- The empty phase artifacts in [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/worker-dm-delivery-and-regression/test_strategy.md) and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/worker-dm-delivery-and-regression/feedback.md).
+- The latest shared decisions in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt).
+
+What I changed
+- Added a new cycle-level regression in [tests/test_slack_delivery.py](/home/marcelo/code/AutoSac/tests/test_slack_delivery.py) for the mixed batch case where one DM send succeeds and a later claimed target hits `missing_scope`; it asserts the earlier row stays finalized, the later row is restored, and stale-lock recovery remains skipped.
+- Filled in [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/worker-dm-delivery-and-regression/test_strategy.md) with an explicit behavior-to-test map, preserved invariants, edge cases, flake controls, and known gaps.
+- Appended a concise summary to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/worker-dm-delivery-and-regression/feedback.md).
+- Appended one test-specific decision under the latest turn header in [decisions.txt](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/decisions.txt).
+
+Key findings / decisions
+- The non-obvious edge case worth pinning was the mixed batch path: earlier successful sends in the same cycle must remain finalized even if a later claimed target discovers send-time global invalid-config.
+- The new regression also guards the stale-lock ordering decision so future worker refactors do not reintroduce row mutation during an affected invalid-config cycle.
+
+Open issues / next step
+- Targeted validation passed: `pytest tests/test_slack_delivery.py tests/test_hardening_validation.py tests/test_ai_worker.py -q` with `88 passed in 12.13s`.
+- No additional test-phase gaps were opened beyond the documented known gaps in `test_strategy.md`.
