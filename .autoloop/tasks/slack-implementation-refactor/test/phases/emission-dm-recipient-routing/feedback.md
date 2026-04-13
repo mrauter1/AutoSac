@@ -8,3 +8,4 @@
 - Scope: phase-local authoritative verifier artifact
 
 - Added focused regression coverage in `tests/test_slack_event_emission.py` for inactive-recipient eligibility, fresh created-event logging with `recipient_target_count`, and duplicate reuse after later Slack enablement.
+- No audit findings for this pass.
