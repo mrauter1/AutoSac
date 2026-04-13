@@ -1757,3 +1757,63 @@ Open issues / next step
 <loop-control>
 {"schema":"docloop.loop_control/v1","kind":"promise","promise":"COMPLETE"}
 </loop-control>
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=session_turn | pair=test | phase=producer | cycle=1 | attempt=1 | thread_id=019d7930-97a6-7b51-9e7c-ef957ac17320
+---
+provider=codex
+mode=resume
+template=/home/marcelo/code/autoloop/src/autoloop/templates/test_producer.md
+session_id=019d7930-97a6-7b51-9e7c-ef957ac17320
+
+
+---
+run_id=run-20260410T195822Z-068ccbe4 | entry=phase_output | pair=test | phase=producer | process=codex-agent | cycle=1 | attempt=1 | thread_id=019d7930-97a6-7b51-9e7c-ef957ac17320
+---
+I’m auditing the emission-time DM routing tests against the implemented behavior and the phase contract. First I’m reading the phase test artifacts, the current Slack emission tests, and adjacent routing coverage to see what is still missing before I edit anything.
+
+The implementation already has broad DM routing coverage, but I want to close the remaining regression gaps that are explicitly named in the phase contract: later Slack config changes and recipient ineligibility beyond the blank-ID case. I’m checking for existing adjacent coverage so I only add the tests that still matter.
+
+I found three meaningful gaps worth closing: no explicit coverage for inactive-user ineligibility, no duplicate-reuse test for later Slack enablement, and no fresh-created logging assertion for `recipient_target_count` without `target_name`. I’m adding only those tests plus the phase test artifacts so this stays inside the requested scope.
+
+I’m editing the emission test file now. The additions are narrowly targeted: one logging assertion for fresh created DM events, one inactive-recipient eligibility check, and one no-backfill duplicate test for later Slack enablement.
+
+I’ve added the missing regression tests. Next I’m running the focused Slack emission suite plus adjacent foundation coverage to make sure the new cases are stable and the test harness still matches the current runtime shape.
+
+The focused suite is still running, but it’s already past the new emission cases. While that finishes, I’m updating the phase test artifacts so the coverage map explicitly calls out the new config-change and inactive-recipient cases.
+
+The new coverage is green. I’m doing one last status check so the closeout can clearly state the exact test files and phase artifacts touched, separate from the unrelated existing worktree changes.
+
+Scope considered
+
+- Focused on phase-local test coverage for emission-time DM routing in [tests/test_slack_event_emission.py](/home/marcelo/code/AutoSac/tests/test_slack_event_emission.py).
+- Updated the phase artifacts [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/emission-dm-recipient-routing/test_strategy.md) and [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/emission-dm-recipient-routing/feedback.md).
+- Left unrelated dirty files such as `README.md` and `tasks/slack_dm_integration_PRD.md` untouched.
+
+What I analyzed
+
+- Existing emission coverage for requester/assignee routing, recipient collapse, no-recipient suppression, duplicate reuse, and logging.
+- Remaining gaps against the phase contract: inactive-user eligibility, duplicate reuse after later Slack enablement, and fresh created-event logging for `recipient_target_count`.
+
+What I changed
+
+- Added focused regression tests in [tests/test_slack_event_emission.py](/home/marcelo/code/AutoSac/tests/test_slack_event_emission.py) for:
+  - inactive requester exclusion while an active assignee still receives the DM target
+  - fresh created-event logging with `recipient_target_count` and no webhook-era `target_name`
+  - duplicate reuse staying read-only after Slack is enabled later
+- Updated [test_strategy.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/emission-dm-recipient-routing/test_strategy.md) with a behavior-to-coverage map, invariants, edge cases, regression paths, and known gaps.
+- Appended a concise summary entry to [feedback.md](/home/marcelo/code/AutoSac/.autoloop/tasks/slack-implementation-refactor/test/phases/emission-dm-recipient-routing/feedback.md).
+
+Key findings / decisions
+
+- Kept the new tests deterministic by reusing the in-memory fake session and explicit log capture already used by the phase suite.
+- Did not add a new entry to `decisions.txt`; the existing shared decisions were sufficient for this test pass.
+
+Open issues / next step
+
+- Validation passed:
+  - `python3 -m pytest tests/test_slack_event_emission.py tests/test_slack_dm_foundation.py tests/test_foundation_persistence.py -q`
+  - `python3 -m compileall tests`
+- Result: `73 passed, 8 skipped`.
+- Worker send-time recipient lookup and Slack Web API transport remain intentionally out of scope for this phase.
