@@ -1209,9 +1209,18 @@ def test_run_delivery_cycle_restores_unfinalized_claims_when_send_hits_missing_s
         first_claimed.target_id: first_row,
         second_claimed.target_id: second_row,
     }
+    stale_target = SimpleNamespace(
+        delivery_status="processing",
+        locked_at=datetime(2026, 4, 10, 13, 0, tzinfo=timezone.utc),
+        locked_by="worker-old",
+        claim_token=uuid.uuid4(),
+        last_error="old-stale-lock",
+        next_attempt_at=datetime(2026, 4, 10, 13, 0, tzinfo=timezone.utc),
+    )
     observed = []
     persisted = []
     open_calls = []
+    recovered = []
 
     @contextmanager
     def fake_session_scope(_settings):
@@ -1224,9 +1233,15 @@ def test_run_delivery_cycle_restores_unfinalized_claims_when_send_hits_missing_s
         return row
 
     monkeypatch.setattr("worker.slack_delivery.session_scope", fake_session_scope)
+
+    def fake_recover_stale_delivery_targets(_db, *, slack_runtime):
+        recovered.append(slack_runtime)
+        stale_target.delivery_status = "failed"
+        return [stale_target]
+
     monkeypatch.setattr(
         "worker.slack_delivery.recover_stale_delivery_targets",
-        lambda *_args, **_kwargs: [],
+        fake_recover_stale_delivery_targets,
     )
     monkeypatch.setattr(
         "worker.slack_delivery.claim_delivery_targets",
@@ -1264,9 +1279,11 @@ def test_run_delivery_cycle_restores_unfinalized_claims_when_send_hits_missing_s
     symbols["run_delivery_cycle"](slack_runtime, worker_instance_id="worker-test")
 
     assert len(open_calls) == 1
+    assert recovered == []
     assert [snapshot.status for snapshot in persisted] == ["healthy", "invalid_config"]
     assert persisted[1].error_code == "missing_scope"
     assert persisted[1].summary == "Slack conversations.open returned missing_scope"
+    assert stale_target.delivery_status == "processing"
     assert first_row.delivery_status == "pending"
     assert first_row.attempt_count == 0
     assert first_row.locked_at is None
@@ -1297,7 +1314,7 @@ def test_run_delivery_cycle_restores_unfinalized_claims_when_send_hits_missing_s
             {
                 "suppression_reason": "invalid_config",
                 "claim_skipped": False,
-                "stale_lock_recovery_skipped": False,
+                "stale_lock_recovery_skipped": True,
                 "delivery_halted": True,
                 "config_error_code": "missing_scope",
                 "config_error_summary": "Slack conversations.open returned missing_scope",

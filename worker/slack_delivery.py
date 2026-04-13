@@ -463,7 +463,7 @@ def classify_delivery_attempt(
     invalid_config_suppression = _build_invalid_config_suppression_from_response(
         open_response,
         claim_skipped=False,
-        stale_lock_recovery_skipped=False,
+        stale_lock_recovery_skipped=True,
         delivery_halted=True,
     )
     if invalid_config_suppression is not None:
@@ -515,7 +515,7 @@ def classify_delivery_attempt(
     invalid_config_suppression = _build_invalid_config_suppression_from_response(
         post_response,
         claim_skipped=False,
-        stale_lock_recovery_skipped=False,
+        stale_lock_recovery_skipped=True,
         delivery_halted=True,
     )
     if invalid_config_suppression is not None:
@@ -632,9 +632,6 @@ def _run_delivery_cycle_with_runtime(slack_runtime: SlackRuntimeContext, *, work
         return
 
     with session_scope(slack_runtime.settings) as db:
-        recover_stale_delivery_targets(db, slack_runtime=slack_runtime)
-
-    with session_scope(slack_runtime.settings) as db:
         claimed_targets = claim_delivery_targets(
             db,
             slack_runtime=slack_runtime,
@@ -671,6 +668,9 @@ def _run_delivery_cycle_with_runtime(slack_runtime: SlackRuntimeContext, *, work
         )
         _log_delivery_suppression(slack_runtime, delivery_suppression)
         return
+
+    with session_scope(slack_runtime.settings) as db:
+        recover_stale_delivery_targets(db, slack_runtime=slack_runtime)
 
 
 def run_delivery_cycle(slack_runtime: SlackRuntimeContext | Settings, *, worker_instance_id: str) -> None:
