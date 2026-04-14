@@ -61,10 +61,7 @@ class MissingSlackUserCandidate:
 
 
 def load_slack_user_sync_state(db: Session) -> SlackUserSyncSnapshot | None:
-    getter = getattr(db, "get", None)
-    if not callable(getter):
-        return None
-    state = getter(SystemState, SLACK_DM_USER_SYNC_STATE_KEY)
+    state = _get_slack_user_sync_state_row(db)
     if state is None or not isinstance(state.value_json, dict):
         return None
     payload = state.value_json
@@ -90,8 +87,7 @@ def persist_slack_user_sync_state(
     snapshot: SlackUserSyncSnapshot,
     updated_at=None,
 ) -> SystemState:
-    getter = getattr(db, "get", None)
-    state = getter(SystemState, SLACK_DM_USER_SYNC_STATE_KEY) if callable(getter) else None
+    state = _get_slack_user_sync_state_row(db)
     existing_payload = state.value_json if state is not None and isinstance(state.value_json, dict) else {}
     request_pending = bool(existing_payload.get("request_pending"))
     resolved_updated_at = updated_at or utc_now()
@@ -124,8 +120,7 @@ def request_slack_user_sync(
     requested_by_user_id: uuid.UUID | None = None,
     updated_at=None,
 ) -> SystemState:
-    getter = getattr(db, "get", None)
-    state = getter(SystemState, SLACK_DM_USER_SYNC_STATE_KEY) if callable(getter) else None
+    state = _get_slack_user_sync_state_row(db)
     resolved_updated_at = updated_at or utc_now()
     payload = dict(state.value_json) if state is not None and isinstance(state.value_json, dict) else {}
     payload["request_pending"] = True
@@ -436,6 +431,18 @@ class SlackUserSyncRequestError(RuntimeError):
         super().__init__(summary)
         self.error_code = error_code
         self.summary = summary
+
+
+def _get_slack_user_sync_state_row(db: Session) -> SystemState | None:
+    pending = getattr(db, "new", None)
+    if pending is not None:
+        for candidate in pending:
+            if isinstance(candidate, SystemState) and candidate.key == SLACK_DM_USER_SYNC_STATE_KEY:
+                return candidate
+    getter = getattr(db, "get", None)
+    if not callable(getter):
+        return None
+    return getter(SystemState, SLACK_DM_USER_SYNC_STATE_KEY)
 
 
 def _snapshot_payload(snapshot: SlackUserSyncSnapshot) -> dict[str, Any]:

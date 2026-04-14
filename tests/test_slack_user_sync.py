@@ -26,6 +26,20 @@ class _FakeStateDb:
             self.objects[(type(item).__name__, key)] = item
 
 
+class _PendingOnlyStateDb:
+    def __init__(self):
+        self.objects: dict[tuple[str, str], object] = {}
+        self.added: list[object] = []
+        self.new: list[object] = []
+
+    def get(self, model, key):
+        return self.objects.get((getattr(model, "__name__", ""), key))
+
+    def add(self, item):
+        self.added.append(item)
+        self.new.append(item)
+
+
 def _make_settings(tmp_path: Path, *, slack: SlackSettings | None = None) -> Settings:
     workspace_dir = tmp_path / "workspace"
     workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -92,6 +106,28 @@ def test_request_and_persist_slack_user_sync_state_round_trip(tmp_path):
     assert loaded.status == "requested"
     assert loaded.checked_at == "2026-04-13T12:00:00+00:00"
     assert loaded.updated_count == 2
+
+
+def test_request_slack_user_sync_reuses_pending_state_row():
+    pytest.importorskip("sqlalchemy")
+
+    from shared.slack_user_sync import request_slack_user_sync
+    from shared.models import SystemState
+
+    db = _PendingOnlyStateDb()
+    pending_state = SystemState(
+        key="slack_dm_user_sync",
+        value_json={"status": "unknown", "request_pending": False},
+    )
+    db.add(pending_state)
+
+    updated_state = request_slack_user_sync(db, trigger="worker_started")
+
+    assert updated_state is pending_state
+    assert len(db.added) == 1
+    assert pending_state.value_json["status"] == "requested"
+    assert pending_state.value_json["request_pending"] is True
+    assert pending_state.value_json["trigger"] == "worker_started"
 
 
 def test_fetch_slack_directory_members_by_email_skips_deleted_and_marks_ambiguous(monkeypatch):
