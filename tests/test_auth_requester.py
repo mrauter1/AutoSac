@@ -525,6 +525,7 @@ def test_ops_user_management_routes_and_role_limits_are_present():
     assert 'auth.test' in slack_template_source
     assert 'conversations.open' in slack_template_source
     assert 'chat.postMessage' in slack_template_source
+    assert 'users.list' in slack_template_source
     assert "/ops/users" in base_template_source
     assert "/ops/integrations/slack" in base_template_source
 

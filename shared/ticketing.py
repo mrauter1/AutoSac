@@ -20,9 +20,15 @@ from shared.integrations import (
 )
 from shared.models import AIDraft, AIRun, SystemState, Ticket, TicketAttachment, TicketMessage, TicketStatusHistory, TicketView, TICKET_STATUSES, User
 from shared.slack_dm import SLACK_DM_DELIVERY_HEALTH_STATE_KEY
+from shared.slack_user_sync import SLACK_DM_USER_SYNC_STATE_KEY
 from shared.security import utc_now
 
-SYSTEM_STATE_KEYS = ("worker_heartbeat", "bootstrap_version", SLACK_DM_DELIVERY_HEALTH_STATE_KEY)
+SYSTEM_STATE_KEYS = (
+    "worker_heartbeat",
+    "bootstrap_version",
+    SLACK_DM_DELIVERY_HEALTH_STATE_KEY,
+    SLACK_DM_USER_SYNC_STATE_KEY,
+)
 _STATUS_SENTINEL = object()
 
 
@@ -192,6 +198,8 @@ def ensure_system_state_defaults(db: Session, bootstrap_version: str) -> None:
         db.add(SystemState(key="worker_heartbeat", value_json={"status": "unknown"}, updated_at=now))
     if SLACK_DM_DELIVERY_HEALTH_STATE_KEY not in existing_keys:
         db.add(SystemState(key=SLACK_DM_DELIVERY_HEALTH_STATE_KEY, value_json={"status": "unknown"}, updated_at=now))
+    if SLACK_DM_USER_SYNC_STATE_KEY not in existing_keys:
+        db.add(SystemState(key=SLACK_DM_USER_SYNC_STATE_KEY, value_json={"status": "unknown", "request_pending": False}, updated_at=now))
     bootstrap_state = db.get(SystemState, "bootstrap_version") if "bootstrap_version" in existing_keys else None
     if bootstrap_state is None:
         db.add(SystemState(key="bootstrap_version", value_json={"version": bootstrap_version}, updated_at=now))

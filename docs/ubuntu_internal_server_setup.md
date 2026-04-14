@@ -179,6 +179,7 @@ Slack DM rollout note:
 
 - Slack DM settings are DB-backed, not `.env`-backed.
 - After you can sign in as the admin, use `/ops/integrations/slack` to store the bot token and enable delivery, and use `/ops/users` to set `slack_user_id` mappings.
+- If you want AutoSac to backfill missing Slack IDs automatically by exact email match, the stored bot token also needs `users:read` and `users:read.email`.
 - Keep Slack disabled or disconnected there until both web and worker are running the same DM-capable build.
 - Enabling Slack later does not backfill historical ticket activity.
 

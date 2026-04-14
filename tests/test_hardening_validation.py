@@ -284,6 +284,8 @@ def test_env_example_and_readme_capture_acceptance_contract():
     assert "/ops/integrations/slack" in readme_source
     assert "/ops/users" in readme_source
     assert "chat.postMessage" in readme_source
+    assert "users.list" in readme_source
+    assert "users:read.email" in readme_source
     assert "no authoritative `SLACK_*` runtime env vars" in readme_source
 
 
@@ -303,6 +305,7 @@ def test_slack_docs_capture_phase1_rollout_posture():
     assert "does not backfill historical ticket activity" in readme_source
     assert "/ops/integrations/slack" in deployment_source
     assert "/ops/users" in deployment_source
+    assert "users:read.email" in deployment_source
     assert "DM-capable release" in deployment_source
     assert "disposable pre-launch data" in deployment_source
     assert "does not backfill old ticket activity" in deployment_source

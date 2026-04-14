@@ -14,9 +14,12 @@ from shared.logging import log_worker_event
 from shared.contracts import WORKSPACE_BOOTSTRAP_VERSION
 from shared.models import AIRun, SystemState
 from shared.security import utc_now
+from shared.slack_dm import load_slack_dm_settings
+from shared.slack_user_sync import request_slack_user_sync
 from shared.ticketing import ensure_system_state_defaults
 from worker.queue import claim_oldest_pending_run, recover_stale_runs
 from worker.slack_delivery import delivery_loop as slack_delivery_loop
+from worker.slack_user_sync import slack_user_sync_loop
 from worker.triage import process_ai_run
 
 
@@ -170,6 +173,24 @@ def start_slack_delivery_thread(
     return thread
 
 
+def start_slack_user_sync_thread(
+    settings,
+    *,
+    worker_identity: WorkerIdentity,
+) -> threading.Thread:
+    thread = threading.Thread(
+        target=slack_user_sync_loop,
+        kwargs={
+            "settings": settings,
+            "worker_instance_id": worker_identity.worker_instance_id,
+        },
+        name="worker-slack-user-sync",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def build_worker_identity() -> WorkerIdentity:
     return WorkerIdentity(worker_pid=os.getpid(), worker_instance_id=f"worker-{uuid.uuid4()}")
 
@@ -180,6 +201,8 @@ def main() -> None:
     active_run_tracker = ActiveRunTracker()
     with session_scope(settings) as db:
         ensure_worker_system_state(db)
+        if load_slack_dm_settings(db, app_settings=settings).has_stored_token:
+            request_slack_user_sync(db, trigger="worker_started")
     log_worker_event(
         "worker_started",
         poll_seconds=settings.worker_poll_seconds,
@@ -190,6 +213,10 @@ def main() -> None:
         settings,
         worker_identity=worker_identity,
         active_run_tracker=active_run_tracker,
+    )
+    start_slack_user_sync_thread(
+        settings,
+        worker_identity=worker_identity,
     )
     start_slack_delivery_thread(
         settings,

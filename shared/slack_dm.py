@@ -411,6 +411,24 @@ def slack_api_chat_post_message(
     )
 
 
+def slack_api_users_list(
+    *,
+    bot_token: str,
+    timeout_seconds: int,
+    limit: int,
+    cursor: str | None = None,
+) -> SlackWebApiResponse:
+    payload: dict[str, Any] = {"limit": limit}
+    if cursor is not None and cursor.strip():
+        payload["cursor"] = cursor.strip()
+    return _call_slack_web_api(
+        method="users.list",
+        bot_token=bot_token,
+        payload=payload,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def parse_slack_auth_test_result(response: SlackWebApiResponse) -> SlackAuthTestResult:
     if not response.ok or not isinstance(response.body_json, dict):
         raise SlackDMSettingsError("Slack auth.test did not succeed")

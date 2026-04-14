@@ -173,7 +173,8 @@ Admin workflow:
 
 - Configure enablement, the bot token, notify flags, and delivery tuning at `/ops/integrations/slack`.
 - Set per-user `slack_user_id` mappings from `/ops/users`.
-- The worker validates credentials with `auth.test`, opens DMs with `conversations.open`, and sends message text with `chat.postMessage`.
+- The worker validates credentials with `auth.test`, opens DMs with `conversations.open`, sends message text with `chat.postMessage`, and can backfill missing `slack_user_id` values by exact email match with `users.list`.
+- Automatic Slack ID backfill requires the bot token to also have `users:read` and `users:read.email`.
 
 Operational notes:
 
@@ -195,7 +196,7 @@ The original webhook PRD remains the payload-snapshot reference in `tasks/slack_
 - Deploy the web request path and worker together as the same DM-capable build before enabling Slack; mixed-version Slack delivery compatibility is not supported for this pre-launch rollout.
 - Slack rollback is config-first: disable delivery or disconnect the bot token from `/ops/integrations/slack` while preserving the stored integration rows for later inspection or re-enable.
 - `APP_SECRET_KEY` participates in Slack only for bot-token encryption and decryption. There are no authoritative `SLACK_*` runtime env vars.
-- Admins manage per-user Slack IDs from `/ops/users`.
+- Admins manage per-user Slack IDs from `/ops/users`, and the worker also attempts to fill missing IDs automatically by exact email match whenever a stored token is saved or the worker starts.
 - If a pre-launch environment still has earlier dry-run Slack integration rows, treat that Slack-specific state as disposable pre-launch data before enabling Slack.
 - Re-enabling Slack later does not backfill historical ticket activity; only newly emitted events can create new target rows.
 - Undecryptable stored Slack tokens surface as invalid config until an admin saves a new token.

@@ -1004,6 +1004,20 @@ def test_admin_slack_integration_page_shows_metadata_and_guidance(monkeypatch):
             summary="Slack auth.test returned invalid_auth",
         ),
     )
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "load_slack_user_sync_state",
+        lambda db: SimpleNamespace(
+            status="succeeded",
+            checked_at="2026-04-10T20:18:00Z",
+            error_code=None,
+            summary="Matched 2 user(s) by email, updated 2, left 1 unmatched, and skipped 0 conflict(s).",
+            matched_count=2,
+            updated_count=2,
+            no_match_count=1,
+            conflict_count=0,
+        ),
+    )
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["auth"].get_current_user] = lambda: admin_user
@@ -1022,6 +1036,8 @@ def test_admin_slack_integration_page_shows_metadata_and_guidance(monkeypatch):
     assert "auth.test" in response.text
     assert "conversations.open" in response.text
     assert "chat.postMessage" in response.text
+    assert "users.list" in response.text
+    assert "Matched 2 user(s) by email, updated 2, left 1 unmatched, and skipped 0 conflict(s)." in response.text
     assert 'name="bot_token"' in response.text
     assert db.commit_calls == 1
 
@@ -1060,6 +1076,18 @@ def test_admin_slack_integration_save_with_new_token_calls_auth_test_and_persist
 
     monkeypatch.setattr(stack["routes_ops"], "slack_api_auth_test", fake_auth_test)
     monkeypatch.setattr(stack["routes_ops"], "upsert_slack_dm_settings", fake_upsert)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "request_slack_user_sync",
+        lambda db, *, trigger, requested_by_user_id=None, updated_at=None: observed.update(
+            {
+                "sync_request": {
+                    "trigger": trigger,
+                    "requested_by_user_id": requested_by_user_id,
+                }
+            }
+        ),
+    )
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["auth"].get_current_user] = lambda: admin_user
@@ -1092,6 +1120,7 @@ def test_admin_slack_integration_save_with_new_token_calls_auth_test_and_persist
     assert observed["upsert"]["values"].enabled is True
     assert observed["upsert"]["auth_result"].team_id == "T123"
     assert observed["upsert"]["updated_by_user_id"] == admin_user.id
+    assert observed["sync_request"] == {"trigger": "settings_saved", "requested_by_user_id": admin_user.id}
     assert db.commit_calls == 1
     assert db.rollback_calls == 0
 
@@ -1127,6 +1156,18 @@ def test_admin_slack_integration_save_preserves_existing_token_on_blank_input(mo
             }
         ),
     )
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "request_slack_user_sync",
+        lambda db, *, trigger, requested_by_user_id=None, updated_at=None: observed.update(
+            {
+                "sync_request": {
+                    "trigger": trigger,
+                    "requested_by_user_id": requested_by_user_id,
+                }
+            }
+        ),
+    )
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["auth"].get_current_user] = lambda: admin_user
@@ -1158,6 +1199,7 @@ def test_admin_slack_integration_save_preserves_existing_token_on_blank_input(mo
     assert observed["values"].bot_token is None
     assert observed["auth_result"] is None
     assert observed["updated_by_user_id"] == admin_user.id
+    assert observed["sync_request"] == {"trigger": "settings_saved", "requested_by_user_id": admin_user.id}
     assert db.commit_calls == 1
     assert db.rollback_calls == 0
 
@@ -1442,6 +1484,111 @@ def test_ops_user_creation_validation_error_keeps_users_page_context(monkeypatch
     assert db.rollback_calls == 1
 
 
+def test_admin_user_creation_without_slack_id_requests_sync_when_slack_is_configured(monkeypatch):
+    from shared.config import SlackSettings
+
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    db.info = {"settings": _make_settings()}
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name="ADMIN", role="admin", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    observed = {}
+
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "create_user",
+        lambda db, **kwargs: SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "load_slack_dm_settings",
+        lambda db, app_settings: SlackSettings(has_stored_token=True, routing_mode="dm"),
+    )
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "request_slack_user_sync",
+        lambda db, *, trigger, requested_by_user_id=None, updated_at=None: observed.update(
+            {"trigger": trigger, "requested_by_user_id": requested_by_user_id}
+        ),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            "/ops/users/create",
+            data={
+                "csrf_token": "csrf-token",
+                "email": "new.user@example.com",
+                "display_name": "New User",
+                "password": "supersecret",
+                "role": "requester",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert observed == {"trigger": "user_created", "requested_by_user_id": current_user.id}
+    assert db.commit_calls == 1
+    assert db.rollback_calls == 0
+
+
+def test_admin_user_creation_with_blank_slack_id_requests_sync_when_slack_is_configured(monkeypatch):
+    from shared.config import SlackSettings
+
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    db.info = {"settings": _make_settings()}
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name="ADMIN", role="admin", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    observed = {}
+
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "create_user",
+        lambda db, **kwargs: SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "load_slack_dm_settings",
+        lambda db, app_settings: SlackSettings(has_stored_token=True, routing_mode="dm"),
+    )
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "request_slack_user_sync",
+        lambda db, *, trigger, requested_by_user_id=None, updated_at=None: observed.update(
+            {"trigger": trigger, "requested_by_user_id": requested_by_user_id}
+        ),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            "/ops/users/create",
+            data={
+                "csrf_token": "csrf-token",
+                "email": "new.user@example.com",
+                "display_name": "New User",
+                "password": "supersecret",
+                "role": "requester",
+                "slack_user_id": "",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert observed == {"trigger": "user_created", "requested_by_user_id": current_user.id}
+    assert db.commit_calls == 1
+    assert db.rollback_calls == 0
+
+
 @pytest.mark.parametrize(
     ("actor_role", "target_role", "requested_role", "expected_status"),
     [
@@ -1570,6 +1717,139 @@ def test_ops_user_update_validation_error_keeps_users_page_context(monkeypatch):
     assert f'action="/ops/users/{target_user.id}/update"' in response.text
     assert db.commit_calls == 0
     assert db.rollback_calls == 1
+
+
+def test_admin_user_update_without_slack_id_requests_sync_when_slack_is_configured(monkeypatch):
+    from shared.config import SlackSettings
+
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    db.info = {"settings": _make_settings()}
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name="ADMIN", role="admin", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    target_user = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="existing@example.com",
+        display_name="Existing User",
+        role="requester",
+        slack_user_id=None,
+        is_active=True,
+    )
+    observed = {}
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_user_or_404", lambda db, user_id: target_user)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "update_user",
+        lambda db, *, user, display_name, role, slack_user_id, password=None: SimpleNamespace(
+            user=user,
+            display_name=display_name,
+            role=role,
+            slack_user_id=slack_user_id,
+            password=password,
+        ),
+    )
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "load_slack_dm_settings",
+        lambda db, app_settings: SlackSettings(has_stored_token=True, routing_mode="dm"),
+    )
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "request_slack_user_sync",
+        lambda db, *, trigger, requested_by_user_id=None, updated_at=None: observed.update(
+            {"trigger": trigger, "requested_by_user_id": requested_by_user_id}
+        ),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            f"/ops/users/{target_user.id}/update",
+            data={
+                "csrf_token": "csrf-token",
+                "display_name": "Updated User",
+                "password": "",
+                "role": "requester",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert observed == {"trigger": "user_updated", "requested_by_user_id": current_user.id}
+    assert db.commit_calls == 1
+    assert db.rollback_calls == 0
+
+
+def test_admin_user_update_with_blank_slack_id_requests_sync_when_slack_is_configured(monkeypatch):
+    from shared.config import SlackSettings
+
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    db.info = {"settings": _make_settings()}
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name="ADMIN", role="admin", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    target_user = SimpleNamespace(
+        id=uuid.uuid4(),
+        email="existing@example.com",
+        display_name="Existing User",
+        role="requester",
+        slack_user_id="UEXISTING",
+        is_active=True,
+    )
+    observed = {}
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_user_or_404", lambda db, user_id: target_user)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "update_user",
+        lambda db, *, user, display_name, role, slack_user_id, password=None: SimpleNamespace(
+            user=user,
+            display_name=display_name,
+            role=role,
+            slack_user_id=slack_user_id,
+            password=password,
+        ),
+    )
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "load_slack_dm_settings",
+        lambda db, app_settings: SlackSettings(has_stored_token=True, routing_mode="dm"),
+    )
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "request_slack_user_sync",
+        lambda db, *, trigger, requested_by_user_id=None, updated_at=None: observed.update(
+            {"trigger": trigger, "requested_by_user_id": requested_by_user_id}
+        ),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.post(
+            f"/ops/users/{target_user.id}/update",
+            data={
+                "csrf_token": "csrf-token",
+                "display_name": "Updated User",
+                "password": "",
+                "role": "requester",
+                "slack_user_id": "",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 303
+    assert observed == {"trigger": "user_updated", "requested_by_user_id": current_user.id}
+    assert db.commit_calls == 1
+    assert db.rollback_calls == 0
 
 
 def test_dev_ti_cannot_submit_slack_user_id_on_user_update(monkeypatch):

@@ -41,6 +41,7 @@ from shared.slack_dm import (
     upsert_slack_dm_settings,
     validate_slack_dm_settings_input,
 )
+from shared.slack_user_sync import load_slack_user_sync_state, request_slack_user_sync
 from shared.user_admin import create_user, set_user_active_state, update_user
 from shared.ticketing import (
     add_ops_internal_note,
@@ -422,6 +423,7 @@ def _slack_integration_page_extra(
         "slack_settings": slack_settings,
         "slack_form": _build_slack_form_values(slack_settings=slack_settings, overrides=form_values),
         "slack_delivery_health": load_slack_delivery_health(db),
+        "slack_user_sync_state": load_slack_user_sync_state(db),
         "slack_updated_by_user": updated_by_user,
         "can_manage_slack_settings": is_admin_user(current_user),
     }
@@ -474,6 +476,32 @@ def _resolve_requested_slack_user_id(
     if submitted_value is not None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_value
+
+
+def _request_slack_user_sync_if_session_configured(
+    db: Session,
+    *,
+    trigger: str,
+    requested_by_user_id,
+) -> None:
+    session_info = getattr(db, "info", None)
+    if not isinstance(session_info, dict):
+        return
+    app_settings = session_info.get("settings")
+    if not isinstance(app_settings, Settings):
+        return
+    slack_settings = load_slack_dm_settings(db, app_settings=app_settings)
+    if not slack_settings.has_stored_token:
+        return
+    request_slack_user_sync(
+        db,
+        trigger=trigger,
+        requested_by_user_id=requested_by_user_id,
+    )
+
+
+def _should_request_slack_user_sync(requested_slack_user_id: str | None) -> bool:
+    return requested_slack_user_id in {None, ""}
 
 
 def _run_slack_auth_test(*, bot_token: str, timeout_seconds: int):
@@ -726,6 +754,7 @@ def ops_save_slack_integration(
         "delivery_stale_lock_seconds": delivery_stale_lock_seconds,
     }
     current_settings = load_slack_dm_settings(db, app_settings=settings)
+    should_request_user_sync = bool(current_settings.has_stored_token or bot_token.strip())
     try:
         validated = validate_slack_dm_settings_input(
             SlackDMSettingsInput(
@@ -759,6 +788,12 @@ def ops_save_slack_integration(
             updated_by_user_id=current_user.id,
             auth_result=auth_result,
         )
+        if should_request_user_sync:
+            request_slack_user_sync(
+                db,
+                trigger="settings_saved",
+                requested_by_user_id=current_user.id,
+            )
     except SlackDMSettingsError as exc:
         db.rollback()
         return _render_slack_integration_page(
@@ -815,6 +850,12 @@ def ops_create_user(
             role=requested_role,
             slack_user_id=requested_slack_user_id,
         )
+        if _should_request_slack_user_sync(requested_slack_user_id):
+            _request_slack_user_sync_if_session_configured(
+                db,
+                trigger="user_created",
+                requested_by_user_id=current_user.id,
+            )
     except ValueError as exc:
         db.rollback()
         return _render_ops_users_page(
@@ -864,6 +905,12 @@ def ops_update_user(
             slack_user_id=requested_slack_user_id,
             password=password,
         )
+        if _should_request_slack_user_sync(requested_slack_user_id):
+            _request_slack_user_sync_if_session_configured(
+                db,
+                trigger="user_updated",
+                requested_by_user_id=current_user.id,
+            )
     except ValueError as exc:
         db.rollback()
         return _render_ops_users_page(

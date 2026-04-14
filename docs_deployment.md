@@ -43,6 +43,7 @@ After the admin account exists, sign in and configure Slack only when you are re
 
 - `/ops/integrations/slack` for the bot token, enablement, notify flags, and delivery tuning
 - `/ops/users` for user `slack_user_id` mappings
+- if you want AutoSac to backfill missing Slack IDs by exact email match, the bot token also needs `users:read` and `users:read.email`
 
 ## Validation
 
@@ -65,7 +66,7 @@ bash scripts/start_all.sh
 
 Then set the same env vars from `.env.example`, plus persistent storage mounted to `/opt/triage`.
 
-Slack rollout posture is the same on Railway: deploy the web request path and worker together, verify the migration first, then enable Slack from `/ops/integrations/slack` only after an admin can also populate `/ops/users` Slack IDs.
+Slack rollout posture is the same on Railway: deploy the web request path and worker together, verify the migration first, then enable Slack from `/ops/integrations/slack` only after an admin can also populate `/ops/users` Slack IDs. Once a stored token is present, the worker will also try to backfill missing Slack IDs automatically by exact email match.
 
 If the environment already contains earlier dry-run Slack integration rows, treat that Slack-specific state as disposable pre-launch data before enabling Slack. Those rows are not a compatibility target for the DM delivery worker.
 

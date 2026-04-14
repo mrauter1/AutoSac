@@ -177,13 +177,59 @@
 
       <section class="panel panel--quiet">
         <div class="stack stack--tight">
+          <h2>{{ t("ops.slack.user_sync_heading") }}</h2>
+          {% if slack_user_sync_state %}
+          <dl class="meta-list">
+            <div>
+              <dt>{{ t("field.status") }}</dt>
+              <dd><code>{{ slack_user_sync_state.status }}</code></dd>
+            </div>
+            <div>
+              <dt>{{ t("field.checked_at") }}</dt>
+              <dd>{% if slack_user_sync_state.checked_at %}{{ slack_user_sync_state.checked_at }}{% else %}{{ t("common.none_yet") }}{% endif %}</dd>
+            </div>
+            <div>
+              <dt>{{ t("field.error_code") }}</dt>
+              <dd>{% if slack_user_sync_state.error_code %}<code>{{ slack_user_sync_state.error_code }}</code>{% else %}{{ t("common.none_yet") }}{% endif %}</dd>
+            </div>
+            <div>
+              <dt>{{ t("field.matched_count") }}</dt>
+              <dd>{% if slack_user_sync_state.matched_count is not none %}{{ slack_user_sync_state.matched_count }}{% else %}{{ t("common.none_yet") }}{% endif %}</dd>
+            </div>
+            <div>
+              <dt>{{ t("field.updated_count") }}</dt>
+              <dd>{% if slack_user_sync_state.updated_count is not none %}{{ slack_user_sync_state.updated_count }}{% else %}{{ t("common.none_yet") }}{% endif %}</dd>
+            </div>
+            <div>
+              <dt>{{ t("field.no_match_count") }}</dt>
+              <dd>{% if slack_user_sync_state.no_match_count is not none %}{{ slack_user_sync_state.no_match_count }}{% else %}{{ t("common.none_yet") }}{% endif %}</dd>
+            </div>
+            <div>
+              <dt>{{ t("field.conflict_count") }}</dt>
+              <dd>{% if slack_user_sync_state.conflict_count is not none %}{{ slack_user_sync_state.conflict_count }}{% else %}{{ t("common.none_yet") }}{% endif %}</dd>
+            </div>
+            <div>
+              <dt>{{ t("ops.slack.user_sync_summary_label") }}</dt>
+              <dd>{{ slack_user_sync_state.summary or t("common.none_yet") }}</dd>
+            </div>
+          </dl>
+          {% else %}
+          <p class="muted">{{ t("common.none_yet") }}</p>
+          {% endif %}
+        </div>
+      </section>
+
+      <section class="panel panel--quiet">
+        <div class="stack stack--tight">
           <h2>{{ t("ops.slack.guidance_heading") }}</h2>
           <p class="muted">{{ t("ops.slack.guidance_body") }}</p>
           <ul>
             <li><code>auth.test</code></li>
             <li><code>conversations.open</code></li>
             <li><code>chat.postMessage</code></li>
+            <li><code>users.list</code></li>
           </ul>
+          <p class="muted"><code>users:read</code>, <code>users:read.email</code></p>
         </div>
       </section>
     </div>
