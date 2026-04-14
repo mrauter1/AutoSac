@@ -450,13 +450,48 @@ def test_add_requester_reply_emits_public_message_and_status_changed(monkeypatch
     assert message_event.payload_json["message_source"] == "requester_reply"
     assert message_event.payload_json["message_preview"] == "Ainda acontece o erro..."
     assert message_event.payload_json["ticket_status"] == "ai_triage"
-    assert len(targets) == 2
+    assert targets == []
+
+
+def test_add_requester_reply_routes_to_assignee_without_echoing_requester(monkeypatch, tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path, slack=_make_slack_settings())
+    fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime(settings)
+    requester = _make_user(symbols, slack_user_id="UREQUESTER")
+    assignee = _make_user(symbols, role="dev_ti", slack_user_id="UASSIGNEE")
+    _register_users(fake_db, requester, assignee)
+    ticket = _make_ticket(
+        symbols,
+        status="resolved",
+        created_by_user_id=requester.id,
+        assigned_to_user_id=assignee.id,
+    )
+
+    monkeypatch.setattr("shared.ticketing.enqueue_or_requeue_ai_run", lambda *args, **kwargs: None)
+
+    message, _attachments, _run = symbols["add_requester_reply"](
+        fake_db,
+        settings=settings,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        requester=requester,
+        body_markdown="Ainda acontece o erro ao salvar.",
+        attachments=[],
+    )
+
+    events = _integration_rows(fake_db, symbols, "IntegrationEvent")
+    targets = _integration_rows(fake_db, symbols, "IntegrationEventTarget")
+    status_event = next(event for event in events if event.event_type == "ticket.status_changed")
+    message_event = next(event for event in events if event.event_type == "ticket.public_message_added")
+
+    assert message_event.payload_json["message_id"] == str(message.id)
     assert {
         (target.event_id, target.target_name, target.recipient_user_id, target.recipient_reason)
         for target in targets
     } == {
-        (status_event.id, f"user:{requester.id}", requester.id, "requester"),
-        (message_event.id, f"user:{requester.id}", requester.id, "requester"),
+        (status_event.id, f"user:{assignee.id}", assignee.id, "assignee"),
+        (message_event.id, f"user:{assignee.id}", assignee.id, "assignee"),
     }
 
 
@@ -629,7 +664,7 @@ def test_record_ticket_created_event_collapses_requester_and_assignee_when_same_
     assert targets[0].recipient_reason == "requester_assignee"
 
 
-def test_add_ops_public_reply_keeps_assignee_self_notification_when_actor_is_recipient(tmp_path):
+def test_add_ops_public_reply_suppresses_actor_self_notification_when_actor_is_only_recipient(tmp_path):
     symbols = _load_symbols()
     settings = _make_settings(tmp_path, slack=_make_slack_settings())
     fake_db = _FakeSession()
@@ -655,9 +690,73 @@ def test_add_ops_public_reply_keeps_assignee_self_notification_when_actor_is_rec
     targets = _integration_rows(fake_db, symbols, "IntegrationEventTarget")
 
     assert [event.event_type for event in events] == ["ticket.public_message_added"]
+    assert targets == []
+
+
+def test_add_ops_public_reply_routes_to_requester_without_echoing_actor(tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path, slack=_make_slack_settings())
+    fake_db = _FakeSession()
+    requester = _make_user(symbols, slack_user_id="UREQUESTER")
+    actor = _make_user(symbols, role="dev_ti", slack_user_id="UASSIGNEE")
+    _register_users(fake_db, requester, actor)
+    ticket = _make_ticket(
+        symbols,
+        status="waiting_on_user",
+        created_by_user_id=requester.id,
+        assigned_to_user_id=actor.id,
+    )
+
+    symbols["add_ops_public_reply"](
+        fake_db,
+        slack_runtime=_make_slack_runtime(settings),
+        ticket=ticket,
+        actor=actor,
+        body_markdown="Segue atualização.",
+        next_status="waiting_on_user",
+    )
+
+    events = _integration_rows(fake_db, symbols, "IntegrationEvent")
+    targets = _integration_rows(fake_db, symbols, "IntegrationEventTarget")
+
+    assert [event.event_type for event in events] == ["ticket.public_message_added"]
     assert len(targets) == 1
-    assert targets[0].target_name == f"user:{actor.id}"
-    assert targets[0].recipient_user_id == actor.id
+    assert targets[0].target_name == f"user:{requester.id}"
+    assert targets[0].recipient_user_id == requester.id
+    assert targets[0].recipient_reason == "requester"
+
+
+def test_record_status_change_routes_to_other_recipient_without_echoing_originator(tmp_path):
+    symbols = _load_symbols()
+    settings = _make_settings(tmp_path, slack=_make_slack_settings())
+    fake_db = _FakeSession()
+    requester = _make_user(symbols, slack_user_id="UREQUESTER")
+    assignee = _make_user(symbols, role="dev_ti", slack_user_id="UASSIGNEE")
+    _register_users(fake_db, requester, assignee)
+    ticket = _make_ticket(
+        symbols,
+        status="waiting_on_dev_ti",
+        created_by_user_id=requester.id,
+        assigned_to_user_id=assignee.id,
+    )
+
+    symbols["record_status_change"](
+        fake_db,
+        slack_runtime=_make_slack_runtime(settings),
+        ticket=ticket,
+        to_status="resolved",
+        changed_by_type="requester",
+        changed_by_user_id=requester.id,
+    )
+
+    events = _integration_rows(fake_db, symbols, "IntegrationEvent")
+    targets = _integration_rows(fake_db, symbols, "IntegrationEventTarget")
+
+    assert [event.event_type for event in events] == ["ticket.status_changed"]
+    assert len(targets) == 1
+    assert targets[0].event_id == events[0].id
+    assert targets[0].target_name == f"user:{assignee.id}"
+    assert targets[0].recipient_user_id == assignee.id
     assert targets[0].recipient_reason == "assignee"
 
 

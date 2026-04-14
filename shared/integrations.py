@@ -206,6 +206,7 @@ def record_ticket_public_message_added_event(
             message=message,
             slack=slack_runtime.slack,
         ),
+        excluded_recipient_user_ids=_recipient_exclusion_set(message.author_user_id),
         links=(
             ("ticket", ticket.id, "primary"),
             ("ticket_message", message.id, "message"),
@@ -233,6 +234,7 @@ def record_ticket_status_changed_event(
             ticket=ticket,
             history=history,
         ),
+        excluded_recipient_user_ids=_recipient_exclusion_set(history.changed_by_user_id),
         links=(
             ("ticket", ticket.id, "primary"),
             ("ticket_status_history", history.id, "status_history"),
@@ -294,19 +296,30 @@ def load_user_by_id(db: Session, *, user_id: uuid.UUID | None) -> User | None:
     return None
 
 
-def _is_recipient_eligible(user: User | None) -> bool:
+def _is_recipient_eligible(
+    user: User | None,
+    *,
+    excluded_user_ids: frozenset[uuid.UUID] = frozenset(),
+) -> bool:
     if user is None or not bool(getattr(user, "is_active", False)):
+        return False
+    if user.id in excluded_user_ids:
         return False
     slack_user_id = getattr(user, "slack_user_id", None)
     return isinstance(slack_user_id, str) and bool(slack_user_id.strip())
 
 
-def resolve_dm_recipient_targets(db: Session, *, ticket: Ticket) -> tuple[RecipientTarget, ...]:
+def resolve_dm_recipient_targets(
+    db: Session,
+    *,
+    ticket: Ticket,
+    excluded_user_ids: frozenset[uuid.UUID] = frozenset(),
+) -> tuple[RecipientTarget, ...]:
     requester = load_user_by_id(db, user_id=ticket.created_by_user_id)
     assignee = load_user_by_id(db, user_id=ticket.assigned_to_user_id)
 
-    requester_eligible = _is_recipient_eligible(requester)
-    assignee_eligible = _is_recipient_eligible(assignee)
+    requester_eligible = _is_recipient_eligible(requester, excluded_user_ids=excluded_user_ids)
+    assignee_eligible = _is_recipient_eligible(assignee, excluded_user_ids=excluded_user_ids)
 
     if requester_eligible and assignee_eligible and ticket.created_by_user_id == ticket.assigned_to_user_id:
         recipient_user_id = ticket.created_by_user_id
@@ -362,11 +375,16 @@ def _record_integration_event(
     ticket: Ticket,
     dedupe_key: str,
     payload_json: dict[str, object],
+    excluded_recipient_user_ids: frozenset[uuid.UUID] = frozenset(),
     links: tuple[tuple[str, uuid.UUID, str], ...],
 ) -> EmissionResult:
     routing = resolve_routing_decision(slack_runtime.slack, event_type=event_type)
     if routing.routing_result == "suppressed_no_recipients":
-        recipient_targets = resolve_dm_recipient_targets(db, ticket=ticket)
+        recipient_targets = resolve_dm_recipient_targets(
+            db,
+            ticket=ticket,
+            excluded_user_ids=excluded_recipient_user_ids,
+        )
         if recipient_targets:
             routing = RoutingDecision(
                 routing_result="created",
@@ -492,6 +510,12 @@ def _build_duplicate_result(
         config_error_summary=selected_routing.config_error_summary,
         event_reused=True,
     )
+
+
+def _recipient_exclusion_set(user_id: uuid.UUID | None) -> frozenset[uuid.UUID]:
+    if user_id is None:
+        return frozenset()
+    return frozenset({user_id})
 
 
 def _is_dedupe_integrity_error(exc: IntegrityError) -> bool:
