@@ -18,6 +18,13 @@ def _write_exact_file(path: Path, contents: str) -> None:
     path.write_text(contents, encoding="utf-8")
 
 
+def _write_missing_file(path: Path, contents: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        return
+    path.write_text(contents, encoding="utf-8")
+
+
 def _verify_exact_file(path: Path, expected_contents: str, *, label: str) -> None:
     if not path.exists():
         raise FileNotFoundError(f"Required {label} file does not exist: {path}")
@@ -26,6 +33,13 @@ def _verify_exact_file(path: Path, expected_contents: str, *, label: str) -> Non
     actual_contents = path.read_text(encoding="utf-8")
     if actual_contents != expected_contents:
         raise RuntimeError(f"Workspace {label} content is stale: {path}. Rerun python scripts/bootstrap_workspace.py")
+
+
+def is_missing_workspace_skill_file_error(exc: BaseException) -> bool:
+    if not isinstance(exc, FileNotFoundError):
+        return False
+    message = str(exc)
+    return message.startswith("Required workspace skill ") and " file does not exist: " in message
 
 
 def _ensure_git_repo(workspace_dir: Path) -> None:
@@ -79,7 +93,19 @@ def verify_workspace_contract_paths(settings: Settings) -> None:
         )
 
 
-def bootstrap_workspace(settings: Settings) -> None:
+def create_missing_workspace_contract_files(settings: Settings) -> None:
+    load_routing_registry()
+    specs = tuple(load_all_agent_specs())
+    settings.triage_workspace_dir.mkdir(parents=True, exist_ok=True)
+    settings.runs_dir.mkdir(parents=True, exist_ok=True)
+    settings.uploads_dir.mkdir(parents=True, exist_ok=True)
+    verify_workspace_mounts(settings)
+    _write_missing_file(settings.triage_workspace_dir / WORKSPACE_AGENTS_RELATIVE_PATH, WORKSPACE_AGENTS_CONTENT)
+    for spec in specs:
+        _write_missing_file(settings.workspace_skill_file_path(spec.skill_id), spec.skill_text)
+
+
+def sync_workspace_contract_files(settings: Settings) -> None:
     load_routing_registry()
     specs = tuple(load_all_agent_specs())
     settings.triage_workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -89,6 +115,10 @@ def bootstrap_workspace(settings: Settings) -> None:
     _write_exact_file(settings.triage_workspace_dir / WORKSPACE_AGENTS_RELATIVE_PATH, WORKSPACE_AGENTS_CONTENT)
     for spec in specs:
         _write_exact_file(settings.workspace_skill_file_path(spec.skill_id), spec.skill_text)
+
+
+def bootstrap_workspace(settings: Settings) -> None:
+    sync_workspace_contract_files(settings)
     _ensure_git_repo(settings.triage_workspace_dir)
 
 

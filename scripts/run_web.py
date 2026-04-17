@@ -14,15 +14,21 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from shared.config import get_settings
 from shared.db import ping_database
+from shared.logging import log_web_event
 from shared.run_history import assert_ai_run_history_ready
-from shared.workspace import verify_workspace_contract_paths
+from shared.workspace import is_missing_workspace_skill_file_error, verify_workspace_contract_paths
 
 
-def verify_startup_readiness() -> None:
+def verify_startup_readiness(*, allow_missing_workspace_skill: bool = False) -> None:
     settings = get_settings()
     settings.validate_contracts()
     ping_database(settings)
-    verify_workspace_contract_paths(settings)
+    try:
+        verify_workspace_contract_paths(settings)
+    except FileNotFoundError as exc:
+        if not allow_missing_workspace_skill or not is_missing_workspace_skill_file_error(exc):
+            raise
+        log_web_event("workspace_skill_missing_startup_warning", level="warning", error=str(exc))
     assert_ai_run_history_ready(settings)
 
 
@@ -62,7 +68,7 @@ def main() -> None:
         smoke_check()
         return
     try:
-        verify_startup_readiness()
+        verify_startup_readiness(allow_missing_workspace_skill=True)
     except Exception as exc:
         raise SystemExit(str(exc)) from exc
     port = int(os.getenv("PORT", "8000"))

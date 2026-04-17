@@ -12,15 +12,22 @@ if str(PROJECT_ROOT) not in sys.path:
 from shared.config import get_settings
 from shared.db import ping_database
 from shared.run_history import assert_ai_run_history_ready
-from shared.workspace import verify_workspace_contract_paths
+from shared.workspace import create_missing_workspace_contract_files, verify_workspace_contract_paths
 from worker.main import main
 
 
-def smoke_check() -> None:
+def verify_startup_readiness(*, create_missing_workspace_files: bool = False) -> None:
     settings = get_settings()
     ping_database(settings)
+    if create_missing_workspace_files:
+        create_missing_workspace_contract_files(settings)
     verify_workspace_contract_paths(settings)
     assert_ai_run_history_ready(settings)
+
+
+def smoke_check() -> None:
+    verify_startup_readiness(create_missing_workspace_files=False)
+    settings = get_settings()
     print(
         json.dumps(
             {
@@ -43,10 +50,7 @@ def cli() -> None:
             raise SystemExit(str(exc)) from exc
         return
     try:
-        settings = get_settings()
-        ping_database(settings)
-        verify_workspace_contract_paths(settings)
-        assert_ai_run_history_ready(settings)
+        verify_startup_readiness(create_missing_workspace_files=True)
     except Exception as exc:
         raise SystemExit(str(exc)) from exc
     main()

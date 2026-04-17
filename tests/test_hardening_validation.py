@@ -138,6 +138,155 @@ def test_verify_workspace_contract_paths_rejects_stale_skill_file(tmp_path):
         verify_workspace_contract_paths(settings)
 
 
+def test_create_missing_workspace_contract_files_repairs_missing_skill_file(tmp_path):
+    from shared.workspace import create_missing_workspace_contract_files, verify_workspace_contract_paths
+
+    settings = _make_settings(tmp_path)
+    settings.repo_mount_dir.mkdir(parents=True)
+    settings.manuals_mount_dir.mkdir(parents=True)
+
+    create_missing_workspace_contract_files(settings)
+    first_spec = next(iter(load_all_agent_specs()))
+    settings.workspace_skill_file_path(first_spec.skill_id).unlink()
+
+    create_missing_workspace_contract_files(settings)
+
+    verify_workspace_contract_paths(settings)
+
+
+def test_create_missing_workspace_contract_files_does_not_overwrite_existing_skill_file(tmp_path):
+    from shared.workspace import create_missing_workspace_contract_files, verify_workspace_contract_paths
+
+    settings = _make_settings(tmp_path)
+    settings.repo_mount_dir.mkdir(parents=True)
+    settings.manuals_mount_dir.mkdir(parents=True)
+
+    create_missing_workspace_contract_files(settings)
+    first_spec = next(iter(load_all_agent_specs()))
+    skill_path = settings.workspace_skill_file_path(first_spec.skill_id)
+    skill_path.write_text("stale skill", encoding="utf-8")
+
+    create_missing_workspace_contract_files(settings)
+
+    assert skill_path.read_text(encoding="utf-8") == "stale skill"
+    with pytest.raises(RuntimeError, match=f"Workspace workspace skill {first_spec.skill_id} content is stale"):
+        verify_workspace_contract_paths(settings)
+
+
+def test_run_web_startup_readiness_verifies_without_sync(monkeypatch, tmp_path):
+    from scripts import run_web
+
+    settings = _make_settings(tmp_path)
+    observed: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(run_web, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        type(settings),
+        "validate_contracts",
+        lambda self: observed.append(("validate_contracts", self)),
+    )
+    monkeypatch.setattr(run_web, "ping_database", lambda resolved: observed.append(("ping_database", resolved)))
+    monkeypatch.setattr(
+        run_web,
+        "verify_workspace_contract_paths",
+        lambda resolved: observed.append(("verify_workspace_contract_paths", resolved)),
+    )
+    monkeypatch.setattr(run_web, "assert_ai_run_history_ready", lambda resolved: observed.append(("assert_ai_run_history_ready", resolved)))
+    monkeypatch.setattr(run_web, "log_web_event", lambda event, **payload: observed.append((event, payload)))
+
+    run_web.verify_startup_readiness(allow_missing_workspace_skill=True)
+
+    assert observed == [
+        ("validate_contracts", settings),
+        ("ping_database", settings),
+        ("verify_workspace_contract_paths", settings),
+        ("assert_ai_run_history_ready", settings),
+    ]
+
+
+def test_run_web_startup_readiness_warns_when_workspace_skill_is_missing(monkeypatch, tmp_path):
+    from scripts import run_web
+
+    settings = _make_settings(tmp_path)
+    first_spec = next(iter(load_all_agent_specs()))
+    warning = FileNotFoundError(
+        f"Required workspace skill {first_spec.skill_id} file does not exist: {settings.workspace_skill_file_path(first_spec.skill_id)}"
+    )
+    observed: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(run_web, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        type(settings),
+        "validate_contracts",
+        lambda self: observed.append(("validate_contracts", self)),
+    )
+    monkeypatch.setattr(run_web, "ping_database", lambda resolved: observed.append(("ping_database", resolved)))
+    monkeypatch.setattr(
+        run_web,
+        "verify_workspace_contract_paths",
+        lambda resolved: (_ for _ in ()).throw(warning),
+    )
+    monkeypatch.setattr(run_web, "assert_ai_run_history_ready", lambda resolved: observed.append(("assert_ai_run_history_ready", resolved)))
+    monkeypatch.setattr(run_web, "log_web_event", lambda event, **payload: observed.append((event, payload)))
+
+    run_web.verify_startup_readiness(allow_missing_workspace_skill=True)
+
+    assert observed == [
+        ("validate_contracts", settings),
+        ("ping_database", settings),
+        (
+            "workspace_skill_missing_startup_warning",
+            {"level": "warning", "error": str(warning)},
+        ),
+        ("assert_ai_run_history_ready", settings),
+    ]
+
+
+def test_run_web_startup_readiness_still_fails_for_non_skill_missing_file(monkeypatch, tmp_path):
+    from scripts import run_web
+
+    settings = _make_settings(tmp_path)
+
+    monkeypatch.setattr(run_web, "get_settings", lambda: settings)
+    monkeypatch.setattr(type(settings), "validate_contracts", lambda self: None)
+    monkeypatch.setattr(run_web, "ping_database", lambda resolved: None)
+    monkeypatch.setattr(
+        run_web,
+        "verify_workspace_contract_paths",
+        lambda resolved: (_ for _ in ()).throw(FileNotFoundError("Required AGENTS.md file does not exist: /tmp/workspace/AGENTS.md")),
+    )
+    monkeypatch.setattr(run_web, "assert_ai_run_history_ready", lambda resolved: None)
+
+    with pytest.raises(FileNotFoundError, match="Required AGENTS.md file does not exist"):
+        run_web.verify_startup_readiness(allow_missing_workspace_skill=True)
+
+
+def test_run_worker_startup_readiness_creates_missing_workspace_files(monkeypatch, tmp_path):
+    from scripts import run_worker
+
+    settings = _make_settings(tmp_path)
+    observed: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(run_worker, "get_settings", lambda: settings)
+    monkeypatch.setattr(run_worker, "ping_database", lambda resolved: observed.append(("ping_database", resolved)))
+    monkeypatch.setattr(
+        run_worker,
+        "create_missing_workspace_contract_files",
+        lambda resolved: observed.append(("create_missing_workspace_contract_files", resolved)),
+    )
+    monkeypatch.setattr(run_worker, "verify_workspace_contract_paths", lambda resolved: observed.append(("verify_workspace_contract_paths", resolved)))
+    monkeypatch.setattr(run_worker, "assert_ai_run_history_ready", lambda resolved: observed.append(("assert_ai_run_history_ready", resolved)))
+
+    run_worker.verify_startup_readiness(create_missing_workspace_files=True)
+
+    assert observed == [
+        ("ping_database", settings),
+        ("create_missing_workspace_contract_files", settings),
+        ("verify_workspace_contract_paths", settings),
+        ("assert_ai_run_history_ready", settings),
+    ]
+
+
 def test_readyz_returns_ready_when_database_and_workspace_checks_pass(monkeypatch, tmp_path):
     stack = _load_web_stack()
     settings = _make_settings(tmp_path)
