@@ -45,6 +45,7 @@ class PreparedStepRun:
     image_paths: list[Path]
     model_name: str | None
     timeout_seconds: int
+    requester_role: str
     route_target_id: str | None
     selected_specialist_id: str | None
     candidate_specialist_ids: tuple[str, ...] | None
@@ -189,6 +190,7 @@ def prepare_step_run(
         image_paths=image_paths,
         model_name=model_name,
         timeout_seconds=timeout_seconds,
+        requester_role=context.requester_role,
         route_target_id=resolved_route_target_id,
         selected_specialist_id=selected_specialist_id,
         candidate_specialist_ids=candidate_specialist_ids,
@@ -458,6 +460,7 @@ def execute_step(settings: Settings, *, prepared: PreparedStepRun) -> StepRunRes
             payload,
             route_target_id=prepared.route_target_id,
             candidate_specialist_ids=prepared.candidate_specialist_ids,
+            requester_role=prepared.requester_role,
         )
     except OutputContractError as exc:
         error_text = str(exc)
@@ -528,12 +531,14 @@ def record_synthetic_step_success(
     route_target_id: str | None = None,
     selected_specialist_id: str | None = None,
     candidate_specialist_ids: tuple[str, ...] | None = None,
+    requester_role: str | None = None,
 ) -> StepRunResult:
     validate_contract_output(
         spec.output_contract,
         output_payload,
         route_target_id=route_target_id,
         candidate_specialist_ids=candidate_specialist_ids,
+        requester_role=requester_role,
     )
     paths = build_step_artifact_paths(settings, ticket_id=ticket_id, run_id=run_id, step_index=step_index, spec=spec)
     schema_json = schema_json_for_contract(spec.output_contract)
@@ -558,6 +563,7 @@ def record_synthetic_step_success(
         image_paths=[],
         model_name=None,
         timeout_seconds=0,
+        requester_role=requester_role or "requester",
         route_target_id=route_target_id,
         selected_specialist_id=selected_specialist_id,
         candidate_specialist_ids=candidate_specialist_ids,

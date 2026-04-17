@@ -13,6 +13,7 @@ import pytest
 
 from shared.config import Settings
 from shared.contracts import WORKSPACE_BOOTSTRAP_VERSION
+from shared.routing_registry import RoutingRegistryError
 
 
 def _make_settings(tmp_path: Path, *, codex_api_key: str | None = "test-key") -> Settings:
@@ -230,13 +231,38 @@ def _build_registry(*route_targets):
     router_spec = SimpleNamespace(id="router", version="1", kind="router", output_contract="router_result")
     selector_spec = SimpleNamespace(id="specialist-selector", version="1", kind="selector", output_contract="specialist_selector_result")
     specialists = {
-        "support": SimpleNamespace(id="support", spec=SimpleNamespace(id="support", version="2", output_contract="specialist_result")),
-        "bug": SimpleNamespace(id="bug", spec=SimpleNamespace(id="bug", version="2", output_contract="specialist_result")),
-        "feature": SimpleNamespace(id="feature", spec=SimpleNamespace(id="feature", version="2", output_contract="specialist_result")),
+        "support": SimpleNamespace(
+            id="support",
+            display_name="support",
+            spec=SimpleNamespace(id="support", version="2", output_contract="specialist_result"),
+        ),
+        "bug": SimpleNamespace(
+            id="bug",
+            display_name="bug",
+            spec=SimpleNamespace(id="bug", version="2", output_contract="specialist_result"),
+        ),
+        "feature": SimpleNamespace(
+            id="feature",
+            display_name="feature",
+            spec=SimpleNamespace(id="feature", version="2", output_contract="specialist_result"),
+        ),
+        "software-architect": SimpleNamespace(
+            id="software-architect",
+            display_name="software-architect",
+            spec=SimpleNamespace(id="software-architect", version="2", output_contract="specialist_result"),
+        ),
+        "software-data-engineer": SimpleNamespace(
+            id="software-data-engineer",
+            display_name="software-data-engineer",
+            spec=SimpleNamespace(id="software-data-engineer", version="1", output_contract="specialist_result"),
+        ),
     }
     route_targets_by_id = {route_target.id: route_target for route_target in route_targets}
 
     def require_enabled_route_target(route_target_id: str):
+        return route_targets_by_id[route_target_id]
+
+    def require_enabled_route_target_for_requester(route_target_id: str, requester_role: str):
         return route_targets_by_id[route_target_id]
 
     def require_specialist(specialist_id: str):
@@ -254,7 +280,7 @@ def _build_registry(*route_targets):
             specialist_display_name=specialists[specialist_id].id,
         )
 
-    def candidate_specialists_for_target(route_target_id: str):
+    def candidate_specialists_for_target(route_target_id: str, requester_role: str | None = None):
         selection = route_targets_by_id[route_target_id].handler.specialist_selection
         return tuple(specialists[specialist_id] for specialist_id in selection.candidate_specialist_ids)
 
@@ -262,6 +288,7 @@ def _build_registry(*route_targets):
         router_spec=router_spec,
         selector_spec=selector_spec,
         require_enabled_route_target=require_enabled_route_target,
+        require_enabled_route_target_for_requester=require_enabled_route_target_for_requester,
         require_specialist=require_specialist,
         require_enabled_specialist=require_enabled_specialist,
         require_route_target=require_enabled_route_target,
@@ -977,6 +1004,204 @@ def test_execute_triage_pipeline_supports_forced_specialist_reruns(monkeypatch, 
     assert observed["synthetic_router"][0]["output_payload"]["route_target_id"] == "software_architect"
     assert observed["synthetic_router"][0]["selected_specialist_id"] == "software-architect"
     assert observed["prepared"][0]["selected_specialist_id"] == "software-architect"
+    assert len(observed["manifest_updates"]) == 2
+
+
+def test_execute_triage_pipeline_allows_software_data_engineer_for_internal_requesters(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    context = _make_context(requester_role="dev_ti")
+    observed = {"manifest_updates": [], "prepared": []}
+    route_target = _build_route_target(
+        route_target_id="software_data_engineer",
+        kind="direct_ai",
+        mode="fixed",
+        specialist_id="software-data-engineer",
+        allow_auto_publish=False,
+    )
+    registry = _build_registry(route_target)
+
+    def fake_prepare_step_run(*args, **kwargs):
+        observed["prepared"].append(
+            {
+                "step_index": kwargs["step_index"],
+                "step_kind": kwargs["step_kind"],
+                "selected_specialist_id": kwargs.get("selected_specialist_id"),
+            }
+        )
+        return SimpleNamespace(
+            step_index=kwargs["step_index"],
+            step_kind=kwargs["step_kind"],
+            spec=kwargs["spec"],
+            model_name=None,
+            candidate_specialist_ids=kwargs.get("candidate_specialist_ids"),
+            paths=SimpleNamespace(run_dir=tmp_path / "run", as_payload=lambda: {}),
+        )
+
+    def fake_execute_step(_settings, *, prepared):
+        if prepared.step_kind == "router":
+            return SimpleNamespace(
+                step_id=uuid.uuid4(),
+                prepared=prepared,
+                output_payload=_route_payload(
+                    route_target_id="software_data_engineer",
+                    routing_rationale="The internal requester wants concrete implementation text.",
+                ),
+            )
+        return SimpleNamespace(
+            step_id=uuid.uuid4(),
+            prepared=prepared,
+            output_payload=_specialist_payload(
+                public_reply_markdown="```diff\n--- a/app/example.py\n+++ b/app/example.py\n@@\n- old\n+ new\n```",
+                publish_mode_recommendation="draft_for_human",
+                summary_internal="Prepared the proposed implementation diff.",
+            ),
+        )
+
+    monkeypatch.setattr("worker.pipeline.load_routing_registry", lambda: registry)
+    monkeypatch.setattr("worker.pipeline.prepare_step_run", fake_prepare_step_run)
+    monkeypatch.setattr("worker.pipeline.execute_step", fake_execute_step)
+    monkeypatch.setattr(
+        "worker.pipeline.write_run_manifest_snapshot",
+        lambda settings, run_id: observed["manifest_updates"].append(run_id),
+    )
+
+    result = symbols["execute_triage_pipeline"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        context=context,
+    )
+
+    assert result.route_target.id == "software_data_engineer"
+    assert result.selected_specialist.id == "software-data-engineer"
+    assert observed["prepared"][1]["selected_specialist_id"] == "software-data-engineer"
+    assert len(observed["manifest_updates"]) == 2
+
+
+def test_execute_triage_pipeline_rejects_software_data_engineer_for_external_requesters(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    context = _make_context(requester_role="requester")
+    route_target = _build_route_target(
+        route_target_id="software_data_engineer",
+        kind="direct_ai",
+        mode="fixed",
+        specialist_id="software-data-engineer",
+    )
+    registry = _build_registry(route_target)
+
+    def require_enabled_route_target_for_requester(route_target_id: str, requester_role: str):
+        raise RoutingRegistryError(f"Route target {route_target_id} is not eligible for requester role {requester_role}")
+
+    def fake_prepare_step_run(*args, **kwargs):
+        return SimpleNamespace(
+            step_index=kwargs["step_index"],
+            step_kind=kwargs["step_kind"],
+            spec=kwargs["spec"],
+            model_name=None,
+            candidate_specialist_ids=kwargs.get("candidate_specialist_ids"),
+            paths=SimpleNamespace(run_dir=tmp_path / "run", as_payload=lambda: {}),
+        )
+
+    def fake_execute_step(_settings, *, prepared):
+        return SimpleNamespace(
+            step_id=uuid.uuid4(),
+            prepared=prepared,
+            output_payload=_route_payload(
+                route_target_id="software_data_engineer",
+                routing_rationale="The requester asked for code changes.",
+            ),
+        )
+
+    registry.require_enabled_route_target_for_requester = require_enabled_route_target_for_requester
+    monkeypatch.setattr("worker.pipeline.load_routing_registry", lambda: registry)
+    monkeypatch.setattr("worker.pipeline.prepare_step_run", fake_prepare_step_run)
+    monkeypatch.setattr("worker.pipeline.execute_step", fake_execute_step)
+    monkeypatch.setattr("worker.pipeline.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    with pytest.raises(RoutingRegistryError, match="software_data_engineer is not eligible for requester role requester"):
+        symbols["execute_triage_pipeline"](
+            settings,
+            run_id=uuid.uuid4(),
+            ticket_id=context.ticket.id,
+            worker_instance_id="worker-test",
+            context=context,
+        )
+
+
+def test_execute_triage_pipeline_supports_forced_software_data_engineer_reruns_for_external_requesters(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    context = _make_context(requester_role="requester")
+    observed = {"synthetic_router": [], "manifest_updates": []}
+    route_target = _build_route_target(
+        route_target_id="software_data_engineer",
+        kind="direct_ai",
+        mode="fixed",
+        specialist_id="software-data-engineer",
+        allow_auto_publish=False,
+    )
+    registry = _build_registry(route_target)
+    registry.resolve_forced_manual_rerun_choice = lambda *, route_target_id, specialist_id: SimpleNamespace(
+        route_target_id=route_target_id,
+        route_target_label="Software & Data Engineer",
+        specialist_id=specialist_id,
+        specialist_display_name="software-data-engineer",
+    )
+
+    def fake_record_synthetic_step_success(*args, **kwargs):
+        observed["synthetic_router"].append(kwargs)
+        return SimpleNamespace(
+            step_id=uuid.uuid4(),
+            prepared=SimpleNamespace(spec=kwargs["spec"], model_name=None),
+            output_payload=kwargs["output_payload"],
+        )
+
+    def fake_prepare_step_run(*args, **kwargs):
+        return SimpleNamespace(
+            step_index=kwargs["step_index"],
+            step_kind=kwargs["step_kind"],
+            spec=kwargs["spec"],
+            model_name=None,
+            candidate_specialist_ids=kwargs.get("candidate_specialist_ids"),
+            paths=SimpleNamespace(run_dir=tmp_path / "run", as_payload=lambda: {}),
+        )
+
+    def fake_execute_step(_settings, *, prepared):
+        return SimpleNamespace(
+            step_id=uuid.uuid4(),
+            prepared=prepared,
+            output_payload=_specialist_payload(
+                public_reply_markdown="```diff\n--- a/shared/example.py\n+++ b/shared/example.py\n@@\n- before\n+ after\n```",
+                publish_mode_recommendation="draft_for_human",
+                summary_internal="Prepared forced engineer rerun output.",
+            ),
+        )
+
+    monkeypatch.setattr("worker.pipeline.load_routing_registry", lambda: registry)
+    monkeypatch.setattr("worker.pipeline.record_synthetic_step_success", fake_record_synthetic_step_success)
+    monkeypatch.setattr("worker.pipeline.prepare_step_run", fake_prepare_step_run)
+    monkeypatch.setattr("worker.pipeline.execute_step", fake_execute_step)
+    monkeypatch.setattr(
+        "worker.pipeline.write_run_manifest_snapshot",
+        lambda settings, run_id: observed["manifest_updates"].append(run_id),
+    )
+
+    result = symbols["execute_triage_pipeline"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        context=context,
+        forced_route_target_id="software_data_engineer",
+        forced_specialist_id="software-data-engineer",
+    )
+
+    assert result.route_target.id == "software_data_engineer"
+    assert result.selected_specialist.id == "software-data-engineer"
+    assert observed["synthetic_router"][0]["output_payload"]["route_target_id"] == "software_data_engineer"
     assert len(observed["manifest_updates"]) == 2
 
 

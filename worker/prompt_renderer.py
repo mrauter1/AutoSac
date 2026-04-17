@@ -144,7 +144,10 @@ def render_agent_prompt(
                 registry.require_specialist(specialist_id) for specialist_id in candidate_specialist_ids
             )
         elif spec.kind == "selector" and resolved_route_target_id is not None:
-            candidate_specialists = registry.candidate_specialists_for_target(resolved_route_target_id)
+            candidate_specialists = registry.candidate_specialists_for_target(
+                resolved_route_target_id,
+                requester_role=context.requester_role,
+            )
     except RoutingRegistryError as exc:
         raise PromptRenderError(str(exc)) from exc
 
@@ -166,7 +169,9 @@ def render_agent_prompt(
         )
     values.update(
         {
-            "ROUTE_TARGET_CATALOG": _format_route_target_catalog(registry.enabled_route_targets()),
+            "ROUTE_TARGET_CATALOG": _format_route_target_catalog(
+                registry.enabled_route_targets_for_requester(context.requester_role)
+            ),
             "ROUTE_TARGET_ID": route_target.id if route_target is not None else "(none)",
             "ROUTE_TARGET_LABEL": route_target.label if route_target is not None else "(none)",
             "ROUTE_TARGET_KIND": route_target.kind if route_target is not None else "(none)",

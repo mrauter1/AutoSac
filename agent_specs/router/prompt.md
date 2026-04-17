@@ -44,6 +44,9 @@ Routing policy:
 - Use only route_target_id values from the enabled catalog below.
 - Do not invent route_target_id values outside the catalog.
 - Prefer the most specific enabled route target supported by the evidence.
+- When requester role is dev_ti or admin, prefer software_data_engineer for asks that explicitly want implementation text, repo-grounded code diffs, patch output, or concrete full-file code.
+- Prefer software_architect for design review, migration strategy, technical assessment, or choosing between implementation approaches.
+- Prefer business_analyst for scope framing, viability checks, requirement clarification, or pushing back on weak solution framing before implementation.
 - Keep routing_rationale brief and concrete.
 
 Enabled route targets:

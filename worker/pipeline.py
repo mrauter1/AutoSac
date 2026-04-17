@@ -74,7 +74,14 @@ def _run_selector(
     selector_spec = registry.selector_spec
     if selector_spec is None:
         raise StepRunError(f"Route target {route_target.id} requires selector execution but selector_spec_id is not configured")
-    candidate_specialists = registry.candidate_specialists_for_target(route_target.id)
+    candidate_specialists = registry.candidate_specialists_for_target(
+        route_target.id,
+        requester_role=context.requester_role,
+    )
+    if not candidate_specialists:
+        raise StepRunError(
+            f"Route target {route_target.id} has no eligible specialist candidates for requester role {context.requester_role}"
+        )
     candidate_specialist_ids = tuple(specialist.id for specialist in candidate_specialists)
     prepared_selector = prepare_step_run(
         settings,
@@ -219,7 +226,10 @@ def execute_triage_pipeline(
         worker_instance_id=worker_instance_id,
         context=context,
     )
-    route_target = registry.require_enabled_route_target(router_result.route_target_id)
+    route_target = registry.require_enabled_route_target_for_requester(
+        router_result.route_target_id,
+        context.requester_role,
+    )
 
     selection = route_target.handler.specialist_selection
     selector_step = None

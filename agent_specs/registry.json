@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "router_spec_id": "router",
   "selector_spec_id": "specialist-selector",
   "route_targets": [
@@ -151,6 +151,27 @@
       }
     },
     {
+      "id": "software_data_engineer",
+      "label": "Software & Data Engineer",
+      "kind": "direct_ai",
+      "enabled": true,
+      "ops_visible": true,
+      "router_description": "Repo-grounded implementation authoring that returns complete text diffs or full-file code for software or data changes without applying them.",
+      "handler": {
+        "specialist_selection": {
+          "mode": "fixed",
+          "specialist_id": "software-data-engineer"
+        }
+      },
+      "publish_policy": {
+        "allow_auto_publish": false,
+        "min_response_confidence_for_auto_publish": "high",
+        "max_risk_level_for_auto_publish": "low",
+        "allow_draft_for_human": true,
+        "allow_manual_only": true
+      }
+    },
+    {
       "id": "unknown",
       "label": "Unknown",
       "kind": "direct_ai",
@@ -242,6 +263,17 @@
       "spec_id": "software-architect",
       "enabled": true,
       "can_assist_human": true
+    },
+    {
+      "id": "software-data-engineer",
+      "display_name": "Software & Data Engineer Specialist",
+      "spec_id": "software-data-engineer",
+      "enabled": true,
+      "can_assist_human": true,
+      "allowed_requester_roles": [
+        "dev_ti",
+        "admin"
+      ]
     },
     {
       "id": "unknown",

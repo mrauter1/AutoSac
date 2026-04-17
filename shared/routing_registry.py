@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from shared.agent_specs import AGENT_SPECS_DIR, AgentSpec, AgentSpecError, load_agent_spec
+from shared.permissions import ADMIN_ROLE, DEV_TI_ROLE, REQUESTER_ROLE
 
 ROUTING_REGISTRY_PATH = AGENT_SPECS_DIR / "registry.json"
 
@@ -31,8 +32,16 @@ _PUBLISH_POLICY_KEYS = (
     "allow_manual_only",
 )
 _SPECIALIST_REQUIRED_KEYS = ("id", "display_name", "spec_id", "enabled")
-_SPECIALIST_ALLOWED_KEYS = ("id", "display_name", "spec_id", "enabled", "can_assist_human")
+_SPECIALIST_ALLOWED_KEYS = (
+    "id",
+    "display_name",
+    "spec_id",
+    "enabled",
+    "can_assist_human",
+    "allowed_requester_roles",
+)
 _SNAKE_CASE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_KNOWN_REQUESTER_ROLES = (REQUESTER_ROLE, DEV_TI_ROLE, ADMIN_ROLE)
 
 
 class RoutingRegistryError(RuntimeError):
@@ -80,7 +89,13 @@ class SpecialistRegistration:
     spec_id: str
     enabled: bool
     can_assist_human: bool
+    allowed_requester_roles: tuple[str, ...]
     spec: AgentSpec
+
+    def allows_requester_role(self, requester_role: str | None) -> bool:
+        if requester_role is None or not self.allowed_requester_roles:
+            return True
+        return requester_role in self.allowed_requester_roles
 
 
 @dataclass(frozen=True)
@@ -118,6 +133,14 @@ class RoutingRegistry:
             raise RoutingRegistryError(f"Route target {route_target_id} is disabled for new runs")
         return route_target
 
+    def require_enabled_route_target_for_requester(self, route_target_id: str, requester_role: str) -> RouteTarget:
+        route_target = self.require_enabled_route_target(route_target_id)
+        if not self.is_route_target_available_for_requester(route_target_id, requester_role=requester_role):
+            raise RoutingRegistryError(
+                f"Route target {route_target_id} is not eligible for requester role {requester_role}"
+            )
+        return route_target
+
     def get_specialist(self, specialist_id: str) -> SpecialistRegistration | None:
         return self._specialists_by_id.get(specialist_id)
 
@@ -135,6 +158,13 @@ class RoutingRegistry:
 
     def enabled_route_targets(self) -> tuple[RouteTarget, ...]:
         return tuple(route_target for route_target in self.route_targets if route_target.enabled)
+
+    def enabled_route_targets_for_requester(self, requester_role: str) -> tuple[RouteTarget, ...]:
+        return tuple(
+            route_target
+            for route_target in self.enabled_route_targets()
+            if self.is_route_target_available_for_requester(route_target.id, requester_role=requester_role)
+        )
 
     def ops_visible_route_targets(self) -> tuple[RouteTarget, ...]:
         return tuple(route_target for route_target in self.route_targets if route_target.ops_visible)
@@ -201,6 +231,7 @@ class RoutingRegistry:
         self,
         route_target_id: str,
         *,
+        requester_role: str | None = None,
         allow_disabled_target: bool = False,
     ) -> tuple[SpecialistRegistration, ...]:
         route_target = self.require_route_target(route_target_id)
@@ -216,7 +247,7 @@ class RoutingRegistry:
                 raise RoutingRegistryError(
                     f"Route target {route_target.id} references disabled specialist {specialist.id} for new runs"
                 )
-            return (specialist,)
+            return (specialist,) if specialist.allows_requester_role(requester_role) else ()
         if selection.candidate_specialist_ids:
             candidates = tuple(self.require_specialist(specialist_id) for specialist_id in selection.candidate_specialist_ids)
             if not allow_disabled_target:
@@ -225,12 +256,23 @@ class RoutingRegistry:
                     raise RoutingRegistryError(
                         f"Route target {route_target.id} references disabled candidate specialists: {', '.join(disabled)}"
                     )
-            return candidates
+            return tuple(
+                candidate for candidate in candidates if candidate.allows_requester_role(requester_role)
+            )
         return tuple(
             specialist
             for specialist in self.specialists
-            if specialist.enabled and specialist.can_assist_human
+            if specialist.enabled and specialist.can_assist_human and specialist.allows_requester_role(requester_role)
         )
+
+    def is_route_target_available_for_requester(self, route_target_id: str, *, requester_role: str) -> bool:
+        route_target = self.require_route_target(route_target_id)
+        if not route_target.enabled:
+            return False
+        selection = route_target.handler.specialist_selection
+        if selection.mode == "none":
+            return True
+        return bool(self.candidate_specialists_for_target(route_target_id, requester_role=requester_role))
 
 
 def clear_routing_registry_cache() -> None:
@@ -399,6 +441,10 @@ def _parse_specialist(item: Any, *, index: int) -> SpecialistRegistration:
         raw.get("can_assist_human", True),
         f"Routing registry specialist #{index} can_assist_human",
     )
+    allowed_requester_roles = _parse_allowed_requester_roles(
+        raw.get("allowed_requester_roles"),
+        context=f"Routing registry specialist #{index} allowed_requester_roles",
+    )
     spec = _load_spec(spec_id, expected_kind="specialist", context=f"Routing registry specialist {specialist_id}")
     return SpecialistRegistration(
         id=specialist_id,
@@ -406,6 +452,7 @@ def _parse_specialist(item: Any, *, index: int) -> SpecialistRegistration:
         spec_id=spec_id,
         enabled=enabled,
         can_assist_human=can_assist_human,
+        allowed_requester_roles=allowed_requester_roles,
         spec=spec,
     )
 
@@ -529,6 +576,22 @@ def _parse_candidate_ids(value: Any, *, route_target_id: str) -> tuple[str, ...]
             f"Route target {route_target_id} candidate_specialist_ids contains duplicates: {', '.join(duplicates)}"
         )
     return candidate_ids
+
+
+def _parse_allowed_requester_roles(value: Any, *, context: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    raw_roles = _read_list(value, context)
+    roles = tuple(_read_non_empty_string(role, context) for role in raw_roles)
+    duplicates = sorted({role for role in roles if roles.count(role) > 1})
+    if duplicates:
+        raise RoutingRegistryError(f"{context} contains duplicates: {', '.join(duplicates)}")
+    unknown = sorted(set(roles) - set(_KNOWN_REQUESTER_ROLES))
+    if unknown:
+        raise RoutingRegistryError(
+            f"{context} contains unsupported requester roles: {', '.join(unknown)}"
+        )
+    return roles
 
 
 def _parse_publish_policy(value: Any, *, route_target_id: str, kind: str) -> PublishPolicy:

@@ -53,6 +53,9 @@ Decision policy:
 - Choose exactly one specialist ID from the candidate catalog.
 - Do not invent IDs outside the candidate catalog.
 - Prefer the specialist whose focus best matches the selected route target and the concrete ticket details.
+- Prefer software-data-engineer when the requester wants repo-grounded implementation text, diffs, or concrete code output.
+- Prefer software-architect when the requester wants design judgment, migration planning, technical review, or option comparison more than code authoring.
+- Prefer business-analyst when the request is still vague, conflicting, or scope-first rather than implementation-ready.
 - Keep selection_rationale brief and concrete.
 
 Output:

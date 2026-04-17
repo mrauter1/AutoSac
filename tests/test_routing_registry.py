@@ -53,7 +53,7 @@ def _make_settings(tmp_path: Path) -> Settings:
     )
 
 
-def _make_context():
+def _make_context(*, requester_role: str = "requester"):
     ticket = SimpleNamespace(
         id=uuid.uuid4(),
         reference="T-000001",
@@ -75,7 +75,7 @@ def _make_context():
     )
     return SimpleNamespace(
         ticket=ticket,
-        requester_role="requester",
+        requester_role=requester_role,
         requester_can_view_internal_messages=False,
         public_messages=[public_message],
         internal_messages=[internal_message],
@@ -92,9 +92,11 @@ def test_load_routing_registry_reads_current_registry() -> None:
     assert registry.require_enabled_route_target("support").label == "Support"
     assert registry.require_enabled_route_target("business_analyst").label == "Business Analyst"
     assert registry.require_enabled_route_target("software_architect").label == "Software Architect"
+    assert registry.require_enabled_route_target("software_data_engineer").label == "Software & Data Engineer"
     assert registry.require_enabled_route_target("manual_review").kind == "human_assist"
     assert registry.require_specialist("business-analyst").spec.id == "business-analyst"
     assert registry.require_specialist("software-architect").spec.id == "software-architect"
+    assert registry.require_specialist("software-data-engineer").spec.id == "software-data-engineer"
     assert registry.require_route_target("unknown").enabled is False
 
 
@@ -186,6 +188,17 @@ def test_load_routing_registry_rejects_missing_spec_reference(tmp_path: Path) ->
         load_routing_registry(_write_registry(tmp_path, payload))
 
 
+def test_load_routing_registry_rejects_invalid_allowed_requester_roles(tmp_path: Path) -> None:
+    payload = _registry_payload()
+    for specialist in payload["specialists"]:
+        if specialist["id"] == "software-data-engineer":
+            specialist["allowed_requester_roles"] = ["dev_ti", "ops_manager"]
+            break
+
+    with pytest.raises(RoutingRegistryError, match="unsupported requester roles: ops_manager"):
+        load_routing_registry(_write_registry(tmp_path, payload))
+
+
 def test_load_routing_registry_rejects_invalid_fixed_selection_config(tmp_path: Path) -> None:
     payload = _registry_payload()
     del payload["route_targets"][0]["handler"]["specialist_selection"]["specialist_id"]
@@ -262,6 +275,31 @@ def test_load_routing_registry_resolves_human_assist_auto_candidates(tmp_path: P
         "feature",
         "business-analyst",
         "software-architect",
+        "software-data-engineer",
+    ]
+
+
+def test_load_routing_registry_filters_human_assist_candidates_by_requester_role() -> None:
+    registry = load_routing_registry(REGISTRY_PATH)
+
+    assert [specialist.id for specialist in registry.candidate_specialists_for_target("manual_review", requester_role="requester")] == [
+        "support",
+        "access-config",
+        "data-ops",
+        "bug",
+        "feature",
+        "business-analyst",
+        "software-architect",
+    ]
+    assert [specialist.id for specialist in registry.candidate_specialists_for_target("manual_review", requester_role="dev_ti")] == [
+        "support",
+        "access-config",
+        "data-ops",
+        "bug",
+        "feature",
+        "business-analyst",
+        "software-architect",
+        "software-data-engineer",
     ]
 
 
@@ -274,6 +312,7 @@ def test_load_routing_registry_exposes_manual_rerun_specialist_options() -> None
     assert "support" in option_ids
     assert "business_analyst" in option_ids
     assert "software_architect" in option_ids
+    assert "software_data_engineer" in option_ids
     assert "manual_review" not in option_ids
     assert "unknown" not in option_ids
 
@@ -308,6 +347,18 @@ def test_validate_contract_output_rejects_disabled_router_target() -> None:
                 "route_target_id": "unknown",
                 "routing_rationale": "Historical-only target.",
             },
+        )
+
+
+def test_validate_contract_output_rejects_route_target_ineligible_for_requester_role() -> None:
+    with pytest.raises(OutputContractError, match="not eligible for requester role requester"):
+        validate_contract_output(
+            "router_result",
+            {
+                "route_target_id": "software_data_engineer",
+                "routing_rationale": "The requester wants a code diff.",
+            },
+            requester_role="requester",
         )
 
 
@@ -398,11 +449,38 @@ def test_render_router_prompt_includes_generated_route_target_catalog() -> None:
     assert "- id: business_analyst" in prompt
     assert "- id: software_architect" in prompt
     assert "- id: manual_review" in prompt
+    assert "- id: software_data_engineer" not in prompt
     assert "unknown" not in prompt
     assert "TARGET_TICKET_CLASS" not in prompt
     assert "ROUTER_TICKET_CLASS" not in prompt
     assert "ticket_class" not in prompt
     assert "ticket class" not in prompt.lower()
+
+
+def test_render_router_prompt_includes_software_data_engineer_for_internal_requesters() -> None:
+    prompt = render_agent_prompt(load_agent_spec("router"), context=_make_context(requester_role="dev_ti"))
+
+    assert "- id: software_data_engineer" in prompt
+
+
+def test_render_selector_prompt_filters_manual_review_candidates_by_requester_role() -> None:
+    prompt = render_agent_prompt(
+        load_agent_spec("specialist-selector"),
+        context=_make_context(),
+        target_route_target_id="manual_review",
+    )
+
+    assert "- id: software-data-engineer" not in prompt
+
+
+def test_render_selector_prompt_includes_software_data_engineer_for_internal_manual_review() -> None:
+    prompt = render_agent_prompt(
+        load_agent_spec("specialist-selector"),
+        context=_make_context(requester_role="admin"),
+        target_route_target_id="manual_review",
+    )
+
+    assert "- id: software-data-engineer" in prompt
 
 
 def test_render_selector_prompt_includes_candidate_catalog() -> None:
@@ -511,6 +589,27 @@ def test_render_software_architect_prompt_includes_expected_assessment_structure
     assert "Make it warm, respectful, empathetic, and concise." in prompt
     assert "Repo-local code, migrations, DDL, and schema dumps under app/ are allowed when relevant." in prompt
     assert "set publish_mode_recommendation to auto_publish" in prompt
+
+
+def test_render_software_data_engineer_prompt_includes_diff_authoring_guidance() -> None:
+    prompt = render_agent_prompt(
+        load_agent_spec("software-data-engineer"),
+        context=_make_context(requester_role="dev_ti"),
+        router_result=RouterResult.model_validate(
+            {
+                "route_target_id": "software_data_engineer",
+                "routing_rationale": "The requester wants the implementation diff.",
+            }
+        ),
+        target_route_target_id="software_data_engineer",
+    )
+
+    assert "Analyze this internal ticket as the Stage 1 software & data engineer specialist." in prompt
+    assert "prefer unified diff text in fenced code blocks." in prompt
+    assert "Use full-file code blocks only for new files or when a diff would be misleading or impractical." in prompt
+    assert "Never claim files were edited, a patch was applied, or the implementation was executed." in prompt
+    assert "If blocking ambiguity remains" in prompt
+    assert "Route target ID: software_data_engineer" in prompt
 
 
 def test_render_agent_prompt_raises_for_unknown_placeholder() -> None:

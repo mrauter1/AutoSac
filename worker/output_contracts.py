@@ -128,6 +128,7 @@ def validate_contract_output(
     *,
     route_target_id: str | None = None,
     candidate_specialist_ids: tuple[str, ...] | None = None,
+    requester_role: str | None = None,
 ) -> BaseModel:
     model = CONTRACT_MODELS.get(contract_id)
     if model is None:
@@ -142,6 +143,7 @@ def validate_contract_output(
             result,
             route_target_id=route_target_id,
             candidate_specialist_ids=candidate_specialist_ids,
+            requester_role=requester_role,
         )
     except RoutingRegistryError as exc:
         raise OutputContractError(str(exc)) from exc
@@ -154,20 +156,31 @@ def _validate_registry_backed_contract(
     *,
     route_target_id: str | None,
     candidate_specialist_ids: tuple[str, ...] | None,
+    requester_role: str | None,
 ) -> None:
     registry = load_routing_registry()
 
     if contract_id == "router_result":
-        registry.require_enabled_route_target(result.route_target_id)
+        if requester_role is None:
+            registry.require_enabled_route_target(result.route_target_id)
+        else:
+            registry.require_enabled_route_target_for_requester(result.route_target_id, requester_role)
         return
 
     if contract_id == "specialist_selector_result":
         if route_target_id is None:
             raise OutputContractError("specialist_selector_result validation requires route_target_id context")
         allowed_ids = candidate_specialist_ids or tuple(
-            specialist.id for specialist in registry.candidate_specialists_for_target(route_target_id)
+            specialist.id
+            for specialist in registry.candidate_specialists_for_target(
+                route_target_id,
+                requester_role=requester_role,
+            )
         )
-        registry.require_enabled_route_target(route_target_id)
+        if requester_role is None:
+            registry.require_enabled_route_target(route_target_id)
+        else:
+            registry.require_enabled_route_target_for_requester(route_target_id, requester_role)
         registry.require_specialist(result.specialist_id)
         if result.specialist_id not in allowed_ids:
             raise OutputContractError(
