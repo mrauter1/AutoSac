@@ -255,6 +255,13 @@ def _extract_public_reply_markdown(payload: dict[str, object]) -> str:
     return ""
 
 
+def _extract_internal_note_markdown(payload: dict[str, object]) -> str:
+    internal_note = payload.get("internal_note_markdown")
+    if isinstance(internal_note, str):
+        return internal_note.strip()
+    return ""
+
+
 def _override_internal_requester_publication(
     context: LoadedTicketContext,
     *,
@@ -264,22 +271,29 @@ def _override_internal_requester_publication(
 ) -> tuple[ResolvedRunOutcome, dict[str, object]]:
     if not _is_internal_requester(context):
         return outcome, final_output_json
+    if final_output_contract != "specialist_result":
+        return outcome, final_output_json
 
     public_reply_markdown = _extract_public_reply_markdown(final_output_json)
+    used_internal_note_as_public_reply = False
+    if not public_reply_markdown:
+        public_reply_markdown = _extract_internal_note_markdown(final_output_json)
+        used_internal_note_as_public_reply = bool(public_reply_markdown)
     if not public_reply_markdown:
         return outcome, final_output_json
 
-    normalized_final_output_json = final_output_json
-    if final_output_contract == "specialist_result":
-        normalized_final_output_json = dict(final_output_json)
-        normalized_final_output_json["publish_mode_recommendation"] = "auto_publish"
+    normalized_final_output_json = dict(final_output_json)
+    normalized_final_output_json["public_reply_markdown"] = public_reply_markdown
+    if used_internal_note_as_public_reply:
+        normalized_final_output_json["internal_note_markdown"] = ""
+    normalized_final_output_json["publish_mode_recommendation"] = "auto_publish"
 
     return (
         ResolvedRunOutcome(
             run_status="succeeded",
             effective_publication_mode="auto_publish",
             public_reply_markdown=public_reply_markdown,
-            internal_note_markdown=outcome.internal_note_markdown,
+            internal_note_markdown="" if used_internal_note_as_public_reply else outcome.internal_note_markdown,
             next_status="waiting_on_user",
             last_ai_action="auto_public_reply",
         ),

@@ -684,11 +684,16 @@ def add_ops_public_reply(
     actor: User,
     body_markdown: str,
     next_status: str,
+    settings: Settings | None = None,
+    attachments: list[AttachmentUpload] | None = None,
     forced_route_target_id: str | None = None,
     forced_specialist_id: str | None = None,
-) -> TicketMessage:
+) -> tuple[TicketMessage, list[TicketAttachment]]:
     if next_status not in {"ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved"}:
         raise ValueError(f"Invalid ops reply next status: {next_status}")
+    upload_attachments = attachments or []
+    if upload_attachments and settings is None:
+        raise ValueError("Settings are required to persist attachments")
     created_at = utc_now()
     message = _create_message(
         ticket_id=ticket.id,
@@ -700,6 +705,17 @@ def add_ops_public_reply(
         created_at=created_at,
     )
     db.add(message)
+    db.flush()
+    persisted_attachments = _add_public_attachments(
+        db,
+        ticket_id=ticket.id,
+        message_id=message.id,
+        attachments=upload_attachments,
+        storage_path_builder=lambda attachment_id, extension: str(
+            settings.uploads_dir / str(ticket.id) / f"{attachment_id}{extension}"
+        ),
+        created_at=created_at,
+    )
     if next_status == "ai_triage":
         request_manual_rerun(
             db,
@@ -715,7 +731,7 @@ def add_ops_public_reply(
             ticket=ticket,
             message=message,
         )
-        return message
+        return message, persisted_attachments
     if ticket.status != next_status:
         record_status_change(
             db,
@@ -735,7 +751,7 @@ def add_ops_public_reply(
         ticket=ticket,
         message=message,
     )
-    return message
+    return message, persisted_attachments
 
 
 def add_ops_internal_note(

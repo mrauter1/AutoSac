@@ -77,11 +77,16 @@
 
       <section class="panel stack ops-ticket-detail__main-section">
         <h2>{{ t("ops.detail.public_reply") }}</h2>
-        <form method="post" action="/ops/tickets/{{ ticket.reference }}/reply-public" class="stack">
+        <form method="post" action="/ops/tickets/{{ ticket.reference }}/reply-public" enctype="multipart/form-data" class="stack">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <label class="field">
             <span>{{ t("field.reply") }}</span>
             <textarea name="body" rows="6" required></textarea>
+          </label>
+          <label class="field">
+            <span>{{ t("field.attachments") }}</span>
+            <input type="file" name="attachments" multiple>
+            <small>{{ t("hint.attachments_limit") }}</small>
           </label>
           <div class="ops-ticket-detail__reply-controls">
             <label class="field">

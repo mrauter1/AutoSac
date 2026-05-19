@@ -455,7 +455,7 @@ def execute_step(settings: Settings, *, prepared: PreparedStepRun) -> StepRunRes
 
     payload = _load_final_output(prepared.paths.final_output_path)
     try:
-        validate_contract_output(
+        validated_output = validate_contract_output(
             prepared.spec.output_contract,
             payload,
             route_target_id=prepared.route_target_id,
@@ -489,7 +489,7 @@ def execute_step(settings: Settings, *, prepared: PreparedStepRun) -> StepRunRes
         )
         raise StepRunError(error_text) from exc
 
-    output_payload = payload
+    output_payload = validated_output.model_dump()
     status = "succeeded"
     _update_step_row(
         settings=settings,

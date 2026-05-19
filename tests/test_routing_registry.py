@@ -392,6 +392,82 @@ def test_validate_contract_output_rejects_specialist_result_without_public_reply
         )
 
 
+def test_validate_contract_output_recovers_manual_only_with_public_reply() -> None:
+    result = validate_contract_output(
+        "specialist_result",
+        {
+            "requester_language": "en",
+            "public_reply_markdown": "Here is a safe requester-facing draft.",
+            "internal_note_markdown": "",
+            "response_confidence": "medium",
+            "risk_level": "medium",
+            "risk_reason": "The draft should be reviewed before sending.",
+            "summary_internal": "Requester needs reviewed guidance.",
+            "publish_mode_recommendation": "manual_only",
+        },
+    )
+
+    assert result.publish_mode_recommendation == "draft_for_human"
+
+
+def test_validate_contract_output_auto_publishes_internal_requester_manual_only_note() -> None:
+    result = validate_contract_output(
+        "specialist_result",
+        {
+            "requester_language": "en",
+            "public_reply_markdown": "",
+            "internal_note_markdown": "Internal admin-facing handoff details.",
+            "response_confidence": "medium",
+            "risk_level": "medium",
+            "risk_reason": "The answer is suitable for an admin requester.",
+            "summary_internal": "Admin needs technical guidance.",
+            "publish_mode_recommendation": "manual_only",
+        },
+        requester_role="admin",
+    )
+
+    assert result.publish_mode_recommendation == "auto_publish"
+    assert result.public_reply_markdown == "Internal admin-facing handoff details."
+    assert result.internal_note_markdown == ""
+
+
+def test_validate_contract_output_auto_publishes_internal_requester_manual_only_summary_fallback() -> None:
+    result = validate_contract_output(
+        "specialist_result",
+        {
+            "requester_language": "en",
+            "public_reply_markdown": "",
+            "internal_note_markdown": "",
+            "response_confidence": "low",
+            "risk_level": "high",
+            "risk_reason": "The answer carries unresolved technical uncertainty.",
+            "summary_internal": "Could not complete the analysis; admin should review the missing evidence.",
+            "publish_mode_recommendation": "manual_only",
+        },
+        requester_role="dev_ti",
+    )
+
+    assert result.publish_mode_recommendation == "auto_publish"
+    assert result.public_reply_markdown == "Could not complete the analysis; admin should review the missing evidence."
+
+
+def test_validate_contract_output_rejects_manual_only_without_operator_note_or_public_reply() -> None:
+    with pytest.raises(OutputContractError, match="internal_note_markdown"):
+        validate_contract_output(
+            "specialist_result",
+            {
+                "requester_language": "en",
+                "public_reply_markdown": "",
+                "internal_note_markdown": "",
+                "response_confidence": "low",
+                "risk_level": "high",
+                "risk_reason": "Manual review is required.",
+                "summary_internal": "Requester needs manual review.",
+                "publish_mode_recommendation": "manual_only",
+            },
+        )
+
+
 def test_validate_contract_output_rejects_handoff_assistant_mismatch() -> None:
     with pytest.raises(OutputContractError, match="assistant_specialist_id"):
         validate_contract_output(
@@ -526,7 +602,8 @@ def test_render_specialist_prompt_includes_route_target_context() -> None:
     assert "set publish_mode_recommendation to auto_publish" in prompt
     assert "Put clarifying questions in public_reply_markdown" in prompt
     assert "When asking clarifying questions, combine them with the best current understanding" in prompt
-    assert "Reserve manual_only for cases where requester-facing guidance would be materially unsafe" in prompt
+    assert "manual_only is not permitted" in prompt
+    assert "Reserve manual_only for non-dev/admin requesters" in prompt
     assert "TARGET_TICKET_CLASS" not in prompt
     assert "ROUTER_TICKET_CLASS" not in prompt
     assert "ticket class" not in prompt.lower()

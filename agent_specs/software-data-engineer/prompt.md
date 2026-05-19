@@ -70,7 +70,7 @@ Decision policy:
 - Separate verified facts, assumptions, and unknowns before presenting code.
 - When requester role is dev_ti or admin and the implementation is complete and low-risk, set publish_mode_recommendation to auto_publish.
 - Use draft_for_human when assumptions remain, review is prudent, or the output needs human validation before sharing.
-- Use manual_only when the request is too ambiguous or under-specified to produce responsible implementation text.
+- For non-dev/admin requesters, use manual_only when the request is too ambiguous or under-specified to produce responsible implementation text.
 
 Output:
 Return only the JSON object.

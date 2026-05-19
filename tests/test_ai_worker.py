@@ -706,6 +706,52 @@ def test_execute_step_passes_prompt_via_stdin(monkeypatch, tmp_path):
     assert result.output_payload["publish_mode_recommendation"] == "auto_publish"
 
 
+def test_execute_step_persists_normalized_specialist_output(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    context = _make_context()
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
+        context=context,
+        router_result=router_result,
+        target_route_target_id="support",
+    )
+    prepared.paths.final_output_path.write_text(
+        json.dumps(
+            _specialist_payload(
+                publish_mode_recommendation="manual_only",
+                public_reply_markdown="Here is a safe requester-facing draft.",
+                internal_note_markdown="",
+                response_confidence="medium",
+                risk_level="medium",
+            )
+        ),
+        encoding="utf-8",
+    )
+    observed = {}
+
+    monkeypatch.setattr("worker.step_runner._create_running_step_row", lambda settings, prepared: uuid.uuid4())
+    monkeypatch.setattr("worker.step_runner._update_step_row", lambda **kwargs: observed.update({"output_payload": kwargs["output_payload"]}))
+    monkeypatch.setattr("worker.step_runner.write_step_manifest", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "worker.step_runner.subprocess.run",
+        lambda command, **kwargs: SimpleNamespace(returncode=0, stdout='{"event":"ok"}\n', stderr=""),
+    )
+
+    result = symbols["execute_step"](settings, prepared=prepared)
+
+    assert result.output_payload["publish_mode_recommendation"] == "draft_for_human"
+    assert observed["output_payload"]["publish_mode_recommendation"] == "draft_for_human"
+
+
 def test_execute_step_writes_selected_specialist_registration_id_to_step_manifest(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
@@ -1507,7 +1553,7 @@ def test_apply_success_result_internal_requester_manual_only_with_public_reply_a
     assert run.final_output_json["publish_mode_recommendation"] == "auto_publish"
 
 
-def test_apply_success_result_internal_requester_without_public_reply_keeps_normal_manual_review_flow(monkeypatch, tmp_path):
+def test_apply_success_result_internal_requester_without_public_reply_auto_publishes_internal_note(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
     ticket = SimpleNamespace(
@@ -1544,7 +1590,7 @@ def test_apply_success_result_internal_requester_without_public_reply_keeps_norm
         model_name=None,
     )
     fake_db = _FakeDb(run=run)
-    observed = {"internal": 0, "route": None}
+    observed = {"public": None}
 
     @contextmanager
     def fake_session_scope(_settings):
@@ -1552,16 +1598,16 @@ def test_apply_success_result_internal_requester_without_public_reply_keeps_norm
 
     monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
     monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not duplicate internal note")))
     monkeypatch.setattr(
-        "worker.triage.publish_ai_internal_note",
-        lambda *args, **kwargs: observed.__setitem__("internal", observed["internal"] + 1),
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: observed.__setitem__(
+            "public",
+            (kwargs["next_status"], kwargs["last_ai_action"], kwargs["body_markdown"]),
+        ),
     )
-    monkeypatch.setattr(
-        "worker.triage.route_ticket_after_ai",
-        lambda *args, **kwargs: observed.__setitem__("route", (kwargs["next_status"], kwargs["last_ai_action"])),
-    )
-    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not publish")))
     monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not create draft")))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not route manual-only")))
     monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: None)
     monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
 
@@ -1580,10 +1626,12 @@ def test_apply_success_result_internal_requester_without_public_reply_keeps_norm
         pipeline_result=pipeline_result,
     )
 
-    assert observed["internal"] == 1
-    assert observed["route"] == ("ai_triage", "manual_only")
-    assert run.status == "human_review"
+    assert observed["public"] == ("waiting_on_user", "auto_public_reply", "Keep this guidance internal only.")
+    assert run.status == "succeeded"
     assert run.final_output_contract == "specialist_result"
+    assert run.final_output_json["publish_mode_recommendation"] == "auto_publish"
+    assert run.final_output_json["public_reply_markdown"] == "Keep this guidance internal only."
+    assert run.final_output_json["internal_note_markdown"] == ""
 
 
 def test_apply_success_result_draft_for_human_keeps_direct_ai_ticket_in_ai_triage(monkeypatch, tmp_path):
@@ -1893,7 +1941,7 @@ def test_apply_success_result_internal_requester_human_assist_with_public_reply_
     assert run.final_output_json["publish_mode_recommendation"] == "auto_publish"
 
 
-def test_apply_success_result_internal_requester_human_assist_without_public_reply_keeps_human_review(monkeypatch, tmp_path):
+def test_apply_success_result_internal_requester_human_assist_without_specialist_keeps_human_review(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
     ticket = SimpleNamespace(
@@ -1946,7 +1994,7 @@ def test_apply_success_result_internal_requester_human_assist_without_public_rep
         "worker.triage.route_ticket_after_ai",
         lambda *args, **kwargs: observed.__setitem__("route", (kwargs["next_status"], kwargs["last_ai_action"])),
     )
-    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not publish")))
+    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not publish synthesized handoff")))
     monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not create draft")))
     monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: None)
     monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
@@ -1973,6 +2021,8 @@ def test_apply_success_result_internal_requester_human_assist_without_public_rep
     assert run.final_agent_spec_id is None
     assert run.final_output_contract == "human_handoff_result"
     assert run.final_output_json["route_target_id"] == "manual_review"
+    assert run.final_output_json["public_reply_markdown"] == ""
+    assert run.final_output_json["internal_note_markdown"]
 
 
 def test_apply_success_result_internal_requester_software_architect_auto_publishes_despite_route_policy(monkeypatch, tmp_path):

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 import json
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from shared.routing_registry import RoutingRegistryError, load_routing_registry
+
+_INTERNAL_REQUESTER_ROLES = {"dev_ti", "admin"}
 
 
 class OutputContractError(RuntimeError):
@@ -37,13 +39,35 @@ class SpecialistResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     requester_language: str = Field(min_length=1)
-    public_reply_markdown: str
-    internal_note_markdown: str
+    public_reply_markdown: str = Field(
+        description="Requester-facing reply or draft. Must be non-empty for auto_publish and draft_for_human."
+    )
+    internal_note_markdown: str = Field(
+        description="Operator-facing note. Must be non-empty when publish_mode_recommendation is manual_only."
+    )
     response_confidence: Literal["very_low", "low", "medium", "high", "very_high"]
     risk_level: Literal["none", "low", "medium", "high", "critical"]
     risk_reason: str = Field(min_length=1)
     summary_internal: str = Field(min_length=1)
     publish_mode_recommendation: Literal["auto_publish", "draft_for_human", "manual_only"]
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_recoverable_publish_mode(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if data.get("publish_mode_recommendation") != "manual_only":
+            return data
+        internal_note = data.get("internal_note_markdown")
+        public_reply = data.get("public_reply_markdown")
+        if isinstance(internal_note, str) and internal_note.strip():
+            return data
+        if not isinstance(public_reply, str) or not public_reply.strip():
+            return data
+
+        normalized = dict(data)
+        normalized["publish_mode_recommendation"] = "draft_for_human"
+        return normalized
 
     @model_validator(mode="after")
     def validate_publish_requirements(self) -> SpecialistResult:
@@ -122,6 +146,46 @@ def schema_json_for_contract(contract_id: str) -> str:
     return json.dumps(model.model_json_schema(), indent=2, sort_keys=True)
 
 
+def _stripped_string(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _normalize_internal_requester_specialist_payload(
+    payload: dict[str, object],
+    *,
+    requester_role: str | None,
+) -> dict[str, object]:
+    if requester_role not in _INTERNAL_REQUESTER_ROLES:
+        return payload
+    if payload.get("publish_mode_recommendation") != "manual_only":
+        return payload
+
+    public_reply = _stripped_string(payload.get("public_reply_markdown"))
+    internal_note = _stripped_string(payload.get("internal_note_markdown"))
+    summary_internal = _stripped_string(payload.get("summary_internal"))
+    replacement_public_reply = public_reply or internal_note or summary_internal
+    if not replacement_public_reply:
+        return payload
+
+    normalized = dict(payload)
+    normalized["public_reply_markdown"] = replacement_public_reply
+    normalized["publish_mode_recommendation"] = "auto_publish"
+    if not public_reply and internal_note == replacement_public_reply:
+        normalized["internal_note_markdown"] = ""
+    return normalized
+
+
+def _normalize_contract_payload(
+    contract_id: str,
+    payload: dict[str, object],
+    *,
+    requester_role: str | None,
+) -> dict[str, object]:
+    if contract_id == "specialist_result":
+        return _normalize_internal_requester_specialist_payload(payload, requester_role=requester_role)
+    return payload
+
+
 def validate_contract_output(
     contract_id: str,
     payload: dict[str, object],
@@ -133,6 +197,7 @@ def validate_contract_output(
     model = CONTRACT_MODELS.get(contract_id)
     if model is None:
         raise OutputContractError(f"Unknown output contract: {contract_id}")
+    payload = _normalize_contract_payload(contract_id, payload, requester_role=requester_role)
     try:
         result = model.model_validate(payload)
     except ValidationError as exc:

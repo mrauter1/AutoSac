@@ -67,7 +67,7 @@ Decision policy:
 - Prefer small, high-leverage improvements over rewrites. Push back directly on risky, weak, or solution-biased requests and propose safer alternatives.
 - When requester role is dev_ti or admin and public_reply_markdown is non-empty, set publish_mode_recommendation to auto_publish.
 - Use draft_for_human when you can provide a grounded assessment that should be reviewed before sharing.
-- Use manual_only when repository evidence is insufficient, the request is too ambiguous to interpret safely, or the blast radius needs clarification before any requester-facing draft is appropriate.
+- For non-dev/admin requesters, use manual_only when repository evidence is insufficient, the request is too ambiguous to interpret safely, or the blast radius needs clarification before any requester-facing draft is appropriate.
 - For non-dev requesters, be conservative about auto_publish. These assessments are usually better reviewed by a human before sending.
 
 Output:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from shared.config import Settings
 
 def _load_symbols():
     pytest.importorskip("sqlalchemy")
-    from shared.models import AIDraft, Ticket, TicketMessage, TicketStatusHistory, TicketView, User
+    from shared.models import AIDraft, Ticket, TicketAttachment, TicketMessage, TicketStatusHistory, TicketView, User
     from shared.ticketing import (
         add_ops_internal_note,
         add_ops_public_reply,
@@ -28,6 +29,7 @@ def _load_symbols():
     return {
         "AIDraft": AIDraft,
         "Ticket": Ticket,
+        "TicketAttachment": TicketAttachment,
         "TicketMessage": TicketMessage,
         "TicketStatusHistory": TicketStatusHistory,
         "TicketView": TicketView,
@@ -84,11 +86,13 @@ class _FakeSession:
         self.objects = {}
         self.commit_calls = 0
         self.flush_calls = 0
+        self.operations = []
         self.events_by_dedupe_key: dict[str, object] = {}
         self.targets_by_event_id: dict[uuid.UUID, list[object]] = {}
 
     def add(self, item):
         self.added.append(item)
+        self.operations.append(("add", item))
         if isinstance(item, self._integration_event_type):
             self.events_by_dedupe_key[item.dedupe_key] = item
         elif isinstance(item, self._integration_event_target_type):
@@ -102,6 +106,7 @@ class _FakeSession:
 
     def flush(self):
         self.flush_calls += 1
+        self.operations.append(("flush", None))
 
     def commit(self):
         self.commit_calls += 1
@@ -116,6 +121,22 @@ def _make_ops_user(symbols, *, role: str = "dev_ti"):
         role=role,
         is_active=True,
     )
+
+
+def _assert_flush_before_attachments(fake_db, attachments):
+    flush_index = next(
+        (index for index, (operation, _) in enumerate(fake_db.operations) if operation == "flush"),
+        None,
+    )
+    assert flush_index is not None
+
+    attachment_indexes = [
+        index
+        for index, (operation, item) in enumerate(fake_db.operations)
+        if operation == "add" and item in attachments
+    ]
+    assert attachment_indexes
+    assert flush_index < min(attachment_indexes)
 
 
 def test_add_ops_public_reply_records_status_history_and_view():
@@ -135,7 +156,7 @@ def test_add_ops_public_reply_records_status_history_and_view():
     existing_view = symbols["TicketView"](user_id=actor.id, ticket_id=ticket.id)
     fake_db.objects[(actor.id, ticket.id)] = existing_view
 
-    message = symbols["add_ops_public_reply"](
+    message, attachments = symbols["add_ops_public_reply"](
         fake_db,
         slack_runtime=slack_runtime,
         ticket=ticket,
@@ -149,10 +170,64 @@ def test_add_ops_public_reply_records_status_history_and_view():
     assert message.author_type == "dev_ti"
     assert message.visibility == "public"
     assert message.source == "human_public_reply"
+    assert attachments == []
     assert ticket.status == "waiting_on_user"
     assert history[0].from_status == "waiting_on_dev_ti"
     assert history[0].to_status == "waiting_on_user"
     assert fake_db.objects[(actor.id, ticket.id)].last_viewed_at >= existing_view.last_viewed_at
+
+
+def test_add_ops_public_reply_accepts_mixed_attachments():
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    settings = _make_settings()
+    slack_runtime = _make_slack_runtime(settings)
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=52,
+        reference="T-000052",
+        title="Ops upload",
+        created_by_user_id=uuid.uuid4(),
+        status="waiting_on_dev_ti",
+        urgent=False,
+    )
+    uploads = [
+        SimpleNamespace(
+            original_filename="shot.png",
+            mime_type="image/png",
+            sha256="abc123",
+            size_bytes=128,
+            width=40,
+            height=20,
+        ),
+        SimpleNamespace(
+            original_filename="notes.pdf",
+            mime_type="application/pdf",
+            sha256="pdf123",
+            size_bytes=256,
+            width=None,
+            height=None,
+        ),
+    ]
+
+    message, attachments = symbols["add_ops_public_reply"](
+        fake_db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        actor=actor,
+        body_markdown="Attaching the requested files.",
+        next_status="waiting_on_user",
+        settings=settings,
+        attachments=uploads,
+    )
+
+    assert [attachment.original_filename for attachment in attachments] == ["shot.png", "notes.pdf"]
+    assert [attachment.mime_type for attachment in attachments] == ["image/png", "application/pdf"]
+    assert all(attachment.visibility == "public" for attachment in attachments)
+    assert all(attachment.message_id == message.id for attachment in attachments)
+    assert all(Path(attachment.stored_path).resolve().is_relative_to(settings.uploads_dir.resolve()) for attachment in attachments)
+    _assert_flush_before_attachments(fake_db, attachments)
 
 
 def test_add_ops_public_reply_rejects_invalid_next_status():
@@ -208,7 +283,7 @@ def test_add_ops_public_reply_ai_triage_delegates_to_manual_rerun(monkeypatch):
         ),
     )
 
-    message = symbols["add_ops_public_reply"](
+    message, attachments = symbols["add_ops_public_reply"](
         fake_db,
         slack_runtime=slack_runtime,
         ticket=ticket,
@@ -224,6 +299,7 @@ def test_add_ops_public_reply_ai_triage_delegates_to_manual_rerun(monkeypatch):
     assert message.author_type == "dev_ti"
     assert message.visibility == "public"
     assert message.source == "human_public_reply"
+    assert attachments == []
     assert observed["manual_rerun"] == 1
     assert observed["forced_route_target_id"] == "software_architect"
     assert observed["forced_specialist_id"] == "software-architect"
@@ -2198,18 +2274,33 @@ def test_ops_reply_public_allows_forced_specialist_route_target(monkeypatch):
     observed = {}
 
     monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
-    monkeypatch.setattr(
-        stack["routes_ops"],
-        "add_ops_public_reply",
-        lambda db, slack_runtime, ticket, actor, body_markdown, next_status, forced_route_target_id=None, forced_specialist_id=None: observed.update(
+
+    def fake_add_ops_public_reply(
+        db,
+        *,
+        slack_runtime,
+        ticket,
+        actor,
+        body_markdown,
+        next_status,
+        settings=None,
+        attachments=None,
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+    ):
+        observed.update(
             {
                 "body_markdown": body_markdown,
                 "next_status": next_status,
+                "settings": settings,
+                "attachments": attachments,
                 "forced_route_target_id": forced_route_target_id,
                 "forced_specialist_id": forced_specialist_id,
             }
-        ),
-    )
+        )
+        return SimpleNamespace(), []
+
+    monkeypatch.setattr(stack["routes_ops"], "add_ops_public_reply", fake_add_ops_public_reply)
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
@@ -2233,10 +2324,206 @@ def test_ops_reply_public_allows_forced_specialist_route_target(monkeypatch):
     assert observed == {
         "body_markdown": "Please retry the AI with architecture context.",
         "next_status": "ai_triage",
+        "settings": settings,
+        "attachments": [],
         "forced_route_target_id": "software_architect",
         "forced_specialist_id": "software-architect",
     }
     assert db.commit_calls == 1
+
+
+def test_ops_reply_public_accepts_attachment_uploads(monkeypatch, tmp_path):
+    stack = _load_web_stack()
+    db = _RouteDb()
+    settings = _make_settings()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000012U", id=uuid.uuid4())
+    persisted_path = tmp_path / "attachments_store" / "ticket" / "reply.pdf"
+    upload = SimpleNamespace(
+        original_filename="reply.pdf",
+        mime_type="application/pdf",
+        sha256="pdf123",
+        size_bytes=8,
+        width=None,
+        height=None,
+        data=b"fake pdf",
+    )
+    observed = {}
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+
+    async def fake_parse_ops_public_reply_form(request, *, settings):
+        return "Please review the attached report.", "csrf-token", "waiting_on_user", "", [upload]
+
+    monkeypatch.setattr(stack["routes_ops"], "_parse_ops_public_reply_form", fake_parse_ops_public_reply_form)
+
+    def fake_add_ops_public_reply(
+        db,
+        *,
+        slack_runtime,
+        ticket,
+        actor,
+        body_markdown,
+        next_status,
+        settings=None,
+        attachments=None,
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+    ):
+        observed.update(
+            {
+                "body_markdown": body_markdown,
+                "next_status": next_status,
+                "attachments": attachments,
+                "forced_route_target_id": forced_route_target_id,
+                "forced_specialist_id": forced_specialist_id,
+            }
+        )
+        return SimpleNamespace(), [SimpleNamespace(stored_path=str(persisted_path))]
+
+    monkeypatch.setattr(stack["routes_ops"], "add_ops_public_reply", fake_add_ops_public_reply)
+
+    response = asyncio.run(
+        stack["routes_ops"].ops_reply_public(
+            ticket.reference,
+            SimpleNamespace(),
+            current_user=ops_user,
+            auth_session=auth_session,
+            settings=settings,
+            db=db,
+        )
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/ops/tickets/{ticket.reference}"
+    assert observed["body_markdown"] == "Please review the attached report."
+    assert observed["next_status"] == "waiting_on_user"
+    assert observed["forced_route_target_id"] is None
+    assert observed["forced_specialist_id"] is None
+    assert [attachment.original_filename for attachment in observed["attachments"]] == ["reply.pdf"]
+    assert [attachment.mime_type for attachment in observed["attachments"]] == ["application/pdf"]
+    assert persisted_path.read_bytes() == b"fake pdf"
+    assert db.commit_calls == 1
+
+
+def test_ops_reply_public_rejects_invalid_csrf_before_ticket_lookup(monkeypatch):
+    stack = _load_web_stack()
+    db = _RouteDb()
+    settings = _make_settings()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    async def fake_parse_ops_public_reply_form(request, *, settings):
+        return "Please review the attached report.", "wrong-token", "waiting_on_user", "", []
+
+    monkeypatch.setattr(stack["routes_ops"], "_parse_ops_public_reply_form", fake_parse_ops_public_reply_form)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_load_ops_ticket_or_404",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ticket lookup should not run")),
+    )
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            stack["routes_ops"].ops_reply_public(
+                "T-000012C",
+                SimpleNamespace(),
+                current_user=ops_user,
+                auth_session=auth_session,
+                settings=settings,
+                db=db,
+            )
+        )
+
+    assert exc_info.value.status_code == 403
+    assert db.commit_calls == 0
+
+
+def test_parse_ops_public_reply_form_accepts_multipart_attachment(monkeypatch):
+    stack = _load_web_stack()
+    settings = _make_settings()
+    boundary = "----autosacboundary"
+
+    def form_field(name: str, value: str) -> bytes:
+        return (
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"{name}\"\r\n"
+            "\r\n"
+            f"{value}\r\n"
+        ).encode()
+
+    def file_field(name: str, filename: str, content_type: str, data: bytes) -> bytes:
+        return (
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"{name}\"; filename=\"{filename}\"\r\n"
+            f"Content-Type: {content_type}\r\n"
+            "\r\n"
+        ).encode() + data + b"\r\n"
+
+    body = b"".join(
+        [
+            form_field("csrf_token", "csrf-token"),
+            form_field("body", "Please see the attached report."),
+            form_field("next_status", "waiting_on_user"),
+            form_field("forced_route_target_id", ""),
+            file_field("attachments", "reply.txt", "text/plain", b"hello"),
+            f"--{boundary}--\r\n".encode(),
+        ]
+    )
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if sent:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    from starlette.requests import Request
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/ops/tickets/T-000012P/reply-public",
+            "headers": [
+                (b"content-type", f"multipart/form-data; boundary={boundary}".encode()),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        },
+        receive,
+    )
+    observed = {}
+
+    async def fake_validate_attachment_upload(upload, settings):
+        observed["filename"] = upload.filename
+        observed["content_type"] = upload.content_type
+        observed["data"] = await upload.read()
+        return SimpleNamespace(
+            original_filename=upload.filename,
+            mime_type=upload.content_type,
+            sha256="sha-text",
+            size_bytes=len(observed["data"]),
+            width=None,
+            height=None,
+            data=observed["data"],
+        )
+
+    monkeypatch.setattr(stack["routes_ops"], "validate_attachment_upload", fake_validate_attachment_upload)
+
+    body_markdown, csrf_token, next_status, forced_route_target_id, attachments = asyncio.run(
+        stack["routes_ops"]._parse_ops_public_reply_form(request, settings=settings)
+    )
+
+    assert body_markdown == "Please see the attached report."
+    assert csrf_token == "csrf-token"
+    assert next_status == "waiting_on_user"
+    assert forced_route_target_id == ""
+    assert observed == {"filename": "reply.txt", "content_type": "text/plain", "data": b"hello"}
+    assert [attachment.original_filename for attachment in attachments] == ["reply.txt"]
 
 
 def test_ops_reply_public_rejects_invalid_forced_route_target(monkeypatch):
@@ -2870,7 +3157,9 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert '"/ops/tickets/{reference}/assign"' in source
     assert '"/ops/tickets/{reference}/set-status"' in source
     assert '"/ops/tickets/{reference}/rerun-ai"' in source
-    assert 'forced_route_target_id: str = Form(default="")' in source
+    assert "_parse_ops_public_reply_form" in source
+    assert 'enctype="multipart/form-data"' in detail_template
+    assert 'name="attachments"' in detail_template
     assert 't("field.route_ai_to_specialist")' in detail_template
     assert detail_template.count('name="forced_route_target_id"') == 2
     assert 'ops-ticket-detail__main-section' in detail_template

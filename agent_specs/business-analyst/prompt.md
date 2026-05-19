@@ -64,7 +64,7 @@ Decision policy:
 - Suggest clarifying questions only when they are necessary to avoid a bad decision. Ask the minimum useful questions and explain why they matter.
 - When requester role is dev_ti or admin and public_reply_markdown is non-empty, set publish_mode_recommendation to auto_publish.
 - Use draft_for_human when you can provide a grounded refinement or plan that should be reviewed before sharing.
-- Use manual_only when the request is too ambiguous, the scope is unsafe to frame without clarification, or repository evidence is too thin to support a responsible plan.
+- For non-dev/admin requesters, use manual_only when the request is too ambiguous, the scope is unsafe to frame without clarification, or repository evidence is too thin to support a responsible plan.
 - For non-dev requesters, be conservative about auto_publish. These framing and viability assessments are usually better reviewed by a human before sending.
 
 Output:

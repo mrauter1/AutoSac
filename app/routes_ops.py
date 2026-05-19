@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from pathlib import Path
 from typing import Any
 import uuid
 
@@ -9,6 +10,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.formparsers import MultiPartException
 
 from app.ai_run_presenters import present_ai_run_output, present_ticket_route_target
 from app.i18n import (
@@ -24,6 +26,13 @@ from app.auth import get_required_auth_session, require_admin_user, require_ops_
 from app.render import render_markdown_to_html
 from app.timeline import build_author_label, load_ticket_status_history, load_users_by_ids, merge_timeline_items, serialize_status_changes
 from app.ui import build_template_context, is_htmx_request, templates
+from app.uploads import (
+    UploadValidationError,
+    get_form_attachments,
+    parse_multipart_form,
+    persist_validated_attachment,
+    validate_attachment_upload,
+)
 from shared.config import Settings, get_settings
 from shared.db import db_session_dependency
 from shared.integrations import build_slack_runtime_context
@@ -73,6 +82,32 @@ def _parse_required_bool(value: str) -> bool:
     if normalized in {"off", "false", "0", "no"}:
         return False
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid active state.")
+
+
+async def _parse_ops_public_reply_form(
+    request: Request,
+    *,
+    settings: Settings,
+) -> tuple[str, str, str, str, list]:
+    try:
+        form = await parse_multipart_form(request, settings)
+    except MultiPartException as exc:
+        raise UploadValidationError(str(exc)) from exc
+    body = str(form.get("body", "")).strip()
+    csrf_token = str(form.get("csrf_token", "")).strip()
+    next_status = str(form.get("next_status", "")).strip()
+    forced_route_target_id = str(form.get("forced_route_target_id", "")).strip()
+    uploads = get_form_attachments(form)
+    attachments = [await validate_attachment_upload(upload, settings) for upload in uploads]
+    return body, csrf_token, next_status, forced_route_target_id, attachments
+
+
+def _cleanup_paths(paths: list[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            continue
 
 
 def _allowed_new_user_roles(actor: User) -> tuple[str, ...]:
@@ -1077,36 +1112,55 @@ def ops_set_ticket_status(
 
 
 @router.post("/ops/tickets/{reference}/reply-public")
-def ops_reply_public(
+async def ops_reply_public(
     reference: str,
+    request: Request,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
     settings: Settings = Depends(get_settings),
-    csrf_token: str = Form(...),
-    body: str = Form(...),
-    next_status: str = Form(...),
-    forced_route_target_id: str = Form(default=""),
     db: Session = Depends(db_session_dependency),
 ):
-    validate_csrf_token(auth_session, csrf_token)
-    ticket = _load_ops_ticket_or_404(db, reference=reference)
-    if not body.strip():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Reply text is required")
-    route_target_value, forced_specialist_id = _resolve_manual_rerun_specialist_override(forced_route_target_id)
     try:
-        add_ops_public_reply(
+        body, csrf_token, next_status, forced_route_target_id, upload_attachments = await _parse_ops_public_reply_form(
+            request,
+            settings=settings,
+        )
+        validate_csrf_token(auth_session, csrf_token)
+        if not body:
+            raise UploadValidationError("Reply text is required")
+        if len(upload_attachments) > settings.max_images_per_message:
+            raise UploadValidationError(f"Attach at most {settings.max_images_per_message} files.")
+    except UploadValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    ticket = _load_ops_ticket_or_404(db, reference=reference)
+    route_target_value, forced_specialist_id = _resolve_manual_rerun_specialist_override(forced_route_target_id)
+    saved_paths: list[Path] = []
+    try:
+        _, persisted_attachments = add_ops_public_reply(
             db,
             slack_runtime=build_slack_runtime_context(settings, db=db),
             ticket=ticket,
             actor=current_user,
-            body_markdown=body.strip(),
-            next_status=next_status.strip(),
+            body_markdown=body,
+            next_status=next_status,
+            settings=settings,
+            attachments=upload_attachments,
             forced_route_target_id=route_target_value,
             forced_specialist_id=forced_specialist_id,
         )
+        for attachment, upload in zip(persisted_attachments, upload_attachments):
+            path = Path(attachment.stored_path)
+            persist_validated_attachment(path, upload)
+            saved_paths.append(path)
+        db.commit()
     except ValueError as exc:
+        db.rollback()
+        _cleanup_paths(saved_paths)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    db.commit()
+    except Exception:
+        db.rollback()
+        _cleanup_paths(saved_paths)
+        raise
     return RedirectResponse(f"/ops/tickets/{ticket.reference}", status_code=status.HTTP_303_SEE_OTHER)
 
 
