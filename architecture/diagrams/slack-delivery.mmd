@@ -1,0 +1,14 @@
+flowchart LR
+    MUTATION[Ticket mutation] --> EVENT[IntegrationEvent snapshot]
+    EVENT --> ROUTING{Enabled, valid, flag, recipients?}
+    ROUTING -->|no| SUPPRESSED[Persist suppression reason]
+    ROUTING -->|yes| TARGETS[Pending recipient targets]
+    TARGETS --> CLAIM[SKIP LOCKED claim + token]
+    CLAIM --> OPEN[Slack conversations.open]
+    OPEN --> POST[Slack chat.postMessage]
+    POST -->|success| SENT[Sent]
+    POST -->|retryable| FAILED[Failed + next attempt]
+    POST -->|terminal/exhausted| DEAD[Dead letter]
+    FAILED --> CLAIM
+    CLAIM -->|stale lock| FAILED
+

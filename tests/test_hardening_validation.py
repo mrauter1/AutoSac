@@ -268,6 +268,11 @@ def test_run_worker_startup_readiness_creates_missing_workspace_files(monkeypatc
     observed: list[tuple[str, object]] = []
 
     monkeypatch.setattr(run_worker, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        type(settings),
+        "validate_worker_contracts",
+        lambda self: observed.append(("validate_worker_contracts", self)),
+    )
     monkeypatch.setattr(run_worker, "ping_database", lambda resolved: observed.append(("ping_database", resolved)))
     monkeypatch.setattr(
         run_worker,
@@ -280,6 +285,7 @@ def test_run_worker_startup_readiness_creates_missing_workspace_files(monkeypatc
     run_worker.verify_startup_readiness(create_missing_workspace_files=True)
 
     assert observed == [
+        ("validate_worker_contracts", settings),
         ("ping_database", settings),
         ("create_missing_workspace_contract_files", settings),
         ("verify_workspace_contract_paths", settings),
@@ -591,6 +597,8 @@ def test_get_settings_allows_missing_codex_api_key(monkeypatch, tmp_path):
 
     assert settings.codex_api_key is None
     assert settings.default_ui_locale == "pt-BR"
+    assert settings.codex_conversations_enabled is False
+    assert settings.resolved_codex_home == Path.home() / "autosac" / "codex"
     get_settings.cache_clear()
 
 
@@ -708,6 +716,145 @@ def test_settings_validate_contracts_rejects_uploads_dir_outside_workspace(tmp_p
 
     with pytest.raises(SettingsError, match="UPLOADS_DIR must be inside TRIAGE_WORKSPACE_DIR"):
         settings.validate_contracts()
+
+
+def test_settings_web_contract_does_not_require_codex_home_mount(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    codex_home = tmp_path / "worker-only-codex-home"
+    settings = Settings(
+        app_base_url="http://localhost:8000",
+        app_secret_key="test-secret",
+        database_url=f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}",
+        uploads_dir=workspace_dir / "attachments_store",
+        triage_workspace_dir=workspace_dir,
+        repo_mount_dir=workspace_dir / "app",
+        manuals_mount_dir=workspace_dir / "manuals",
+        codex_bin="codex",
+        codex_api_key=None,
+        codex_model="",
+        codex_timeout_seconds=3600,
+        worker_poll_seconds=10,
+        auto_support_reply_min_confidence=0.85,
+        auto_confirm_intent_min_confidence=0.90,
+        max_images_per_message=3,
+        max_image_bytes=5 * 1024 * 1024,
+        session_default_hours=12,
+        session_remember_days=30,
+        codex_conversations_enabled=True,
+        codex_home=codex_home,
+    )
+
+    settings.validate_contracts()
+
+
+def test_settings_validate_worker_contracts_requires_existing_codex_home(tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    outside_codex_home = tmp_path / "codex-home"
+    settings = Settings(
+        app_base_url="http://localhost:8000",
+        app_secret_key="test-secret",
+        database_url=f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}",
+        uploads_dir=workspace_dir / "attachments_store",
+        triage_workspace_dir=workspace_dir,
+        repo_mount_dir=workspace_dir / "app",
+        manuals_mount_dir=workspace_dir / "manuals",
+        codex_bin="codex",
+        codex_api_key=None,
+        codex_model="",
+        codex_timeout_seconds=3600,
+        worker_poll_seconds=10,
+        auto_support_reply_min_confidence=0.85,
+        auto_confirm_intent_min_confidence=0.90,
+        max_images_per_message=3,
+        max_image_bytes=5 * 1024 * 1024,
+        session_default_hours=12,
+        session_remember_days=30,
+        codex_conversations_enabled=True,
+        codex_home=outside_codex_home,
+    )
+
+    with pytest.raises(SettingsError, match="CODEX_HOME must exist"):
+        settings.validate_worker_contracts()
+
+
+def test_settings_validate_worker_contracts_requires_writable_codex_home(monkeypatch, tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    codex_home = workspace_dir / ".codex"
+    codex_home.mkdir(parents=True)
+    settings = Settings(
+        app_base_url="http://localhost:8000",
+        app_secret_key="test-secret",
+        database_url=f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}",
+        uploads_dir=workspace_dir / "attachments_store",
+        triage_workspace_dir=workspace_dir,
+        repo_mount_dir=workspace_dir / "app",
+        manuals_mount_dir=workspace_dir / "manuals",
+        codex_bin="codex",
+        codex_api_key=None,
+        codex_model="",
+        codex_timeout_seconds=3600,
+        worker_poll_seconds=10,
+        auto_support_reply_min_confidence=0.85,
+        auto_confirm_intent_min_confidence=0.90,
+        max_images_per_message=3,
+        max_image_bytes=5 * 1024 * 1024,
+        session_default_hours=12,
+        session_remember_days=30,
+        codex_conversations_enabled=True,
+        codex_home=codex_home,
+    )
+    monkeypatch.setattr("shared.config.os.access", lambda path, mode: False)
+
+    with pytest.raises(SettingsError, match="CODEX_HOME must be writable by the worker"):
+        settings.validate_worker_contracts()
+
+
+def test_worker_auth_preflight_uses_the_exact_shared_codex_home(monkeypatch, tmp_path):
+    from scripts.run_worker import verify_persistent_codex_authentication
+
+    codex_home = tmp_path / "autosac" / "codex"
+    settings = Settings(
+        **{
+            **_make_settings(tmp_path).__dict__,
+            "codex_conversations_enabled": True,
+            "codex_api_key": None,
+            "codex_home": codex_home,
+        }
+    )
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(command, 0, stdout="Logged in", stderr="")
+
+    monkeypatch.setattr("scripts.run_worker.subprocess.run", fake_run)
+
+    verify_persistent_codex_authentication(settings)
+
+    assert observed["command"] == ["codex", "login", "status"]
+    assert observed["env"]["CODEX_HOME"] == str(codex_home)
+    assert "CODEX_API_KEY" not in observed["env"]
+
+
+def test_worker_auth_preflight_fails_closed_when_native_login_is_missing(monkeypatch, tmp_path):
+    from scripts.run_worker import verify_persistent_codex_authentication
+
+    settings = Settings(
+        **{
+            **_make_settings(tmp_path).__dict__,
+            "codex_conversations_enabled": True,
+            "codex_api_key": None,
+            "codex_home": tmp_path / "autosac" / "codex",
+        }
+    )
+    monkeypatch.setattr(
+        "scripts.run_worker.subprocess.run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 1, stdout="", stderr="Not logged in"),
+    )
+
+    with pytest.raises(SettingsError, match="not authenticated"):
+        verify_persistent_codex_authentication(settings)
 
 
 def _run_script(args: list[str], *, env: dict[str, str], check: bool = True) -> subprocess.CompletedProcess[str]:

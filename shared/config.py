@@ -27,6 +27,7 @@ SLACK_HTTP_TIMEOUT_SECONDS_DEFAULT = 10
 SLACK_DELIVERY_BATCH_SIZE_DEFAULT = 10
 SLACK_DELIVERY_MAX_ATTEMPTS_DEFAULT = 5
 SLACK_DELIVERY_STALE_LOCK_SECONDS_DEFAULT = 120
+DEFAULT_AUTOSAC_CODEX_HOME = Path.home() / "autosac" / "codex"
 
 
 class SettingsError(RuntimeError):
@@ -52,6 +53,18 @@ def _env_float(name: str, default: float) -> float:
     if raw is None or raw.strip() == "":
         return default
     return float(raw)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise SettingsError(f"{name} must be a boolean value")
 
 
 def _env_path(name: str, default: Path) -> Path:
@@ -168,6 +181,8 @@ class Settings:
     ai_run_stale_timeout_seconds: int = 300
     ai_run_max_recovery_attempts: int = 3
     default_ui_locale: str = "en"
+    codex_conversations_enabled: bool = False
+    codex_home: Path | None = None
     slack: SlackSettings = field(default_factory=SlackSettings)
 
     @property
@@ -188,6 +203,28 @@ class Settings:
     @property
     def workspace_agents_path(self) -> Path:
         return self.triage_workspace_dir / "AGENTS.md"
+
+    @property
+    def resolved_codex_home(self) -> Path:
+        return (self.codex_home or DEFAULT_AUTOSAC_CODEX_HOME).expanduser()
+
+    def validate_persistent_codex_contracts(self, *, require_writable_home: bool) -> None:
+        if not self.codex_conversations_enabled:
+            return
+        codex_home = self.resolved_codex_home
+        if not codex_home.is_absolute():
+            raise SettingsError("CODEX_HOME must resolve to an absolute path")
+        # The web process only validates the configuration shape. Native Codex
+        # storage is a worker-owned concern and may not be mounted in web pods.
+        if require_writable_home:
+            if not codex_home.exists():
+                raise SettingsError("CODEX_HOME must exist before enabling CODEX_CONVERSATIONS_ENABLED")
+            if not codex_home.is_dir():
+                raise SettingsError("CODEX_HOME must point to a directory")
+            if not os.access(codex_home, os.W_OK):
+                raise SettingsError(
+                    "CODEX_HOME must be writable by the worker when CODEX_CONVERSATIONS_ENABLED is true"
+                )
 
     def validate_contracts(self) -> None:
         if self.max_images_per_message <= 0:
@@ -211,17 +248,24 @@ class Settings:
         if not _path_is_within(self.uploads_dir, self.triage_workspace_dir):
             raise SettingsError("UPLOADS_DIR must be inside TRIAGE_WORKSPACE_DIR")
         _normalize_ui_locale(self.default_ui_locale)
+        self.validate_persistent_codex_contracts(require_writable_home=False)
+
+    def validate_worker_contracts(self) -> None:
+        self.validate_contracts()
+        self.validate_persistent_codex_contracts(require_writable_home=True)
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     codex_api_key = os.environ.get("CODEX_API_KEY", "").strip() or None
+    triage_workspace_dir = _env_path("TRIAGE_WORKSPACE_DIR", DEFAULT_TRIAGE_WORKSPACE_DIR)
+    codex_home = os.environ.get("CODEX_HOME")
     settings = Settings(
         app_base_url=_required_env("APP_BASE_URL"),
         app_secret_key=_required_env("APP_SECRET_KEY"),
         database_url=get_database_url(),
         uploads_dir=_env_path("UPLOADS_DIR", DEFAULT_UPLOADS_DIR),
-        triage_workspace_dir=_env_path("TRIAGE_WORKSPACE_DIR", DEFAULT_TRIAGE_WORKSPACE_DIR),
+        triage_workspace_dir=triage_workspace_dir,
         repo_mount_dir=_env_path("REPO_MOUNT_DIR", DEFAULT_REPO_MOUNT_DIR),
         manuals_mount_dir=_env_path("MANUALS_MOUNT_DIR", DEFAULT_MANUALS_MOUNT_DIR),
         codex_bin=_required_env("CODEX_BIN"),
@@ -239,6 +283,8 @@ def get_settings() -> Settings:
         ai_run_stale_timeout_seconds=_env_int("AI_RUN_STALE_TIMEOUT_SECONDS", 300),
         ai_run_max_recovery_attempts=_env_int("AI_RUN_MAX_RECOVERY_ATTEMPTS", 3),
         default_ui_locale=get_default_ui_locale(),
+        codex_conversations_enabled=_env_bool("CODEX_CONVERSATIONS_ENABLED", False),
+        codex_home=Path(codex_home).expanduser() if codex_home and codex_home.strip() else DEFAULT_AUTOSAC_CODEX_HOME,
         slack=SlackSettings(),
     )
     settings.validate_contracts()

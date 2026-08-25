@@ -8,11 +8,16 @@ import uuid
 import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from starlette.formparsers import MultiPartException
 
 from app.ai_run_presenters import present_ai_run_output, present_ticket_route_target
+from app.codex_turn_presenters import (
+    present_codex_conversation_overview,
+    present_codex_turn_detail,
+    present_codex_turn_summary,
+)
 from app.i18n import (
     DEFAULT_UI_LOCALE,
     ops_author_label,
@@ -36,7 +41,21 @@ from app.uploads import (
 from shared.config import Settings, get_settings
 from shared.db import db_session_dependency
 from shared.integrations import build_slack_runtime_context
-from shared.models import AIDraft, AIRun, AIRunStep, Ticket, TicketAttachment, TicketMessage, TicketView, User
+from shared.models import (
+    AIDraft,
+    AIRun,
+    AIRunStep,
+    CodexConversation,
+    CodexSession,
+    CodexTurn,
+    CodexTurnItem,
+    CodexTurnOutcome,
+    Ticket,
+    TicketAttachment,
+    TicketMessage,
+    TicketView,
+    User,
+)
 from shared.permissions import is_admin_user, is_ops_user
 from shared.routing_registry import RoutingRegistryError, load_routing_registry
 from shared.slack_dm import (
@@ -293,6 +312,183 @@ def _load_latest_internal_ai_note(db: Session, *, ticket_id) -> TicketMessage | 
     ).scalars().first()
 
 
+def _load_codex_conversation(db: Session, *, ticket_id) -> CodexConversation | None:
+    return db.execute(
+        select(CodexConversation)
+        .where(CodexConversation.ticket_id == ticket_id)
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def _load_latest_drafts_by_ai_run_id(db: Session, *, ai_run_ids: list[uuid.UUID]) -> dict[uuid.UUID, AIDraft]:
+    if not ai_run_ids:
+        return {}
+    drafts: dict[uuid.UUID, AIDraft] = {}
+    for draft in db.execute(
+        select(AIDraft)
+        .where(AIDraft.ai_run_id.in_(ai_run_ids))
+        .order_by(AIDraft.created_at.desc(), AIDraft.id.desc())
+    ).scalars():
+        drafts.setdefault(draft.ai_run_id, draft)
+    return drafts
+
+
+def _load_latest_published_messages_by_ai_run_id(db: Session, *, ai_run_ids: list[uuid.UUID]) -> dict[uuid.UUID, TicketMessage]:
+    if not ai_run_ids:
+        return {}
+    messages: dict[uuid.UUID, TicketMessage] = {}
+    for message in db.execute(
+        select(TicketMessage)
+        .where(
+            TicketMessage.ai_run_id.in_(ai_run_ids),
+            TicketMessage.visibility == "public",
+            TicketMessage.author_type == "ai",
+        )
+        .order_by(TicketMessage.created_at.desc(), TicketMessage.id.desc())
+    ).scalars():
+        messages.setdefault(message.ai_run_id, message)
+    return messages
+
+
+def _load_persistent_conversation_projection(
+    db: Session,
+    *,
+    ticket: Ticket,
+) -> dict[str, object] | None:
+    conversation = _load_codex_conversation(db, ticket_id=ticket.id)
+    if conversation is None:
+        return None
+    sessions = list(
+        db.execute(
+            select(CodexSession)
+            .where(CodexSession.conversation_id == conversation.id)
+            .order_by(CodexSession.created_at.asc(), CodexSession.id.asc())
+        ).scalars()
+    )
+    turns = list(
+        db.execute(
+            select(CodexTurn)
+            .where(CodexTurn.conversation_id == conversation.id)
+            .order_by(CodexTurn.turn_index.asc(), CodexTurn.created_at.asc(), CodexTurn.id.asc())
+        ).scalars()
+    )
+    session_by_id = {session.id: session for session in sessions}
+    session_segment_by_id = {session.id: index for index, session in enumerate(sessions, start=1)}
+    turn_ids = [turn.id for turn in turns]
+    ai_run_ids = [turn.ai_run_id for turn in turns]
+    outcomes_by_turn_id: dict[uuid.UUID, list[CodexTurnOutcome]] = defaultdict(list)
+    if turn_ids:
+        for outcome in db.execute(
+            select(CodexTurnOutcome)
+            .where(CodexTurnOutcome.turn_id.in_(turn_ids))
+            .order_by(CodexTurnOutcome.turn_id.asc(), CodexTurnOutcome.outcome_index.asc(), CodexTurnOutcome.created_at.asc())
+        ).scalars():
+            outcomes_by_turn_id[outcome.turn_id].append(outcome)
+    raw_item_counts: dict[uuid.UUID, int] = {}
+    if turn_ids:
+        for turn_id, count in db.execute(
+            select(CodexTurnItem.turn_id, func.count(CodexTurnItem.id))
+            .where(CodexTurnItem.turn_id.in_(turn_ids))
+            .group_by(CodexTurnItem.turn_id)
+        ).all():
+            raw_item_counts[turn_id] = int(count)
+    runs = {
+        run.id: run
+        for run in db.execute(select(AIRun).where(AIRun.id.in_(ai_run_ids))).scalars()
+    } if ai_run_ids else {}
+    drafts_by_ai_run_id = _load_latest_drafts_by_ai_run_id(db, ai_run_ids=ai_run_ids)
+    published_messages_by_ai_run_id = _load_latest_published_messages_by_ai_run_id(db, ai_run_ids=ai_run_ids)
+    turn_cards = []
+    for turn in turns:
+        presented = present_codex_turn_summary(
+            turn,
+            run=runs.get(turn.ai_run_id),
+            outcomes=outcomes_by_turn_id.get(turn.id, ()),
+            session=session_by_id.get(turn.session_id),
+            session_segment_index=session_segment_by_id.get(turn.session_id),
+            draft=drafts_by_ai_run_id.get(turn.ai_run_id),
+            published_message=published_messages_by_ai_run_id.get(turn.ai_run_id),
+            raw_item_count=raw_item_counts.get(turn.id, 0),
+            conversation_status=conversation.status,
+        )
+        presented["detail_path"] = f"/ops/tickets/{ticket.reference}/persistent-turns/{turn.id}"
+        turn_cards.append(presented)
+    return {
+        "conversation": present_codex_conversation_overview(conversation, sessions=sessions, turns=turns),
+        "turns": turn_cards,
+    }
+
+
+def _load_ops_persistent_turn_detail_or_404(
+    db: Session,
+    *,
+    ticket: Ticket,
+    turn_id: str,
+) -> dict[str, object]:
+    conversation = _load_codex_conversation(db, ticket_id=ticket.id)
+    if conversation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persistent turn not found")
+    sessions = list(
+        db.execute(
+            select(CodexSession)
+            .where(CodexSession.conversation_id == conversation.id)
+            .order_by(CodexSession.created_at.asc(), CodexSession.id.asc())
+        ).scalars()
+    )
+    session_segment_by_id = {session.id: index for index, session in enumerate(sessions, start=1)}
+    turns = list(
+        db.execute(
+            select(CodexTurn)
+            .where(CodexTurn.conversation_id == conversation.id)
+            .order_by(CodexTurn.turn_index.asc(), CodexTurn.created_at.asc(), CodexTurn.id.asc())
+        ).scalars()
+    )
+    try:
+        turn_uuid = uuid.UUID(turn_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persistent turn not found") from exc
+    turn = next((candidate for candidate in turns if candidate.id == turn_uuid), None)
+    if turn is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persistent turn not found")
+    session = db.get(CodexSession, turn.session_id) if turn.session_id else None
+    session_segment_index = session_segment_by_id.get(turn.session_id)
+    outcomes = list(
+        db.execute(
+            select(CodexTurnOutcome)
+            .where(CodexTurnOutcome.turn_id == turn.id)
+            .order_by(CodexTurnOutcome.outcome_index.asc(), CodexTurnOutcome.created_at.asc(), CodexTurnOutcome.id.asc())
+        ).scalars()
+    )
+    items = list(
+        db.execute(
+            select(CodexTurnItem)
+            .where(CodexTurnItem.turn_id == turn.id)
+            .order_by(CodexTurnItem.item_index.asc(), CodexTurnItem.created_at.asc(), CodexTurnItem.id.asc())
+        ).scalars()
+    )
+    run = db.get(AIRun, turn.ai_run_id)
+    drafts_by_ai_run_id = _load_latest_drafts_by_ai_run_id(db, ai_run_ids=[turn.ai_run_id])
+    published_messages_by_ai_run_id = _load_latest_published_messages_by_ai_run_id(db, ai_run_ids=[turn.ai_run_id])
+    return {
+        "conversation": present_codex_conversation_overview(
+            conversation,
+            sessions=sessions,
+            turns=turns,
+        ),
+        "turn": present_codex_turn_detail(
+            turn,
+            run=run,
+            outcomes=outcomes,
+            items=items,
+            session=session,
+            session_segment_index=session_segment_index,
+            draft=drafts_by_ai_run_id.get(turn.ai_run_id),
+            published_message=published_messages_by_ai_run_id.get(turn.ai_run_id),
+            conversation_status=conversation.status,
+        ),
+    }
+
+
 def _ops_route_target_options() -> list[dict[str, str]]:
     registry = load_routing_registry()
     return [
@@ -536,7 +732,7 @@ def _request_slack_user_sync_if_session_configured(
 
 
 def _should_request_slack_user_sync(requested_slack_user_id: str | None) -> bool:
-    return requested_slack_user_id in {None, ""}
+    return requested_slack_user_id is None or requested_slack_user_id.strip() == ""
 
 
 def _run_slack_auth_test(*, bot_token: str, timeout_seconds: int):
@@ -667,6 +863,7 @@ def _ticket_detail_context(
     ticket: Ticket,
     current_user: User,
     ui_locale: str = DEFAULT_UI_LOCALE,
+    persistent_visibility_enabled: bool = False,
 ) -> dict[str, object]:
     pending_draft = _load_pending_draft(db, ticket_id=ticket.id)
     latest_run = _load_latest_run(db, ticket_id=ticket.id)
@@ -678,6 +875,11 @@ def _ticket_detail_context(
     latest_ai_note = _load_latest_internal_ai_note(db, ticket_id=ticket.id)
     analysis_view = present_ai_run_output(latest_analysis_run)
     activity_timeline = _build_ops_activity_timeline(db, ticket_id=ticket.id, ui_locale=ui_locale)
+    persistent_conversation = (
+        _load_persistent_conversation_projection(db, ticket=ticket)
+        if persistent_visibility_enabled
+        else None
+    )
     creator = db.get(User, ticket.created_by_user_id)
     assignee = db.get(User, ticket.assigned_to_user_id) if ticket.assigned_to_user_id else None
     return {
@@ -705,6 +907,8 @@ def _ticket_detail_context(
         "ai_summary_short": analysis_view["summary_short"],
         "ai_summary_internal": analysis_view["summary_internal"],
         "rerun_specialist_options": _ops_manual_rerun_specialist_options(),
+        "persistent_conversation": persistent_conversation,
+        "persistent_visibility_enabled": persistent_visibility_enabled,
     }
 
 
@@ -1040,6 +1244,7 @@ def ops_ticket_detail(
     request: Request,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
     db: Session = Depends(db_session_dependency),
 ):
     ui_locale = resolve_ui_locale(request)
@@ -1053,7 +1258,47 @@ def ops_ticket_detail(
             request=request,
             current_user=current_user,
             auth_session=auth_session,
-            extra=_ticket_detail_context(db, ticket=ticket, current_user=current_user, ui_locale=ui_locale),
+            extra=_ticket_detail_context(
+                db,
+                ticket=ticket,
+                current_user=current_user,
+                ui_locale=ui_locale,
+                persistent_visibility_enabled=settings.codex_conversations_enabled,
+            ),
+            ui_locale=ui_locale,
+        ),
+    )
+
+
+@router.get("/ops/tickets/{reference}/persistent-turns/{turn_id}", response_class=HTMLResponse)
+def ops_persistent_turn_detail(
+    reference: str,
+    turn_id: str,
+    request: Request,
+    current_user: User = Depends(require_ops_user),
+    auth_session=Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(db_session_dependency),
+):
+    if not settings.codex_conversations_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persistent turn not found")
+    ui_locale = resolve_ui_locale(request)
+    ticket = _load_ops_ticket_or_404(db, reference=reference)
+    detail = _load_ops_persistent_turn_detail_or_404(db, ticket=ticket, turn_id=turn_id)
+    upsert_ticket_view(db, user_id=current_user.id, ticket_id=ticket.id)
+    db.commit()
+    return templates.TemplateResponse(
+        request,
+        "ops_codex_turn_detail.html",
+        build_template_context(
+            request=request,
+            current_user=current_user,
+            auth_session=auth_session,
+            extra={
+                "ticket": ticket,
+                "persistent_conversation": detail["conversation"],
+                "persistent_turn": detail["turn"],
+            },
             ui_locale=ui_locale,
         ),
     )

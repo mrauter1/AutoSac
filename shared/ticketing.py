@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from shared.config import Settings
+from shared.codex_turns import append_codex_turn_outcome_for_ai_run, load_codex_turn_for_ai_run
 from shared.integrations import (
     SlackRuntimeContext,
     record_ticket_created_event,
@@ -39,6 +40,27 @@ class AttachmentUpload(Protocol):
     size_bytes: int
     width: int | None
     height: int | None
+
+
+def _lock_ai_run_for_publication(db: Session, *, ai_run_id: uuid.UUID) -> None:
+    if not isinstance(db, Session):
+        return
+    db.execute(
+        select(AIRun)
+        .where(AIRun.id == ai_run_id)
+        .with_for_update()
+    ).scalar_one()
+
+
+def _lock_ai_draft_for_review(db: Session, *, draft: AIDraft) -> AIDraft:
+    if not isinstance(db, Session):
+        return draft
+    return db.execute(
+        select(AIDraft)
+        .where(AIDraft.id == draft.id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    ).scalar_one()
 
 
 def generate_ticket_reference(reference_num: int) -> str:
@@ -176,16 +198,66 @@ def clear_requeue_request(ticket: Ticket, *, touched_at=None) -> None:
     touch_ticket(ticket, touched_at)
 
 
-def supersede_pending_drafts(db: Session, ticket_id: uuid.UUID, keep_draft_id: uuid.UUID | None = None) -> int:
-    statement = (
-        update(AIDraft)
-        .where(AIDraft.ticket_id == ticket_id, AIDraft.status == "pending_approval")
-        .values(status="superseded")
+def _persistent_turn_exists(db: Session, *, ai_run_id: uuid.UUID) -> bool:
+    return load_codex_turn_for_ai_run(db, ai_run_id=ai_run_id) is not None
+
+
+def _append_turn_outcome_for_message(
+    db: Session,
+    *,
+    ai_run_id: uuid.UUID,
+    outcome_kind: str,
+    payload_json: dict,
+) -> uuid.UUID | None:
+    outcome = append_codex_turn_outcome_for_ai_run(
+        db,
+        ai_run_id=ai_run_id,
+        outcome_kind=outcome_kind,
+        payload_json=payload_json,
     )
-    if keep_draft_id is not None:
-        statement = statement.where(AIDraft.id != keep_draft_id)
-    result = db.execute(statement)
-    return int(result.rowcount or 0)
+    return outcome.id if outcome is not None else None
+
+
+def _result_scalars_list_compatible(result) -> list:
+    scalars = getattr(result, "scalars", None)
+    if callable(scalars):
+        return list(scalars())
+    all_method = getattr(result, "all", None)
+    if callable(all_method):
+        return list(all_method())
+    first = getattr(result, "first", None)
+    if callable(first):
+        value = first()
+        return [] if value is None else [value]
+    return []
+
+
+def supersede_pending_drafts(db: Session, ticket_id: uuid.UUID, keep_draft_id: uuid.UUID | None = None) -> int:
+    drafts = _result_scalars_list_compatible(
+        db.execute(
+            select(AIDraft)
+            .where(AIDraft.ticket_id == ticket_id, AIDraft.status == "pending_approval")
+            .order_by(AIDraft.created_at.asc(), AIDraft.id.asc())
+        )
+    )
+    superseded = 0
+    for draft in drafts:
+        if keep_draft_id is not None and draft.id == keep_draft_id:
+            continue
+        draft.status = "superseded"
+        superseded += 1
+        if _persistent_turn_exists(db, ai_run_id=draft.ai_run_id):
+            _append_turn_outcome_for_message(
+                db,
+                ai_run_id=draft.ai_run_id,
+                outcome_kind="superseded",
+                payload_json={
+                    "draft_id": str(draft.id),
+                    "draft_status": draft.status,
+                    "reason": "pending_draft_replaced",
+                },
+            )
+    return superseded
 
 
 def ensure_system_state_defaults(db: Session, bootstrap_version: str) -> None:
@@ -233,6 +305,7 @@ def _create_message(
     body_markdown: str,
     created_at,
     ai_run_id: uuid.UUID | None = None,
+    codex_turn_outcome_id: uuid.UUID | None = None,
 ) -> TicketMessage:
     return TicketMessage(
         id=uuid.uuid4(),
@@ -244,6 +317,7 @@ def _create_message(
         body_markdown=body_markdown,
         body_text=normalize_message_text(body_markdown),
         ai_run_id=ai_run_id,
+        codex_turn_outcome_id=codex_turn_outcome_id,
         created_at=created_at,
     )
 
@@ -297,6 +371,21 @@ def _create_public_message(
         body_markdown=body_markdown,
         created_at=created_at,
     )
+
+
+def _load_existing_ai_public_message(db: Session, *, ai_run_id: uuid.UUID) -> TicketMessage | None:
+    if not hasattr(db, "execute"):
+        return None
+    return db.execute(
+        select(TicketMessage)
+        .where(
+            TicketMessage.ai_run_id == ai_run_id,
+            TicketMessage.visibility == "public",
+            TicketMessage.author_type == "ai",
+        )
+        .order_by(TicketMessage.created_at.desc(), TicketMessage.id.desc())
+        .limit(1)
+    ).scalars().first()
 
 
 def _apply_ai_status(
@@ -550,6 +639,22 @@ def publish_ai_public_reply(
     created_at=None,
 ) -> TicketMessage:
     published_at = created_at or utc_now()
+    _lock_ai_run_for_publication(db, ai_run_id=ai_run_id)
+    existing_message = _load_existing_ai_public_message(db, ai_run_id=ai_run_id)
+    if existing_message is not None:
+        return existing_message
+    outcome_id = _append_turn_outcome_for_message(
+        db,
+        ai_run_id=ai_run_id,
+        outcome_kind="auto_published",
+        payload_json={
+            "body_markdown": body_markdown,
+            "next_status": next_status,
+            "last_ai_action": last_ai_action,
+            "published_at": published_at.isoformat(),
+            "increment_clarification_rounds": increment_clarification_rounds,
+        },
+    )
     message = _create_message(
         ticket_id=ticket.id,
         author_user_id=None,
@@ -559,6 +664,7 @@ def publish_ai_public_reply(
         body_markdown=body_markdown,
         created_at=published_at,
         ai_run_id=ai_run_id,
+        codex_turn_outcome_id=outcome_id,
     )
     db.add(message)
     if increment_clarification_rounds:
@@ -602,6 +708,20 @@ def create_ai_draft(
         status="pending_approval",
         created_at=draft_time,
     )
+    outcome_id = _append_turn_outcome_for_message(
+        db,
+        ai_run_id=ai_run_id,
+        outcome_kind="draft_created",
+        payload_json={
+            "draft_id": str(draft.id),
+            "body_markdown": draft.body_markdown,
+            "next_status": next_status,
+            "last_ai_action": last_ai_action,
+            "created_at": draft_time.isoformat(),
+        },
+    )
+    if outcome_id is not None:
+        draft.codex_turn_outcome_id = outcome_id
     db.add(draft)
     supersede_pending_drafts(db, ticket.id, keep_draft_id=draft.id)
     _apply_ai_status(
@@ -884,21 +1004,46 @@ def publish_ai_draft_for_ops(
     draft: AIDraft,
     actor: User,
     next_status: str,
+    body_markdown: str | None = None,
 ) -> TicketMessage:
+    draft = _lock_ai_draft_for_review(db, draft=draft)
+    existing_message = (
+        _load_existing_ai_public_message(db, ai_run_id=draft.ai_run_id)
+        if isinstance(db, Session)
+        else None
+    )
+    if existing_message is not None:
+        return existing_message
     if draft.status != "pending_approval":
         raise ValueError("Only pending drafts can be published.")
     if next_status not in {"waiting_on_user", "waiting_on_dev_ti", "resolved"}:
         raise ValueError(f"Invalid draft publish next status: {next_status}")
     published_at = utc_now()
+    published_body = (body_markdown if body_markdown is not None else draft.body_markdown).strip()
+    outcome_id = _append_turn_outcome_for_message(
+        db,
+        ai_run_id=draft.ai_run_id,
+        outcome_kind="published_with_edits",
+        payload_json={
+            "draft_id": str(draft.id),
+            "published_body_markdown": published_body,
+            "original_draft_body_markdown": draft.body_markdown,
+            "edited": published_body != draft.body_markdown,
+            "reviewed_by_user_id": str(actor.id),
+            "next_status": next_status,
+            "published_at": published_at.isoformat(),
+        },
+    )
     message = _create_message(
         ticket_id=ticket.id,
         author_user_id=None,
         author_type="ai",
         visibility="public",
         source="ai_draft_published",
-        body_markdown=draft.body_markdown,
+        body_markdown=published_body,
         created_at=published_at,
         ai_run_id=draft.ai_run_id,
+        codex_turn_outcome_id=outcome_id,
     )
     db.add(message)
     db.flush()
@@ -935,11 +1080,23 @@ def reject_ai_draft_for_ops(
     draft: AIDraft,
     actor: User,
 ) -> None:
+    draft = _lock_ai_draft_for_review(db, draft=draft)
     if draft.status != "pending_approval":
         raise ValueError("Only pending drafts can be rejected.")
     reviewed_at = utc_now()
     draft.status = "rejected"
     draft.reviewed_by_user_id = actor.id
     draft.reviewed_at = reviewed_at
+    _append_turn_outcome_for_message(
+        db,
+        ai_run_id=draft.ai_run_id,
+        outcome_kind="draft_rejected",
+        payload_json={
+            "draft_id": str(draft.id),
+            "draft_body_markdown": draft.body_markdown,
+            "reviewed_by_user_id": str(actor.id),
+            "reviewed_at": reviewed_at.isoformat(),
+        },
+    )
     touch_ticket(ticket, reviewed_at)
     upsert_ticket_view(db, user_id=actor.id, ticket_id=ticket.id, viewed_at=reviewed_at)

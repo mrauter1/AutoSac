@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+
+{% block title %}{{ ticket.reference }} | {{ t("ops.detail.turn") }} {{ persistent_turn.turn_index }} | {{ t("ops.detail.short_title") }} | {{ t("brand.name") }}{% endblock %}
+{% block page_class %} page--ops-ticket-detail{% endblock %}
+
+{% block body %}
+<div class="ops-ticket-detail">
+  <section class="page-header page-header--stack ops-ticket-detail__header">
+    <div class="ticket-card__meta ops-ticket-detail__meta">
+      <span class="ticket-ref">{{ ticket.reference }}</span>
+      <span class="status-pill">{{ t("ops.detail.turn") }} {{ persistent_turn.turn_index }}</span>
+      <span class="status-pill">{{ codex_turn_status_label(persistent_turn.status) }}</span>
+      {% if persistent_turn.latest_outcome_kind %}
+      <span class="status-pill">{{ codex_turn_outcome_label(persistent_turn.latest_outcome_kind) }}</span>
+      {% endif %}
+    </div>
+    <h1>{{ persistent_turn.specialist_display_name }}</h1>
+    <p class="muted ops-ticket-detail__subtitle">
+      {{ t("ops.detail.turn_detail_subtitle") }}
+      · <a href="/ops/tickets/{{ ticket.reference }}">{{ t("button.back_to_ticket") }}</a>
+    </p>
+  </section>
+
+  <section class="ops-ticket-detail__layout">
+    <div class="ops-ticket-detail__main stack">
+      <section class="panel stack ops-ticket-detail__thread">
+        <h2>{{ t("ops.detail.persistent_conversation") }}</h2>
+        <dl class="meta-list meta-list--compact">
+          <div>
+            <dt>{{ t("ops.detail.conversation_status") }}</dt>
+            <dd>{{ codex_conversation_status_label(persistent_conversation.status) }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.trigger") }}</dt>
+            <dd>{{ ai_run_trigger_label(persistent_turn.triggered_by) if persistent_turn.triggered_by else none_yet_label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("field.route_target") }}</dt>
+            <dd>{{ persistent_turn.route_target_display.label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.output_contract") }}</dt>
+            <dd>{{ persistent_turn.output_contract or none_yet_label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.session_status") }}</dt>
+            <dd>{{ codex_session_status_label(persistent_turn.session_status) if persistent_turn.session_status else none_yet_label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.session_segment") }}</dt>
+            <dd>{{ persistent_turn.session_segment_index or none_yet_label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.thread_id") }}</dt>
+            <dd>{{ persistent_turn.session_thread_id or none_yet_label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.lease_owner") }}</dt>
+            <dd>{{ persistent_turn.lease_owner_run_id or none_yet_label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.lease_worker") }}</dt>
+            <dd>
+              {% if persistent_turn.lease_worker_instance_id %}
+              {{ persistent_turn.lease_worker_instance_id }}
+              {% else %}
+              {{ none_yet_label }}
+              {% endif %}
+            </dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.lease_expires_at") }}</dt>
+            <dd>{% if persistent_turn.lease_expires_at %}{{ format_datetime_utc(persistent_turn.lease_expires_at) }}{% else %}{{ none_yet_label }}{% endif %}</dd>
+          </div>
+        </dl>
+        {% if persistent_turn.structured_result.summary_internal_excerpt or persistent_turn.structured_result.summary_short_excerpt or persistent_turn.publication.generated_excerpt or persistent_turn.publication.published_excerpt or persistent_turn.structured_result.internal_note_excerpt %}
+        <div class="stack stack--tight">
+          {% if persistent_turn.structured_result.summary_internal_excerpt %}
+          <div class="ops-ticket-detail__summary-block">
+            <strong>{{ t("ops.detail.internal_summary") }}</strong>
+            <p class="muted ops-ticket-detail__long-text">{{ persistent_turn.structured_result.summary_internal_excerpt }}</p>
+          </div>
+          {% elif persistent_turn.structured_result.summary_short_excerpt %}
+          <div class="ops-ticket-detail__summary-block">
+            <strong>{{ t("ops.detail.summary") }}</strong>
+            <p class="muted ops-ticket-detail__long-text">{{ persistent_turn.structured_result.summary_short_excerpt }}</p>
+          </div>
+          {% endif %}
+          {% if persistent_turn.publication.generated_excerpt %}
+          <div class="ops-ticket-detail__summary-block">
+            <strong>{{ t("ops.detail.generated_reply") }}</strong>
+            <p class="muted ops-ticket-detail__long-text">{{ persistent_turn.publication.generated_excerpt }}</p>
+          </div>
+          {% endif %}
+          {% if persistent_turn.publication.published_excerpt %}
+          <div class="ops-ticket-detail__summary-block">
+            <strong>{{ t("ops.detail.published_reply") }}</strong>
+            <p class="muted ops-ticket-detail__long-text">{{ persistent_turn.publication.published_excerpt }}</p>
+          </div>
+          {% endif %}
+          {% if persistent_turn.structured_result.internal_note_excerpt %}
+          <div class="ops-ticket-detail__summary-block">
+            <strong>{{ t("ops.detail.generated_internal_note") }}</strong>
+            <p class="muted ops-ticket-detail__long-text">{{ persistent_turn.structured_result.internal_note_excerpt }}</p>
+          </div>
+          {% endif %}
+          <div class="ops-ticket-detail__summary-block">
+            <strong>{{ t("ops.detail.generated_reply_state") }}</strong>
+            <p class="muted ops-ticket-detail__long-text">{{ t("ops.detail.publication_state." ~ persistent_turn.publication.state) }}</p>
+          </div>
+        </div>
+        {% endif %}
+        {% if persistent_turn.recovery_marker_keys %}
+        <ul class="attachment-list ops-ticket-detail__code-list">
+          {% for marker_key in persistent_turn.recovery_marker_keys %}
+          <li class="muted">{{ t(marker_key) }}</li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+        {% if persistent_turn.artifact_paths %}
+        <div class="ops-ticket-detail__summary-block">
+          <strong>{{ t("ops.detail.artifact_paths") }}</strong>
+          <ul class="attachment-list ops-ticket-detail__code-list">
+            {% for path in persistent_turn.artifact_paths %}
+            <li><code>{{ path }}</code></li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+      </section>
+
+      <section class="panel stack ops-ticket-detail__thread">
+        <h2>{{ t("ops.detail.outcome_history") }}</h2>
+        {% if persistent_turn["outcomes"] %}
+        {% for outcome in persistent_turn["outcomes"] %}
+        <article class="message-card ops-ticket-detail__turn-card">
+          <div class="message-card__meta">
+            <span class="lane-pill lane-pill--internal">{{ outcome.outcome_index }}</span>
+            <strong>{{ codex_turn_outcome_label(outcome.outcome_kind) }}</strong>
+            <span>{{ format_datetime_utc(outcome.created_at) }}</span>
+          </div>
+          <pre class="ops-ticket-detail__json">{{ outcome.payload_json_pretty }}</pre>
+        </article>
+        {% endfor %}
+        {% else %}
+        <p class="muted">{{ t("ops.detail.no_turn_outcomes") }}</p>
+        {% endif %}
+      </section>
+
+      <section class="panel stack ops-ticket-detail__thread">
+        <h2>{{ t("ops.detail.raw_turn_items") }}</h2>
+        {% if persistent_turn["items"] %}
+        {% for item in persistent_turn["items"] %}
+        <article class="message-card ops-ticket-detail__turn-card">
+          <div class="message-card__meta">
+            <span class="lane-pill lane-pill--internal">{{ item.item_index }}</span>
+            <strong>{{ item.item_kind }}</strong>
+            {% if item.codex_item_id %}
+            <span><code>{{ item.codex_item_id }}</code></span>
+            {% endif %}
+            <span>{{ format_datetime_utc(item.created_at) }}</span>
+          </div>
+          <pre class="ops-ticket-detail__json">{{ item.payload_json_pretty }}</pre>
+        </article>
+        {% endfor %}
+        {% else %}
+        <p class="muted">{{ t("ops.detail.no_turn_items") }}</p>
+        {% endif %}
+      </section>
+    </div>
+
+    <div class="ops-ticket-detail__sidebar stack">
+      <section class="panel stack stack--tight analysis-panel ops-ticket-detail__sidebar-section">
+        <h2>{{ t("ops.detail.persistent_conversation") }}</h2>
+        <dl class="meta-list meta-list--compact">
+          <div>
+            <dt>{{ t("ops.detail.latest_outcome") }}</dt>
+            <dd>{{ codex_turn_outcome_label(persistent_turn.latest_outcome_kind) if persistent_turn.latest_outcome_kind else none_yet_label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.generated_reply_state") }}</dt>
+            <dd>{{ t("ops.detail.publication_state." ~ persistent_turn.publication.state) }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.current_thread") }}</dt>
+            <dd>{{ persistent_turn.session_thread_id or none_yet_label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.turn_count") }}</dt>
+            <dd>{{ persistent_conversation.turn_count }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.session_count") }}</dt>
+            <dd>{{ persistent_conversation.session_count }}</dd>
+          </div>
+        </dl>
+      </section>
+    </div>
+  </section>
+</div>
+{% endblock %}

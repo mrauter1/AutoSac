@@ -1,0 +1,24 @@
+erDiagram
+    USER ||--o{ SESSION : owns
+    USER ||--o{ TICKET : creates
+    USER ||--o{ TICKET : assigned
+    USER ||--o{ TICKET_MESSAGE : authors
+    USER ||--o{ TICKET_STATUS_HISTORY : changes
+    USER ||--o{ TICKET_VIEW : views
+    USER ||--o{ AI_RUN : requests
+    USER ||--o{ AI_DRAFT : reviews
+    USER ||--o{ INTEGRATION_EVENT_TARGET : receives
+    USER ||--o| SLACK_DM_SETTINGS : updates
+    TICKET ||--o{ TICKET_MESSAGE : contains
+    TICKET ||--o{ TICKET_ATTACHMENT : contains
+    TICKET_MESSAGE ||--o{ TICKET_ATTACHMENT : owns
+    TICKET ||--o{ TICKET_STATUS_HISTORY : records
+    TICKET ||--o{ TICKET_VIEW : tracked_by
+    TICKET ||--o{ AI_RUN : analyzed_by
+    TICKET ||--o{ AI_DRAFT : has
+    AI_RUN ||--o{ AI_RUN_STEP : contains
+    AI_RUN ||--o{ AI_DRAFT : produces
+    AI_RUN ||--o{ TICKET_MESSAGE : produces
+    TICKET_MESSAGE ||--o| AI_DRAFT : publishes
+    INTEGRATION_EVENT ||--o{ INTEGRATION_EVENT_LINK : links
+    INTEGRATION_EVENT ||--o{ INTEGRATION_EVENT_TARGET : delivers_to

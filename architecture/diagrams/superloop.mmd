@@ -1,0 +1,14 @@
+flowchart TB
+    CLI[CLI and layered config] --> TASK[Task/run workspace]
+    TASK --> PLAN[Plan producer and verifier]
+    PLAN --> PHASE[Phase plan]
+    PHASE --> IMPL[Implement producer and reviewer per phase]
+    IMPL --> TEST[Test author and auditor per phase]
+    TEST --> DONE[Verifier-gated completion]
+    PLAN -->|question| QA[Human/automatic clarification]
+    IMPL -->|question| QA
+    TEST -->|question| QA
+    QA --> LEDGER[Decisions, raw logs, events, session state]
+    LEDGER --> PLAN
+    LEDGER --> IMPL
+    LEDGER --> TEST

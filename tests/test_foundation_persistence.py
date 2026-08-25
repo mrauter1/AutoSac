@@ -301,6 +301,95 @@ def test_agent_pipeline_migration_adds_run_steps_and_final_output_fields():
     assert 'op.add_column("ai_runs", sa.Column("final_agent_spec_id"' in migration_source
 
 
+def test_persistent_codex_foundation_migration_adds_schema_and_partial_indexes():
+    migration_source = Path(
+        "shared/migrations/versions/20260824_0013_persistent_codex_conversation_foundation.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'op.create_table(\n        "codex_conversations"' in migration_source
+    assert 'op.create_table(\n        "codex_sessions"' in migration_source
+    assert 'op.create_table(\n        "codex_turns"' in migration_source
+    assert 'op.create_table(\n        "codex_turn_inputs"' in migration_source
+    assert 'op.create_table(\n        "codex_turn_outcomes"' in migration_source
+    assert 'op.create_table(\n        "codex_turn_items"' in migration_source
+    assert (
+        "CREATE UNIQUE INDEX uq_codex_sessions_active_conversation ON codex_sessions (conversation_id) WHERE ended_at IS NULL"
+        in migration_source
+    )
+    assert (
+        "CREATE UNIQUE INDEX uq_codex_turns_active_conversation ON codex_turns (conversation_id) WHERE status IN ('prepared', 'running')"
+        in migration_source
+    )
+    assert 'op.add_column("ticket_messages", sa.Column("codex_turn_outcome_id"' in migration_source
+    assert 'op.add_column("ai_drafts", sa.Column("codex_turn_outcome_id"' in migration_source
+
+
+def test_persistent_codex_model_indexes_encode_cardinality_constraints():
+    from shared.models import AIDraft, CodexConversation, CodexSession, CodexTurn, TicketMessage
+
+    conversation_indexes = {index.name: index for index in CodexConversation.__table__.indexes}
+    session_indexes = {index.name: index for index in CodexSession.__table__.indexes}
+    turn_indexes = {index.name: index for index in CodexTurn.__table__.indexes}
+    draft_indexes = {index.name: index for index in AIDraft.__table__.indexes}
+    message_indexes = {index.name: index for index in TicketMessage.__table__.indexes}
+
+    assert conversation_indexes["uq_codex_conversations_ticket_id"].unique is True
+    assert session_indexes["uq_codex_sessions_active_conversation"].unique is True
+    assert str(session_indexes["uq_codex_sessions_active_conversation"].dialect_options["postgresql"]["where"]) == "ended_at IS NULL"
+    assert turn_indexes["uq_codex_turns_conversation_id_turn_index"].unique is True
+    assert turn_indexes["uq_codex_turns_active_conversation"].unique is True
+    assert str(turn_indexes["uq_codex_turns_active_conversation"].dialect_options["postgresql"]["where"]) == (
+        "status IN ('prepared', 'running')"
+    )
+    assert draft_indexes["uq_ai_drafts_codex_turn_outcome_id"].unique is True
+    assert message_indexes["uq_ticket_messages_codex_turn_outcome_id"].unique is True
+
+
+def test_persistent_codex_turn_presenter_summarizes_latest_outcome():
+    from shared.codex_conversations import present_codex_turn_state
+
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        ai_run_id=uuid.uuid4(),
+        turn_index=3,
+        status="completed",
+        specialist_id="support",
+        route_target_id="support",
+        accepted_at=None,
+        started_at=None,
+        ended_at=None,
+    )
+    outcomes = [
+        SimpleNamespace(outcome_index=1, outcome_kind="attempted", created_at="2026-08-24T10:00:00+00:00"),
+        SimpleNamespace(outcome_index=2, outcome_kind="completed", created_at="2026-08-24T10:05:00+00:00"),
+    ]
+
+    presented = present_codex_turn_state(turn, outcomes=outcomes)
+
+    assert presented["turn_id"] == turn.id
+    assert presented["status"] == "completed"
+    assert presented["count"] == 2
+    assert presented["latest_outcome_kind"] == "completed"
+
+
+def test_persistent_codex_transport_fencing_migration_adds_lease_fields():
+    migration_source = Path(
+        "shared/migrations/versions/20260824_0014_persistent_codex_transport_fencing.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'op.add_column("codex_sessions", sa.Column("lease_owner_run_id"' in migration_source
+    assert 'op.add_column("codex_sessions", sa.Column("lease_worker_instance_id"' in migration_source
+    assert 'op.add_column("codex_sessions", sa.Column("lease_acquired_at"' in migration_source
+    assert 'op.add_column("codex_sessions", sa.Column("lease_heartbeat_at"' in migration_source
+    assert 'op.add_column("codex_sessions", sa.Column("lease_expires_at"' in migration_source
+    assert 'op.create_index("ix_codex_sessions_lease_owner_run_id"' in migration_source
+    assert 'op.create_index("ix_codex_sessions_lease_expires_at"' in migration_source
+    assert 'codex_sessions_lease_owner_matches_worker_instance' in migration_source
+    assert "lease_worker_pid" not in migration_source
+
+
 def test_route_target_compatibility_migration_adds_backfill_and_selector_step_kind():
     migration_source = Path("shared/migrations/versions/20260406_0005_route_target_compatibility.py").read_text(
         encoding="utf-8"
@@ -959,7 +1048,7 @@ def test_create_user_rejects_duplicate_slack_user_id():
             query_text = str(statement)
             params = statement.compile().params
             value = next(iter(params.values()), None)
-            if "users.email" in query_text:
+            if "WHERE users.email =" in query_text:
                 return _Result(None)
             return _Result(existing_user if value == existing_user.slack_user_id else None)
 

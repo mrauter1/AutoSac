@@ -1,0 +1,13 @@
+flowchart LR
+    RUN[Claimed AIRun] --> FP[Load context and fingerprint]
+    FP --> ROUTER[Router step]
+    ROUTER --> TARGET{Specialist selection mode}
+    TARGET -->|fixed| SPECIALIST[Specialist step]
+    TARGET -->|auto| SELECTOR[Selector step]
+    SELECTOR --> SPECIALIST
+    TARGET -->|none| HANDOFF[Human handoff]
+    SPECIALIST --> POLICY[Validate publication policy]
+    POLICY -->|auto_publish| PUBLIC[Public reply and succeeded]
+    POLICY -->|draft_for_human| DRAFT[Draft and human_review]
+    POLICY -->|manual_only| HUMAN[Internal note and human_review]
+

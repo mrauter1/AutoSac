@@ -1213,6 +1213,40 @@ def test_requester_detail_marks_last_public_message_for_auto_scroll(monkeypatch)
     )
 
 
+def test_requester_detail_does_not_render_ops_persistent_turn_metadata(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000004", id=uuid.uuid4(), title="Ticket", status="new", urgent=False)
+    timeline = [
+        {
+            "kind": "message",
+            "id": str(uuid.uuid4()),
+            "created_at": SimpleNamespace(strftime=lambda fmt: "2026-03-26 19:00 UTC"),
+            "author_label": "AI",
+            "body_html": "<p>Published response.</p>",
+            "attachments": [],
+        }
+    ]
+
+    monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(stack["routes_requester"], "_build_requester_timeline", lambda *args, **kwargs: timeline)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: requester
+    app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get(f"/app/tickets/{ticket.reference}")
+
+    assert response.status_code == 200
+    assert "Persistent turn history" not in response.text
+    assert "Inspect turn" not in response.text
+    assert "thread.started" not in response.text
+
+
 def test_attachment_download_forbids_non_owner_requester():
     stack = _load_web_stack()
     app = stack["create_app"]()

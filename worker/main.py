@@ -17,6 +17,7 @@ from shared.security import utc_now
 from shared.slack_dm import load_slack_dm_settings
 from shared.slack_user_sync import request_slack_user_sync
 from shared.ticketing import ensure_system_state_defaults
+from worker.persistent_codex import refresh_persistent_session_leases
 from worker.queue import claim_oldest_pending_run, recover_stale_runs
 from worker.slack_delivery import delivery_loop as slack_delivery_loop
 from worker.slack_user_sync import slack_user_sync_loop
@@ -58,6 +59,7 @@ def ensure_worker_system_state(db: Session) -> None:
 def update_worker_heartbeat(
     db: Session,
     *,
+    settings,
     worker_identity: WorkerIdentity,
     active_run_id=None,
 ) -> None:
@@ -87,6 +89,12 @@ def update_worker_heartbeat(
     if run.worker_instance_id != worker_identity.worker_instance_id:
         return
     run.last_heartbeat_at = now
+    refresh_persistent_session_leases(
+        db,
+        run_id=run.id,
+        worker_instance_id=worker_identity.worker_instance_id,
+        stale_timeout_seconds=settings.ai_run_stale_timeout_seconds,
+    )
 
 
 def emit_worker_heartbeat(
@@ -99,6 +107,7 @@ def emit_worker_heartbeat(
     with session_scope(settings) as db:
         update_worker_heartbeat(
             db,
+            settings=settings,
             worker_identity=worker_identity,
             active_run_id=active_run_id,
         )

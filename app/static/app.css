@@ -938,6 +938,40 @@ small {
   padding-top: 0;
 }
 
+.page--ops-ticket-detail .ops-ticket-detail__turn-list {
+  gap: 0.9rem;
+}
+
+.page--ops-ticket-detail .ops-ticket-detail__turn-card {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: var(--ops-detail-border);
+}
+
+.page--ops-ticket-detail .ops-ticket-detail__turn-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.page--ops-ticket-detail .ops-ticket-detail__turn-footer .button {
+  width: auto;
+}
+
+.page--ops-ticket-detail .ops-ticket-detail__json {
+  margin: 0;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid rgba(58, 47, 34, 0.09);
+  border-radius: 16px;
+  background: rgba(246, 242, 235, 0.92);
+  color: var(--ops-detail-text);
+  font-size: 0.88rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .page--ops-ticket-detail .analysis-panel h2 {
   margin-bottom: 0.2rem;
 }
@@ -983,6 +1017,11 @@ small {
 
   .page--ops-ticket-detail .ops-ticket-detail__reply-controls {
     grid-template-columns: 1fr;
+  }
+
+  .page--ops-ticket-detail .ops-ticket-detail__turn-footer {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .page--ops-ticket-detail .ops-ticket-detail__header h1 {

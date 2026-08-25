@@ -6,7 +6,11 @@ import json
 from typing import Literal
 import uuid
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 from shared.agent_specs import PIPELINE_VERSION
+from shared.codex_turns import append_codex_turn_outcome_for_ai_run
 from shared.config import Settings
 from shared.db import session_scope
 from shared.integrations import build_slack_runtime_context
@@ -25,8 +29,9 @@ from shared.ticketing import (
     request_requeue,
     route_ticket_after_ai,
 )
+from worker.codex_inputs import PromptConversationState, build_prompt_conversation_state
 from worker.output_contracts import HumanHandoffResult, SpecialistResult
-from worker.pipeline import PipelineExecutionResult, execute_triage_pipeline
+from worker.pipeline import PipelineExecutionResult, PersistentCodexNonQuiescentCleanupError, execute_triage_pipeline
 from worker.publication_policy import PublicationDecision, PublicationPolicyError, resolve_effective_publication_mode
 from worker.run_ownership import RunOwnershipLost, load_owned_running_run
 from worker.step_runner import StepRunError, write_run_manifest_snapshot
@@ -40,6 +45,7 @@ class PreparedRunContext:
     worker_instance_id: str
     input_hash: str
     context: LoadedTicketContext
+    prompt_state: PromptConversationState
     forced_route_target_id: str | None
     forced_specialist_id: str | None
 
@@ -79,6 +85,35 @@ def build_requester_visible_fingerprint(context: LoadedTicketContext) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def _freeze_run_input(
+    db,
+    *,
+    settings: Settings,
+    context: LoadedTicketContext,
+    run: AIRun,
+) -> tuple[str, PromptConversationState]:
+    prompt_state = build_prompt_conversation_state(
+        db,
+        context=context,
+        run=run,
+        feature_enabled=settings.codex_conversations_enabled,
+    )
+    if settings.codex_conversations_enabled or prompt_state.conversation_id is not None:
+        return prompt_state.input_hash, prompt_state
+    return build_requester_visible_fingerprint(context), prompt_state
+
+
+def _lock_ticket_for_snapshot(db, *, ticket_id) -> None:
+    result = db.execute(
+        select(Ticket)
+        .where(Ticket.id == ticket_id)
+        .with_for_update()
+    )
+    scalar_one_or_none = getattr(result, "scalar_one_or_none", None)
+    if isinstance(db, Session) and callable(scalar_one_or_none) and scalar_one_or_none() is None:
+        raise StepRunError(f"Ticket {ticket_id} disappeared while freezing AI input")
+
+
 def _prepare_run(settings: Settings, *, run_id, worker_instance_id: str) -> PreparedRunContext | None:
     with session_scope(settings) as db:
         slack_runtime = build_slack_runtime_context(settings, db=db)
@@ -90,8 +125,16 @@ def _prepare_run(settings: Settings, *, run_id, worker_instance_id: str) -> Prep
         if run is None:
             return None
 
+        # Serialize the short snapshot transaction with ticket mutations. The
+        # lock is released before router or Codex execution begins.
+        _lock_ticket_for_snapshot(db, ticket_id=run.ticket_id)
         context = load_ticket_context(db, run.ticket_id)
-        current_fingerprint = build_requester_visible_fingerprint(context)
+        current_fingerprint, _ = _freeze_run_input(
+            db,
+            settings=settings,
+            context=context,
+            run=run,
+        )
 
         if run.triggered_by != "manual_rerun" and current_fingerprint == context.ticket.last_processed_hash:
             run.input_hash = current_fingerprint
@@ -118,7 +161,12 @@ def _prepare_run(settings: Settings, *, run_id, worker_instance_id: str) -> Prep
             )
             context = load_ticket_context(db, run.ticket_id)
 
-        input_hash = build_requester_visible_fingerprint(context)
+        input_hash, prompt_state = _freeze_run_input(
+            db,
+            settings=settings,
+            context=context,
+            run=run,
+        )
         run.input_hash = input_hash
         run.model_name = None
         run.pipeline_version = PIPELINE_VERSION
@@ -134,6 +182,7 @@ def _prepare_run(settings: Settings, *, run_id, worker_instance_id: str) -> Prep
             worker_instance_id=worker_instance_id,
             input_hash=input_hash,
             context=context,
+            prompt_state=prompt_state,
             forced_route_target_id=getattr(run, "forced_route_target_id", None),
             forced_specialist_id=getattr(run, "forced_specialist_id", None),
         )
@@ -145,6 +194,15 @@ def _mark_superseded_due_to_stale_input(db, *, run: AIRun, ticket: Ticket) -> No
     run.status = "superseded"
     run.ended_at = utc_now()
     run.error_text = None
+    append_codex_turn_outcome_for_ai_run(
+        db,
+        ai_run_id=run.id,
+        outcome_kind="superseded",
+        payload_json={
+            "reason": "stale_input",
+            "requeue_trigger": ticket.requeue_trigger,
+        },
+    )
     process_deferred_requeue(db, ticket=ticket)
 
 
@@ -320,8 +378,14 @@ def _apply_success_result(
             raise RunOwnershipLost(
                 f"Run {run_id} is no longer running for worker {worker_instance_id} during finalization."
             )
+        _lock_ticket_for_snapshot(db, ticket_id=run.ticket_id)
         context = load_ticket_context(db, run.ticket_id)
-        publication_hash = build_requester_visible_fingerprint(context)
+        publication_hash, _ = _freeze_run_input(
+            db,
+            settings=settings,
+            context=context,
+            run=run,
+        )
 
         if context.ticket.requeue_requested or publication_hash != run.input_hash:
             _mark_superseded_due_to_stale_input(db, run=run, ticket=context.ticket)
@@ -415,8 +479,29 @@ def _apply_success_result(
                     last_ai_action=outcome.last_ai_action,
                     created_at=completed_at,
                 )
+                append_codex_turn_outcome_for_ai_run(
+                    db,
+                    ai_run_id=run.id,
+                    outcome_kind="internal_only_retained",
+                    payload_json={
+                        "next_status": outcome.next_status,
+                        "last_ai_action": outcome.last_ai_action,
+                        "internal_note_markdown": outcome.internal_note_markdown,
+                        "completed_at": completed_at.isoformat(),
+                    },
+                )
 
-            context.ticket.last_processed_hash = publication_hash
+            refreshed_context = load_ticket_context(db, run.ticket_id)
+            prompt_state = build_prompt_conversation_state(
+                db,
+                context=refreshed_context,
+                run=run,
+                feature_enabled=settings.codex_conversations_enabled,
+            )
+            if settings.codex_conversations_enabled or prompt_state.conversation_id is not None:
+                context.ticket.last_processed_hash = prompt_state.input_hash
+            else:
+                context.ticket.last_processed_hash = publication_hash
             run.status = outcome.run_status
             run.ended_at = completed_at
             run.error_text = None
@@ -504,6 +589,7 @@ def process_ai_run(settings: Settings, *, run_id, worker_instance_id: str) -> No
             ticket_id=prepared.ticket_id,
             worker_instance_id=prepared.worker_instance_id,
             context=prepared.context,
+            prompt_state=getattr(prepared, "prompt_state", None),
             forced_route_target_id=getattr(prepared, "forced_route_target_id", None),
             forced_specialist_id=getattr(prepared, "forced_specialist_id", None),
         )
@@ -518,6 +604,14 @@ def process_ai_run(settings: Settings, *, run_id, worker_instance_id: str) -> No
             run_id=terminal_run_id,
             worker_instance_id=worker_instance_id,
             error_text=str(exc),
+        )
+    except PersistentCodexNonQuiescentCleanupError as exc:
+        log_worker_event(
+            "persistent_codex_cleanup_retained_for_stale_recovery",
+            level="warning",
+            run_id=str(terminal_run_id),
+            worker_instance_id=worker_instance_id,
+            error=str(exc),
         )
     except (StepRunError, PublicationPolicyError) as exc:
         try:

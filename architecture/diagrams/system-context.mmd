@@ -1,0 +1,12 @@
+flowchart LR
+    REQUESTER[Requester] -->|HTML forms| WEB[AutoSac web]
+    OPS[Dev/TI and admin] -->|HTML + HTMX| WEB
+    WEB --> DB[(PostgreSQL)]
+    WEB --> FS[(Persistent workspace)]
+    WORKER[AutoSac worker] --> DB
+    WORKER --> FS
+    WORKER -->|read-only structured execution| CODEX[Codex CLI]
+    WORKER --> SLACK[Slack Web API]
+    ADMIN[Operator scripts] --> DB
+    ADMIN --> FS
+

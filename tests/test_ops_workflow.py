@@ -656,6 +656,61 @@ def test_publish_ai_draft_for_ops_creates_ai_message_and_status_change():
     assert fake_db.flush_calls == 3
 
 
+def test_publish_ai_draft_for_ops_links_publication_outcome_and_supports_edited_body(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=808,
+        reference="T-000808",
+        title="Approval with edit",
+        created_by_user_id=uuid.uuid4(),
+        status="waiting_on_dev_ti",
+        urgent=False,
+    )
+    draft = symbols["AIDraft"](
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        ai_run_id=uuid.uuid4(),
+        kind="public_reply",
+        body_markdown="Original draft body.",
+        body_text="Original draft body.",
+        status="pending_approval",
+    )
+    outcome_id = uuid.uuid4()
+    captured = {}
+
+    monkeypatch.setattr(
+        "shared.ticketing._append_turn_outcome_for_message",
+        lambda db, *, ai_run_id, outcome_kind, payload_json: captured.update(
+            {
+                "ai_run_id": ai_run_id,
+                "outcome_kind": outcome_kind,
+                "payload_json": payload_json,
+            }
+        )
+        or outcome_id,
+    )
+
+    message = symbols["publish_ai_draft_for_ops"](
+        fake_db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        draft=draft,
+        actor=actor,
+        next_status="waiting_on_user",
+        body_markdown="Edited published body.",
+    )
+
+    assert message.body_markdown == "Edited published body."
+    assert message.codex_turn_outcome_id == outcome_id
+    assert captured["outcome_kind"] == "published_with_edits"
+    assert captured["payload_json"]["edited"] is True
+    assert captured["payload_json"]["original_draft_body_markdown"] == "Original draft body."
+
+
 def test_reject_ai_draft_for_ops_marks_review_metadata_without_status_change():
     symbols = _load_symbols()
     fake_db = _FakeSession()
@@ -687,6 +742,49 @@ def test_reject_ai_draft_for_ops_marks_review_metadata_without_status_change():
     assert draft.reviewed_at is not None
     assert ticket.status == "waiting_on_dev_ti"
     assert history == []
+
+
+def test_reject_ai_draft_for_ops_records_rejection_outcome(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=811,
+        reference="T-000811",
+        title="Reject draft outcome",
+        created_by_user_id=uuid.uuid4(),
+        status="waiting_on_dev_ti",
+        urgent=False,
+    )
+    draft = symbols["AIDraft"](
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        ai_run_id=uuid.uuid4(),
+        kind="public_reply",
+        body_markdown="Needs review.",
+        body_text="Needs review.",
+        status="pending_approval",
+    )
+    captured = {}
+
+    monkeypatch.setattr(
+        "shared.ticketing._append_turn_outcome_for_message",
+        lambda db, *, ai_run_id, outcome_kind, payload_json: captured.update(
+            {
+                "ai_run_id": ai_run_id,
+                "outcome_kind": outcome_kind,
+                "payload_json": payload_json,
+            }
+        ),
+    )
+
+    symbols["reject_ai_draft_for_ops"](fake_db, ticket=ticket, draft=draft, actor=actor)
+
+    assert captured["ai_run_id"] == draft.ai_run_id
+    assert captured["outcome_kind"] == "draft_rejected"
+    assert captured["payload_json"]["draft_id"] == str(draft.id)
+    assert captured["payload_json"]["draft_body_markdown"] == draft.body_markdown
 
 
 def test_publish_ai_draft_for_ops_rejects_non_pending_draft():
@@ -722,6 +820,52 @@ def test_publish_ai_draft_for_ops_rejects_non_pending_draft():
             actor=actor,
             next_status="waiting_on_user",
         )
+
+
+def test_publish_ai_public_reply_is_idempotent_when_message_already_exists(monkeypatch):
+    pytest.importorskip("sqlalchemy")
+
+    from shared.ticketing import publish_ai_public_reply
+
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=812,
+        reference="T-000812",
+        title="Auto publish idempotent",
+        created_by_user_id=uuid.uuid4(),
+        status="waiting_on_dev_ti",
+        urgent=False,
+    )
+    existing_message = symbols["TicketMessage"](
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        author_user_id=None,
+        author_type="ai",
+        visibility="public",
+        source="ai_auto_public",
+        body_markdown="Already published.",
+        body_text="Already published.",
+        ai_run_id=uuid.uuid4(),
+    )
+
+    monkeypatch.setattr("shared.ticketing._load_existing_ai_public_message", lambda db, *, ai_run_id: existing_message)
+    monkeypatch.setattr("shared.ticketing._append_turn_outcome_for_message", lambda *args, **kwargs: pytest.fail("unexpected outcome append"))
+
+    returned = publish_ai_public_reply(
+        fake_db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        ai_run_id=existing_message.ai_run_id,
+        body_markdown="Should not duplicate.",
+        next_status="waiting_on_user",
+        last_ai_action="auto_public_reply",
+    )
+
+    assert returned is existing_message
+    assert fake_db.added == []
 
 
 def _load_web_stack():
@@ -799,6 +943,80 @@ def test_present_ai_run_output_exposes_legacy_triage_fields():
     assert presentation["legacy_development_needed"] is False
 
 
+def test_present_codex_turn_summary_tracks_publication_and_recovery_state():
+    pytest.importorskip("fastapi")
+    from app.codex_turn_presenters import present_codex_turn_summary
+
+    started_at = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+    ended_at = started_at + timedelta(minutes=4)
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        ai_run_id=uuid.uuid4(),
+        turn_index=2,
+        status="completed",
+        specialist_id="support_specialist",
+        route_target_id="support",
+        output_contract="specialist_result",
+        prompt_path="/tmp/prompt.txt",
+        schema_path="/tmp/schema.json",
+        final_output_path="/tmp/final.json",
+        stdout_jsonl_path="/tmp/stdout.jsonl",
+        stderr_path="/tmp/stderr.txt",
+        accepted_at=started_at,
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+    run = SimpleNamespace(
+        triggered_by="manual_rerun",
+        final_output_contract="specialist_result",
+        final_output_json={
+            "summary_internal": "Generated draft needs review.",
+            "public_reply_markdown": "Original generated reply.",
+            "internal_note_markdown": "Internal follow-up.",
+        },
+    )
+    outcomes = [
+        SimpleNamespace(outcome_index=1, outcome_kind="accepted", created_at=started_at, payload_json={}),
+        SimpleNamespace(outcome_index=2, outcome_kind="published_with_edits", created_at=ended_at, payload_json={}),
+    ]
+    session = SimpleNamespace(
+        status="active",
+        thread_id="thread-123",
+        lease_owner_run_id=uuid.uuid4(),
+        lease_worker_instance_id="worker-a",
+        lease_expires_at=ended_at + timedelta(minutes=1),
+    )
+    published_message = SimpleNamespace(
+        id=uuid.uuid4(),
+        body_markdown="Edited published reply.",
+        created_at=ended_at,
+    )
+
+    presented = present_codex_turn_summary(
+        turn,
+        run=run,
+        outcomes=outcomes,
+        session=session,
+        session_segment_index=2,
+        draft=None,
+        published_message=published_message,
+        raw_item_count=3,
+        conversation_status="recovery_required",
+    )
+
+    assert presented["publication"]["state"] == "edited_before_publish"
+    assert presented["structured_result"]["public_reply_excerpt"] == "Original generated reply."
+    assert presented["raw_item_count"] == 3
+    assert presented["recovery_boundary"] is True
+    assert presented["recovery_marker_keys"] == [
+        "ops.detail.recovery_marker.conversation_recovery_required",
+        "ops.detail.recovery_marker.replacement_session_segment",
+    ]
+    assert presented["specialist_display_name"] == "Support Specialist"
+
+
 class _RouteDb:
     def __init__(self):
         self.commit_calls = 0
@@ -839,6 +1057,22 @@ def test_requester_cannot_access_ops_board():
 
     with stack["TestClient"](app) as client:
         response = client.get("/ops/board")
+
+    assert response.status_code == 403
+
+
+def test_requester_cannot_access_ops_persistent_turn_detail():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester", is_active=True)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: requester
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: SimpleNamespace(csrf_token="csrf")
+
+    with stack["TestClient"](app) as client:
+        response = client.get(f"/ops/tickets/T-000999/persistent-turns/{uuid.uuid4()}")
 
     assert response.status_code == 403
 
@@ -1917,7 +2151,7 @@ def test_admin_user_update_with_blank_slack_id_requests_sync_when_slack_is_confi
                 "display_name": "Updated User",
                 "password": "",
                 "role": "requester",
-                "slack_user_id": "",
+                "slack_user_id": " ",
             },
             follow_redirects=False,
         )
@@ -2882,6 +3116,222 @@ def test_ops_detail_route_renders_running_run_worker_metadata(monkeypatch):
     assert translate(locale, "ops.detail.recovery_attempts") in response.text
 
 
+def test_ops_detail_route_renders_persistent_turn_history_when_enabled(monkeypatch):
+    from app.i18n import translate
+    from shared.config import get_default_ui_locale
+
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = Settings(**{**_make_settings().__dict__, "codex_conversations_enabled": True})
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    turn_id = uuid.uuid4()
+    ticket = SimpleNamespace(
+        reference="T-000014",
+        id=uuid.uuid4(),
+        title="Persistent history",
+        status="waiting_on_dev_ti",
+        urgent=False,
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_ticket_detail_context",
+        lambda *args, **kwargs: {
+            "ticket": ticket,
+            "route_target_display": {"id": "support", "label": "Support", "kind": "direct_ai"},
+            "creator": None,
+            "assignee": None,
+            "activity_timeline": [],
+            "ops_users": [],
+            "status_options": [],
+            "draft_reply_status_options": [],
+            "public_reply_status_options": [],
+            "default_public_reply_status": "waiting_on_user",
+            "pending_draft": None,
+            "pending_draft_html": "",
+            "latest_run": None,
+            "latest_analysis_run": None,
+            "latest_run_steps": [],
+            "latest_analysis_steps": [],
+            "latest_ai_note": None,
+            "latest_ai_note_html": "",
+            "analysis_view": {
+                "summary_short": "",
+                "summary_internal": "",
+                "relevant_paths": [],
+                "response_confidence": None,
+                "risk_level": None,
+                "publish_mode_recommendation": None,
+                "risk_reason": "",
+                "handoff_reason": "",
+                "assistant_used": None,
+                "assistant_specialist_id": None,
+            },
+            "ai_relevant_paths": [],
+            "ai_summary_short": "",
+            "ai_summary_internal": "",
+            "rerun_specialist_options": [],
+            "persistent_visibility_enabled": True,
+            "persistent_conversation": {
+                "conversation": {
+                    "status": "active",
+                    "turn_count": 1,
+                    "session_count": 2,
+                    "active_session_segment_index": 2,
+                    "active_thread_id": "thread-123",
+                    "lease_owner_run_id": uuid.uuid4(),
+                },
+                "turns": [
+                    {
+                        "turn_id": turn_id,
+                        "turn_index": 2,
+                        "status": "completed",
+                        "specialist_display_name": "Support Specialist",
+                        "latest_outcome_kind": "published_with_edits",
+                        "triggered_by": "manual_rerun",
+                        "route_target_display": {"label": "Support"},
+                        "output_contract": "specialist_result",
+                        "session_segment_index": 2,
+                        "session_thread_id": "thread-123",
+                        "structured_result": {
+                            "summary_short_excerpt": "",
+                            "summary_internal_excerpt": "Draft updated after review.",
+                            "public_reply_excerpt": "Original generated reply.",
+                        },
+                        "publication": {
+                            "state": "edited_before_publish",
+                            "generated_excerpt": "Original generated reply.",
+                            "published_excerpt": "Edited published reply.",
+                        },
+                        "artifact_paths": ["/tmp/persistent/final.json"],
+                        "recovery_marker_keys": ["ops.detail.recovery_marker.replacement_session_segment"],
+                        "outcome_count": 3,
+                        "raw_item_count": 4,
+                        "detail_path": f"/ops/tickets/{ticket.reference}/persistent-turns/{turn_id}",
+                    }
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(stack["routes_ops"], "upsert_ticket_view", lambda *args, **kwargs: None)
+    locale = get_default_ui_locale()
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        response = client.get(f"/ops/tickets/{ticket.reference}")
+
+    assert response.status_code == 200
+    assert translate(locale, "ops.detail.persistent_turn_history") in response.text
+    assert translate(locale, "button.inspect_turn") in response.text
+    assert "Support Specialist" in response.text
+    assert "/tmp/persistent/final.json" in response.text
+    assert f"/ops/tickets/{ticket.reference}/persistent-turns/{turn_id}" in response.text
+
+
+def test_ops_persistent_turn_detail_route_renders_outcomes_and_raw_items(monkeypatch):
+    from app.i18n import translate
+    from shared.config import get_default_ui_locale
+
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = Settings(**{**_make_settings().__dict__, "codex_conversations_enabled": True})
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    turn_id = uuid.uuid4()
+    ticket = SimpleNamespace(
+        reference="T-000015",
+        id=uuid.uuid4(),
+        title="Persistent turn detail",
+        status="waiting_on_dev_ti",
+        urgent=False,
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_load_ops_persistent_turn_detail_or_404",
+        lambda *args, **kwargs: {
+            "conversation": {
+                "status": "active",
+                "turn_count": 2,
+                "session_count": 2,
+            },
+            "turn": {
+                "turn_id": turn_id,
+                "turn_index": 2,
+                "status": "completed",
+                "specialist_display_name": "Support Specialist",
+                "latest_outcome_kind": "completed",
+                "triggered_by": "manual_rerun",
+                "route_target_display": {"label": "Support"},
+                "output_contract": "specialist_result",
+                "session_status": "active",
+                "session_segment_index": 2,
+                "session_thread_id": "thread-123",
+                "lease_owner_run_id": uuid.uuid4(),
+                "lease_worker_instance_id": "worker-a",
+                "lease_expires_at": datetime(2026, 8, 24, 12, 5, tzinfo=timezone.utc),
+                "structured_result": {
+                    "summary_short_excerpt": "",
+                    "summary_internal_excerpt": "Stored internal summary.",
+                    "internal_note_excerpt": "Internal note excerpt.",
+                },
+                "publication": {
+                    "state": "unpublished",
+                    "generated_excerpt": "Requester-facing draft.",
+                    "published_excerpt": "",
+                },
+                "recovery_marker_keys": ["ops.detail.recovery_marker.replacement_session_segment"],
+                "artifact_paths": ["/tmp/persistent/stdout.jsonl"],
+                "outcomes": [
+                    {
+                        "outcome_index": 1,
+                        "outcome_kind": "completed",
+                        "created_at": datetime(2026, 8, 24, 12, 4, tzinfo=timezone.utc),
+                        "payload_json_pretty": '{\n  "output_json": {\n    "summary_internal": "Stored internal summary."\n  }\n}',
+                    }
+                ],
+                "items": [
+                    {
+                        "item_index": 1,
+                        "item_kind": "thread.started",
+                        "codex_item_id": "evt-1",
+                        "created_at": datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc),
+                        "payload_json_pretty": '{\n  "thread_id": "thread-123",\n  "type": "thread.started"\n}',
+                    }
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(stack["routes_ops"], "upsert_ticket_view", lambda *args, **kwargs: None)
+    locale = get_default_ui_locale()
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        response = client.get(f"/ops/tickets/{ticket.reference}/persistent-turns/{turn_id}")
+
+    assert response.status_code == 200
+    assert translate(locale, "ops.detail.outcome_history") in response.text
+    assert translate(locale, "ops.detail.raw_turn_items") in response.text
+    assert "thread.started" in response.text
+    assert "Requester-facing draft." in response.text
+    assert "/tmp/persistent/stdout.jsonl" in response.text
+
+
 def test_ticket_detail_context_uses_latest_accepted_analysis_run(tmp_path, monkeypatch):
     stack = _load_web_stack()
     ticket = SimpleNamespace(
@@ -2998,6 +3448,80 @@ def test_ticket_detail_context_uses_last_public_message_for_auto_scroll(monkeypa
 
     assert context["activity_timeline"] == timeline
     assert context["auto_scroll_message_id"] == last_public_message_id
+
+
+def test_ticket_detail_context_loads_persistent_projection_when_enabled(monkeypatch):
+    stack = _load_web_stack()
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        created_by_user_id=uuid.uuid4(),
+        assigned_to_user_id=None,
+    )
+    persistent_projection = {
+        "conversation": {"status": "active", "turn_count": 1, "session_count": 1},
+        "turns": [],
+    }
+
+    class _ContextDb:
+        def get(self, model, key):
+            return None
+
+    monkeypatch.setattr(stack["routes_ops"], "_build_ops_activity_timeline", lambda *args, **kwargs: [])
+    monkeypatch.setattr(stack["routes_ops"], "_load_pending_draft", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_analysis_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_internal_ai_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_users", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_load_persistent_conversation_projection",
+        lambda *args, **kwargs: persistent_projection,
+    )
+
+    context = stack["routes_ops"]._ticket_detail_context(
+        _ContextDb(),
+        ticket=ticket,
+        current_user=SimpleNamespace(id=uuid.uuid4(), role="admin"),
+        persistent_visibility_enabled=True,
+    )
+
+    assert context["persistent_visibility_enabled"] is True
+    assert context["persistent_conversation"] == persistent_projection
+
+
+def test_ticket_detail_context_skips_persistent_projection_when_disabled(monkeypatch):
+    stack = _load_web_stack()
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        created_by_user_id=uuid.uuid4(),
+        assigned_to_user_id=None,
+    )
+
+    class _ContextDb:
+        def get(self, model, key):
+            return None
+
+    monkeypatch.setattr(stack["routes_ops"], "_build_ops_activity_timeline", lambda *args, **kwargs: [])
+    monkeypatch.setattr(stack["routes_ops"], "_load_pending_draft", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_analysis_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_latest_internal_ai_note", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_users", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_load_persistent_conversation_projection",
+        lambda *args, **kwargs: pytest.fail("persistent projection should stay hidden when disabled"),
+    )
+
+    context = stack["routes_ops"]._ticket_detail_context(
+        _ContextDb(),
+        ticket=ticket,
+        current_user=SimpleNamespace(id=uuid.uuid4(), role="admin"),
+        persistent_visibility_enabled=False,
+    )
+
+    assert context["persistent_visibility_enabled"] is False
+    assert context["persistent_conversation"] is None
 
 
 def test_build_ops_activity_timeline_merges_status_changes_after_messages(monkeypatch):

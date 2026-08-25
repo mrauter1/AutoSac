@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -197,6 +197,11 @@ def prepare_step_run(
     )
 
 
+def replace_prepared_prompt(prepared: PreparedStepRun, *, prompt: str) -> PreparedStepRun:
+    prepared.paths.prompt_path.write_text(prompt, encoding="utf-8")
+    return replace(prepared, prompt=prompt)
+
+
 def _ownership_lost_error(*, run_id, worker_instance_id: str, phase: str) -> RunOwnershipLost:
     return RunOwnershipLost(
         f"Run {run_id} is no longer running for worker {worker_instance_id} during {phase}."
@@ -226,6 +231,7 @@ def build_codex_command(settings: Settings, *, prepared: PreparedStepRun) -> tup
         command.extend(["--image", str(image_path)])
     command.append("-")
     env = os.environ.copy()
+    env["CODEX_HOME"] = str(settings.resolved_codex_home)
     if settings.codex_api_key:
         env["CODEX_API_KEY"] = settings.codex_api_key
     else:

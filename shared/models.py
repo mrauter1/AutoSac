@@ -44,6 +44,26 @@ AI_RUN_STEP_STATUSES = AI_RUN_STATUSES
 REQUEUE_TRIGGERS = ("requester_reply", "manual_rerun", "reopen")
 AI_DRAFT_KINDS = ("public_reply",)
 AI_DRAFT_STATUSES = ("pending_approval", "approved", "rejected", "superseded", "published")
+CODEX_CONVERSATION_STATUSES = ("active", "recovery_required", "unavailable", "closed")
+CODEX_SESSION_STATUSES = ("pending", "active", "replaced", "expired", "deleted")
+CODEX_TURN_STATUSES = ("prepared", "running", "completed", "failed", "interrupted", "timed_out", "ambiguous", "superseded", "cancelled")
+CODEX_TURN_INPUT_SOURCE_KINDS = ("ticket", "ticket_message", "ticket_status_history", "ai_draft", "ai_run", "ticket_message_publication")
+CODEX_TURN_OUTCOME_KINDS = (
+    "attempted",
+    "accepted",
+    "completed",
+    "auto_published",
+    "draft_created",
+    "draft_rejected",
+    "published_with_edits",
+    "superseded",
+    "internal_only_retained",
+    "failed",
+    "interrupted",
+    "timed_out",
+    "ambiguous",
+)
+CODEX_TURN_ITEM_VISIBILITIES = ("ops_internal",)
 INTEGRATION_EVENT_TYPES = ("ticket.created", "ticket.public_message_added", "ticket.status_changed")
 INTEGRATION_AGGREGATE_TYPES = ("ticket",)
 INTEGRATION_EVENT_LINK_ENTITY_TYPES = ("ticket", "ticket_message", "ticket_status_history")
@@ -161,6 +181,14 @@ class TicketMessage(Base):
         CheckConstraint(f"source IN {_enum_sql(MESSAGE_SOURCES)}", name="ticket_messages_source"),
         Index("ix_ticket_messages_ticket_id_created_at", "ticket_id", "created_at"),
         Index("ix_ticket_messages_ticket_id_visibility_created_at", "ticket_id", "visibility", "created_at"),
+        Index("uq_ticket_messages_codex_turn_outcome_id", "codex_turn_outcome_id", unique=True),
+        Index(
+            "uq_ticket_messages_ai_public_ai_run_id",
+            "ai_run_id",
+            unique=True,
+            postgresql_where=text("ai_run_id IS NOT NULL AND author_type = 'ai' AND visibility = 'public'"),
+            sqlite_where=text("ai_run_id IS NOT NULL AND author_type = 'ai' AND visibility = 'public'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -172,6 +200,7 @@ class TicketMessage(Base):
     body_markdown: Mapped[str] = mapped_column(Text, nullable=False)
     body_text: Mapped[str] = mapped_column(Text, nullable=False)
     ai_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ai_runs.id"), nullable=True)
+    codex_turn_outcome_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("codex_turn_outcomes.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
 
 
@@ -373,6 +402,184 @@ class SlackDMSettings(Base):
     )
 
 
+class CodexConversation(Base):
+    __tablename__ = "codex_conversations"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN {_enum_sql(CODEX_CONVERSATION_STATUSES)}",
+            name="codex_conversations_status",
+        ),
+        Index("uq_codex_conversations_ticket_id", "ticket_id", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ticket_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tickets.id"), nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active", server_default=text("'active'"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now, server_default=text("now()"))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CodexSession(Base):
+    __tablename__ = "codex_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN {_enum_sql(CODEX_SESSION_STATUSES)}",
+            name="codex_sessions_status",
+        ),
+        CheckConstraint("thread_id IS NULL OR btrim(thread_id) <> ''", name="codex_sessions_thread_id_not_blank"),
+        CheckConstraint(
+            "(lease_owner_run_id IS NULL) = (lease_worker_instance_id IS NULL)",
+            name="codex_sessions_lease_owner_matches_worker_instance",
+        ),
+        CheckConstraint(
+            "(lease_owner_run_id IS NULL) = (lease_acquired_at IS NULL)",
+            name="codex_sessions_lease_owner_matches_acquired_at",
+        ),
+        CheckConstraint(
+            "(lease_owner_run_id IS NULL) = (lease_heartbeat_at IS NULL)",
+            name="codex_sessions_lease_owner_matches_heartbeat_at",
+        ),
+        CheckConstraint(
+            "(lease_owner_run_id IS NULL) = (lease_expires_at IS NULL)",
+            name="codex_sessions_lease_owner_matches_expires_at",
+        ),
+        Index("uq_codex_sessions_thread_id", "thread_id", unique=True),
+        Index(
+            "uq_codex_sessions_active_conversation",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text("ended_at IS NULL"),
+        ),
+        Index("ix_codex_sessions_conversation_id_created_at", "conversation_id", "created_at"),
+        Index("ix_codex_sessions_lease_owner_run_id", "lease_owner_run_id"),
+        Index("ix_codex_sessions_lease_expires_at", "lease_expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("codex_conversations.id"), nullable=False)
+    thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending", server_default=text("'pending'"))
+    lease_owner_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ai_runs.id"), nullable=True)
+    lease_worker_instance_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_acquired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now, server_default=text("now()"))
+
+
+class CodexTurn(Base):
+    __tablename__ = "codex_turns"
+    __table_args__ = (
+        CheckConstraint(f"status IN {_enum_sql(CODEX_TURN_STATUSES)}", name="codex_turns_status"),
+        CheckConstraint("turn_index >= 1", name="codex_turns_turn_index_positive"),
+        CheckConstraint("specialist_id <> ''", name="codex_turns_specialist_id_not_blank"),
+        CheckConstraint("agent_spec_version <> ''", name="codex_turns_agent_spec_version_not_blank"),
+        CheckConstraint("output_contract <> ''", name="codex_turns_output_contract_not_blank"),
+        Index("uq_codex_turns_ai_run_id", "ai_run_id", unique=True),
+        Index("uq_codex_turns_conversation_id_turn_index", "conversation_id", "turn_index", unique=True),
+        Index(
+            "uq_codex_turns_active_conversation",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text("status IN ('prepared', 'running')"),
+        ),
+        Index("ix_codex_turns_session_id_turn_index", "session_id", "turn_index"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("codex_conversations.id"), nullable=False)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("codex_sessions.id"), nullable=True)
+    ai_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ai_runs.id"), nullable=False)
+    turn_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="prepared", server_default=text("'prepared'"))
+    specialist_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_spec_version: Mapped[str] = mapped_column(Text, nullable=False)
+    output_contract: Mapped[str] = mapped_column(Text, nullable=False)
+    model_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    route_target_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schema_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    final_output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stdout_jsonl_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stderr_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+
+
+class CodexTurnInput(Base):
+    __tablename__ = "codex_turn_inputs"
+    __table_args__ = (
+        CheckConstraint("input_index >= 1", name="codex_turn_inputs_input_index_positive"),
+        CheckConstraint(
+            f"source_kind IN {_enum_sql(CODEX_TURN_INPUT_SOURCE_KINDS)}",
+            name="codex_turn_inputs_source_kind",
+        ),
+        CheckConstraint("event_kind <> ''", name="codex_turn_inputs_event_kind_not_blank"),
+        CheckConstraint("dedupe_key <> ''", name="codex_turn_inputs_dedupe_key_not_blank"),
+        Index("uq_codex_turn_inputs_turn_id_input_index", "turn_id", "input_index", unique=True),
+        Index("uq_codex_turn_inputs_turn_id_dedupe_key", "turn_id", "dedupe_key", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    turn_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("codex_turns.id"), nullable=False)
+    input_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    dedupe_key: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+
+
+class CodexTurnOutcome(Base):
+    __tablename__ = "codex_turn_outcomes"
+    __table_args__ = (
+        CheckConstraint("outcome_index >= 1", name="codex_turn_outcomes_outcome_index_positive"),
+        CheckConstraint(
+            f"outcome_kind IN {_enum_sql(CODEX_TURN_OUTCOME_KINDS)}",
+            name="codex_turn_outcomes_outcome_kind",
+        ),
+        Index("uq_codex_turn_outcomes_turn_id_outcome_index", "turn_id", "outcome_index", unique=True),
+        Index("ix_codex_turn_outcomes_turn_id_created_at", "turn_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    turn_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("codex_turns.id"), nullable=False)
+    outcome_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    outcome_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+
+
+class CodexTurnItem(Base):
+    __tablename__ = "codex_turn_items"
+    __table_args__ = (
+        CheckConstraint("item_index >= 1", name="codex_turn_items_item_index_positive"),
+        CheckConstraint(
+            f"visibility IN {_enum_sql(CODEX_TURN_ITEM_VISIBILITIES)}",
+            name="codex_turn_items_visibility",
+        ),
+        CheckConstraint("item_kind <> ''", name="codex_turn_items_item_kind_not_blank"),
+        Index("uq_codex_turn_items_turn_id_item_index", "turn_id", "item_index", unique=True),
+        Index("ix_codex_turn_items_turn_id_created_at", "turn_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    turn_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("codex_turns.id"), nullable=False)
+    item_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    item_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    codex_item_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    visibility: Mapped[str] = mapped_column(Text, nullable=False, default="ops_internal", server_default=text("'ops_internal'"))
+    payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+
+
 class AIRun(Base):
     __tablename__ = "ai_runs"
     __table_args__ = (
@@ -456,6 +663,7 @@ class AIDraft(Base):
         CheckConstraint(f"status IN {_enum_sql(AI_DRAFT_STATUSES)}", name="ai_drafts_status"),
         Index("ix_ai_drafts_ticket_id_status_created_at_desc", "ticket_id", "status", text("created_at DESC")),
         Index("ix_ai_drafts_ai_run_id", "ai_run_id"),
+        Index("uq_ai_drafts_codex_turn_outcome_id", "codex_turn_outcome_id", unique=True),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -469,6 +677,7 @@ class AIDraft(Base):
     reviewed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ticket_messages.id"), nullable=True)
+    codex_turn_outcome_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("codex_turn_outcomes.id"), nullable=True)
 
 
 class SystemState(Base):

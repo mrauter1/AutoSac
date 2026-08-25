@@ -4,12 +4,15 @@ from dataclasses import dataclass
 
 from shared.config import Settings
 from shared.routing_registry import RouteTarget, SpecialistRegistration, load_routing_registry
+from worker.codex_inputs import PromptConversationState
 from worker.output_contracts import RouterResult, SpecialistResult, SpecialistSelectorResult
+from worker.persistent_codex import PersistentCodexNonQuiescentCleanupError, execute_persistent_specialist_step
 from worker.step_runner import (
     StepRunError,
     StepRunResult,
     execute_step,
     prepare_step_run,
+    replace_prepared_prompt,
     record_synthetic_step_success,
     write_run_manifest_snapshot,
 )
@@ -151,7 +154,13 @@ def _run_specialist(
     router_result: RouterResult,
     specialist: SpecialistRegistration,
     step_index: int,
+    prompt_state: PromptConversationState | None,
 ) -> tuple[StepRunResult, SpecialistResult]:
+    effective_context = context
+    prompt_appendix = ""
+    if prompt_state is not None:
+        effective_context = prompt_state.prompt_context
+        prompt_appendix = prompt_state.prompt_appendix
     prepared_specialist = prepare_step_run(
         settings,
         run_id=run_id,
@@ -160,12 +169,26 @@ def _run_specialist(
         step_index=step_index,
         step_kind="specialist",
         spec=specialist.spec,
-        context=context,
+        context=effective_context,
         router_result=router_result,
         target_route_target_id=route_target.id,
         selected_specialist_id=specialist.id,
     )
-    specialist_step = execute_step(settings, prepared=prepared_specialist)
+    if prompt_appendix:
+        prepared_specialist = replace_prepared_prompt(
+            prepared_specialist,
+            prompt=f"{prepared_specialist.prompt.rstrip()}\n\n{prompt_appendix.strip()}\n",
+        )
+    if settings.codex_conversations_enabled:
+        if prompt_state is None:
+            raise StepRunError("Persistent specialist execution requires a frozen input envelope")
+        specialist_step = execute_persistent_specialist_step(
+            settings,
+            prepared=prepared_specialist,
+            prompt_state=prompt_state,
+        )
+    else:
+        specialist_step = execute_step(settings, prepared=prepared_specialist)
     write_run_manifest_snapshot(settings, run_id=run_id)
     return specialist_step, SpecialistResult.model_validate(specialist_step.output_payload)
 
@@ -177,6 +200,7 @@ def execute_triage_pipeline(
     ticket_id,
     worker_instance_id: str,
     context: LoadedTicketContext,
+    prompt_state: PromptConversationState | None = None,
     forced_route_target_id: str | None = None,
     forced_specialist_id: str | None = None,
 ) -> PipelineExecutionResult:
@@ -208,6 +232,7 @@ def execute_triage_pipeline(
             router_result=router_result,
             specialist=selected_specialist,
             step_index=2,
+            prompt_state=prompt_state,
         )
         return PipelineExecutionResult(
             route_target=route_target,
@@ -253,6 +278,7 @@ def execute_triage_pipeline(
             router_result=router_result,
             specialist=selected_specialist,
             step_index=2,
+            prompt_state=prompt_state,
         )
     elif selection.mode == "auto":
         selector_step, selector_result, selected_specialist = _run_selector(
@@ -274,6 +300,7 @@ def execute_triage_pipeline(
             router_result=router_result,
             specialist=selected_specialist,
             step_index=3,
+            prompt_state=prompt_state,
         )
     elif selection.mode != "none":
         raise StepRunError(f"Unsupported specialist selection mode: {selection.mode}")

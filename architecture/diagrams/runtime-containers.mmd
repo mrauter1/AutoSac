@@ -1,0 +1,27 @@
+flowchart TB
+    subgraph WEB[Web process]
+      ROUTES[FastAPI routers]
+      UI[Jinja + i18n + HTMX]
+      DOMAIN[Shared domain services]
+      ROUTES --> UI
+      ROUTES --> DOMAIN
+    end
+    subgraph WORKER[Worker process]
+      POLL[AI queue poller]
+      PIPE[AI pipeline]
+      HEART[Heartbeat thread]
+      SYNC[Slack sync thread]
+      DELIVERY[Slack delivery thread]
+      POLL --> PIPE
+    end
+    DB[(PostgreSQL)]
+    FS[(Triage workspace)]
+    CODEX[Codex CLI]
+    SLACK[Slack Web API]
+    WEB <--> DB
+    WEB <--> FS
+    WORKER <--> DB
+    WORKER <--> FS
+    PIPE --> CODEX
+    SYNC --> SLACK
+    DELIVERY --> SLACK

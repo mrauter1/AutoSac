@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import io
 import json
+import os
 from pathlib import Path
+import signal
 import subprocess
+import sys
 from types import SimpleNamespace
 import threading
+import time
 import uuid
 
 import pytest
@@ -49,7 +55,7 @@ def _load_worker_symbols():
     from worker.main import ActiveRunTracker, WorkerIdentity, emit_worker_heartbeat, heartbeat_loop
     from worker.queue import claim_oldest_pending_run, recover_stale_runs
     from worker.output_contracts import HumanHandoffResult, RouterResult, SpecialistResult, SpecialistSelectorResult
-    from worker.pipeline import execute_triage_pipeline
+    from worker.pipeline import PersistentCodexNonQuiescentCleanupError, execute_triage_pipeline
     from worker.prompt_renderer import render_agent_prompt
     from worker.publication_policy import resolve_effective_publication_mode
     from worker.run_ownership import RunOwnershipLost
@@ -78,6 +84,7 @@ def _load_worker_symbols():
         "load_agent_spec": load_agent_spec,
         "process_ai_run": process_ai_run,
         "prepare_step_run": prepare_step_run,
+        "PersistentCodexNonQuiescentCleanupError": PersistentCodexNonQuiescentCleanupError,
         "recover_stale_runs": recover_stale_runs,
         "render_agent_prompt": render_agent_prompt,
         "resolve_effective_publication_mode": resolve_effective_publication_mode,
@@ -362,6 +369,9 @@ class _FakeWorkerStateDb:
 
     def execute(self, statement):
         self.executed.append(statement)
+        entity = statement.column_descriptions[0].get("entity") if getattr(statement, "column_descriptions", None) else None
+        if getattr(entity, "__name__", "") == "CodexSession":
+            return _FakeWorkerStateResult([])
         keys = [
             (key,)
             for (model_name, key), _value in {**self.objects, **self.pending}.items()
@@ -419,6 +429,269 @@ class _QueueRecoveryDb:
         if name == "Ticket":
             return self.tickets_by_id.get(key)
         return None
+
+
+class _PersistentQueueRecoveryDb(_QueueRecoveryDb):
+    def __init__(
+        self,
+        *,
+        stale_runs,
+        steps_by_run_id,
+        tickets_by_id,
+        turns_by_run_id,
+        sessions_by_id,
+        conversations_by_id,
+    ):
+        super().__init__(stale_runs=stale_runs, steps_by_run_id=steps_by_run_id, tickets_by_id=tickets_by_id)
+        self.turns_by_run_id = turns_by_run_id
+        self.sessions_by_id = sessions_by_id
+        self.conversations_by_id = conversations_by_id
+        self.added = []
+
+    def _criterion_value(self, statement, column_name: str):
+        for criterion in getattr(statement, "_where_criteria", ()):
+            left = getattr(criterion, "left", None)
+            right = getattr(criterion, "right", None)
+            if getattr(left, "name", None) == column_name and hasattr(right, "value"):
+                return right.value
+        return None
+
+    def execute(self, statement):
+        self.executed.append(statement)
+        descriptions = statement.column_descriptions if getattr(statement, "column_descriptions", None) else []
+        first_name = descriptions[0].get("name") if descriptions else None
+        entity = descriptions[0].get("entity") if descriptions else None
+        if first_name == "coalesce":
+            return _FakePersistentScalarResult(0)
+        entity_name = getattr(entity, "__name__", "")
+        if entity_name in {"AIRun", "AIRunStep"}:
+            return super().execute(statement)
+        if entity_name == "CodexTurn":
+            run_id = self._criterion_value(statement, "ai_run_id")
+            return _FakeWorkerStateResult(self.turns_by_run_id.get(run_id, []))
+        if entity_name == "CodexSession":
+            session_id = self._criterion_value(statement, "id")
+            session = self.sessions_by_id.get(session_id)
+            return _FakeWorkerStateResult([session] if session is not None else [])
+        return _FakeWorkerStateResult([])
+
+    def get(self, model, key):
+        name = getattr(model, "__name__", "")
+        if name == "CodexConversation":
+            return self.conversations_by_id.get(key)
+        return super().get(model, key)
+
+    def add(self, item):
+        self.added.append(item)
+
+
+class _FakePersistentDb:
+    def __init__(self):
+        self.added = []
+        self.conversation = None
+
+    def add(self, item):
+        self.added.append(item)
+
+    def flush(self):
+        return None
+
+    def get(self, model, key):
+        if getattr(model, "__name__", "") == "CodexConversation":
+            return self.conversation
+        return None
+
+    def execute(self, statement):
+        query_text = str(statement)
+        if "count(*)" in query_text or "coalesce(max(codex_turns.turn_index)" in query_text:
+            return _FakePersistentScalarResult(0)
+        return _FakeWorkerStateResult([])
+
+
+class _FakePipeProcess:
+    def __init__(
+        self,
+        *,
+        stdout_text: str,
+        stderr_text: str = "",
+        timeout_on_first_wait: bool = False,
+        returncode: int = 0,
+    ):
+        self.stdin = io.StringIO()
+        self.stdout = io.StringIO(stdout_text)
+        self.stderr = io.StringIO(stderr_text)
+        self._timeout_on_first_wait = timeout_on_first_wait
+        self._wait_calls = 0
+        self.killed = False
+        self.returncode = returncode
+
+    def wait(self, timeout=None):
+        self._wait_calls += 1
+        if self._timeout_on_first_wait and self._wait_calls == 1:
+            raise subprocess.TimeoutExpired(cmd=["codex"], timeout=timeout)
+        return 124 if self.killed else self.returncode
+
+    def kill(self):
+        self.killed = True
+
+    def terminate(self):
+        self.killed = True
+
+
+class _BlockingStdin:
+    def __init__(self):
+        self.write_started = threading.Event()
+        self.closed = threading.Event()
+
+    def write(self, _value):
+        self.write_started.set()
+        self.closed.wait(timeout=30)
+        raise OSError("stdin write interrupted")
+
+    def close(self):
+        self.closed.set()
+
+
+class _BrokenPipeStdin:
+    def write(self, _value):
+        raise BrokenPipeError("stdin pipe closed")
+
+    def close(self):
+        raise BrokenPipeError("stdin pipe closed")
+
+
+class _BlockingReadPipe:
+    def __init__(self, initial_lines=()):
+        self._lines = list(initial_lines)
+        self.closed = threading.Event()
+
+    def readline(self):
+        if self._lines:
+            return self._lines.pop(0)
+        self.closed.wait(timeout=30)
+        return ""
+
+    def close(self):
+        self.closed.set()
+
+
+class _NonClosingBlockingReadPipe:
+    def __init__(self):
+        self.read_started = threading.Event()
+        self.release_read = threading.Event()
+        self.close_called = threading.Event()
+
+    def readline(self):
+        self.read_started.set()
+        self.release_read.wait(timeout=30)
+        return ""
+
+    def close(self):
+        self.close_called.set()
+
+
+class _BlockingWriteHandle:
+    def __init__(self):
+        self.write_started = threading.Event()
+        self.write_finished = threading.Event()
+        self.release_write = threading.Event()
+        self.lines = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def write(self, line):
+        self.write_started.set()
+        self.release_write.wait(timeout=30)
+        self.lines.append(line)
+        self.write_finished.set()
+
+    def flush(self):
+        return None
+
+
+class _DeadlineFakeProcess:
+    def __init__(
+        self,
+        *,
+        stdin=None,
+        stdout=None,
+        stderr=None,
+        returncode: int = 0,
+        timeout_wait: bool = False,
+    ):
+        self.stdin = stdin if stdin is not None else io.StringIO()
+        self.stdout = stdout if stdout is not None else io.StringIO("")
+        self.stderr = stderr if stderr is not None else io.StringIO("")
+        self.returncode = returncode
+        self.timeout_wait = timeout_wait
+        self.terminated = False
+        self.killed = False
+        self.wait_calls = []
+
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        if self.timeout_wait:
+            if timeout:
+                time.sleep(min(float(timeout), 0.05))
+            raise subprocess.TimeoutExpired(cmd=["codex"], timeout=timeout)
+        return 143 if self.terminated else self.returncode
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+
+
+class _FakePersistentScalarResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one(self):
+        return self._value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+
+def _prepare_persistent_test_step(tmp_path: Path, *, timeout_seconds: float | None = None):
+    symbols = _load_worker_symbols()
+    settings = Settings(**{**_make_settings(tmp_path).__dict__, "codex_conversations_enabled": True})
+    context = _make_context()
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        step_index=2,
+        step_kind="specialist",
+        spec=symbols["load_agent_spec"]("support"),
+        context=context,
+        router_result=symbols["RouterResult"].model_validate(_route_payload()),
+        target_route_target_id="support",
+    )
+    if timeout_seconds is not None:
+        prepared = replace(prepared, timeout_seconds=timeout_seconds)
+    return symbols, settings, prepared
+
+
+def _persistent_step_for_test(persistent_codex, tmp_path: Path, *, resumed: bool = False):
+    return persistent_codex.PreparedPersistentSpecialistStep(
+        step_id=uuid.uuid4(),
+        turn_id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        command_spec=persistent_codex.PersistentCommandSpec(
+            command=["codex", "exec"],
+            env={},
+            runtime_codex_home=tmp_path / ".codex" / "ticket-prod",
+            resumed=resumed,
+        ),
+    )
 
 
 def test_requester_visible_fingerprint_excludes_internal_messages():
@@ -664,6 +937,859 @@ def test_build_codex_command_omits_api_key_when_not_configured(monkeypatch, tmp_
     _command, env = symbols["build_codex_command"](settings, prepared=prepared)
 
     assert "CODEX_API_KEY" not in env
+    assert env["CODEX_HOME"] == str(settings.resolved_codex_home)
+
+
+def test_build_persistent_codex_command_includes_initial_exec_controls(tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker.persistent_codex import build_persistent_codex_command
+
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    settings = Settings(**{**settings.__dict__, "codex_conversations_enabled": True})
+    context = _make_context()
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
+        context=context,
+        router_result=router_result,
+        target_route_target_id="support",
+    )
+
+    command_spec = build_persistent_codex_command(
+        settings,
+        prepared=prepared,
+        thread_id=None,
+    )
+
+    assert command_spec.command[:4] == ["codex", "--ask-for-approval", "never", "exec"]
+    assert "--sandbox" in command_spec.command
+    assert "resume" not in command_spec.command
+    assert "--strict-config" in command_spec.command
+    assert 'sandbox_mode="read-only"' in command_spec.command
+    assert 'web_search="disabled"' in command_spec.command
+    assert "web_search_request" in command_spec.command
+    assert "standalone_web_search" in command_spec.command
+    assert str(prepared.paths.schema_path) in command_spec.command
+    assert str(prepared.paths.final_output_path) in command_spec.command
+    assert command_spec.command[-1] == "-"
+    assert command_spec.env["CODEX_HOME"] == str(settings.resolved_codex_home)
+    assert command_spec.resumed is False
+
+
+def test_build_persistent_codex_command_uses_explicit_thread_id_on_resume(tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker.persistent_codex import build_persistent_codex_command
+
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    settings = Settings(**{**settings.__dict__, "codex_conversations_enabled": True})
+    context = _make_context()
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
+        context=context,
+        router_result=router_result,
+        target_route_target_id="support",
+    )
+
+    command_spec = build_persistent_codex_command(
+        settings,
+        prepared=prepared,
+        thread_id="thread-123",
+    )
+
+    assert command_spec.command[:5] == ["codex", "--ask-for-approval", "never", "exec", "resume"]
+    assert "--sandbox" not in command_spec.command
+    assert "thread-123" in command_spec.command
+    assert command_spec.command[-2:] == ["thread-123", "-"]
+    assert command_spec.resumed is True
+
+
+def test_persistent_lease_conflict_allows_expired_owner_recovery():
+    pytest.importorskip("sqlalchemy")
+
+    from worker.persistent_codex import _conversation_lease_conflict_reason
+
+    now = datetime(2026, 8, 24, tzinfo=timezone.utc)
+    session = SimpleNamespace(
+        lease_owner_run_id=uuid.uuid4(),
+        lease_worker_instance_id="worker-other",
+        lease_expires_at=now - timedelta(seconds=5),
+    )
+    reason = _conversation_lease_conflict_reason(
+        session,
+        run_id=uuid.uuid4(),
+        worker_instance_id="worker-test",
+        now=now,
+    )
+
+    assert reason is None
+
+
+def test_persistent_stdout_event_persists_thread_started_immediately(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    context = _make_context()
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
+        context=context,
+        router_result=router_result,
+        target_route_target_id="support",
+    )
+    persistent = persistent_codex.PreparedPersistentSpecialistStep(
+        step_id=uuid.uuid4(),
+        turn_id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        command_spec=persistent_codex.PersistentCommandSpec(
+            command=["codex", "exec"],
+            env={},
+            runtime_codex_home=tmp_path / ".codex" / "ticket-prod",
+            resumed=False,
+        ),
+    )
+    run = SimpleNamespace(id=prepared.run_id, last_heartbeat_at=None)
+    session = SimpleNamespace(
+        id=persistent.session_id,
+        lease_owner_run_id=prepared.run_id,
+        lease_worker_instance_id=prepared.worker_instance_id,
+        thread_id=None,
+        status="pending",
+        started_at=None,
+        lease_heartbeat_at=None,
+        lease_expires_at=None,
+    )
+    turn = SimpleNamespace(id=persistent.turn_id, accepted_at=None)
+    step = SimpleNamespace(id=persistent.step_id, ended_at=None)
+    fake_db = _FakePersistentDb()
+    fake_db.conversation = SimpleNamespace(id=persistent.conversation_id, status="active")
+    captured = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_append_turn_outcome",
+        lambda db, *, turn_id, outcome_kind, payload_json: captured.append((outcome_kind, payload_json)),
+    )
+
+    state = persistent_codex.PersistentStreamState()
+    persistent_codex._record_stdout_event(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        state=state,
+        raw_line='{"type":"thread.started","thread_id":"thread-1"}',
+    )
+
+    assert session.thread_id == "thread-1"
+    assert session.status == "active"
+    assert turn.accepted_at is None
+    assert state.accepted is False
+    persistent_codex._record_stdout_event(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        state=state,
+        raw_line='{"type":"turn.started"}',
+    )
+    assert turn.accepted_at is not None
+    assert state.accepted is True
+    assert state.next_item_index == 3
+    assert fake_db.added[0].item_kind == "thread.started"
+    assert captured == [("accepted", {"event_type": "turn.started", "thread_id": "thread-1"})]
+
+
+def test_prepare_persistent_specialist_step_rejects_unexpired_conversation_overlap(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    settings = Settings(**{**settings.__dict__, "codex_conversations_enabled": True})
+    context = _make_context()
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
+        context=context,
+        router_result=router_result,
+        target_route_target_id="support",
+    )
+    fake_db = _FakePersistentDb()
+    run = SimpleNamespace(id=prepared.run_id, worker_pid=1234, last_heartbeat_at=None)
+    conversation = SimpleNamespace(id=uuid.uuid4(), status="active")
+    session = SimpleNamespace(
+        id=uuid.uuid4(),
+        conversation_id=conversation.id,
+        thread_id=None,
+        lease_owner_run_id=uuid.uuid4(),
+        lease_worker_instance_id="worker-stale",
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+        lease_acquired_at=None,
+        lease_heartbeat_at=None,
+        status="active",
+        started_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        ended_at=None,
+    )
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(persistent_codex, "load_owned_running_run", lambda db, **kwargs: run)
+    monkeypatch.setattr(persistent_codex, "_load_locked_conversation", lambda db, **kwargs: conversation)
+    monkeypatch.setattr(persistent_codex, "_load_locked_active_session", lambda db, **kwargs: session)
+    prompt_state = SimpleNamespace(
+        conversation_id=conversation.id,
+        active_session_id=session.id,
+        recovery_required=False,
+    )
+    with pytest.raises(symbols["StepRunError"], match="already leased"):
+        persistent_codex.prepare_persistent_specialist_step(
+            settings,
+            prepared=prepared,
+            prompt_state=prompt_state,
+        )
+    assert session.status == "active"
+    assert session.ended_at is None
+
+
+def test_execute_persistent_specialist_step_bounds_blocked_prompt_delivery(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, settings, prepared = _prepare_persistent_test_step(tmp_path, timeout_seconds=0.05)
+    prepared = replace(prepared, prompt="x" * (1024 * 1024))
+    persistent = _persistent_step_for_test(persistent_codex, tmp_path)
+    blocking_stdin = _BlockingStdin()
+    fake_process = _DeadlineFakeProcess(
+        stdin=blocking_stdin,
+        stdout=io.StringIO(""),
+        stderr=io.StringIO(""),
+        timeout_wait=True,
+    )
+    finalized = {}
+
+    monkeypatch.setattr(persistent_codex, "_STREAM_JOIN_SECONDS", 0.01)
+    monkeypatch.setattr(persistent_codex, "_PROCESS_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(persistent_codex, "_PROCESS_KILL_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(persistent_codex, "_WRITER_CLEANUP_JOIN_SECONDS", 0.01)
+    monkeypatch.setattr(
+        persistent_codex,
+        "prepare_persistent_specialist_step",
+        lambda settings, prepared, prompt_state: persistent,
+    )
+    monkeypatch.setattr(persistent_codex.subprocess, "Popen", lambda *args, **kwargs: fake_process)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_finalize_persistent_step",
+        lambda settings, **kwargs: finalized.update(kwargs),
+    )
+
+    started_at = time.monotonic()
+    with pytest.raises(symbols["StepRunError"], match="timed out before Codex completion"):
+        persistent_codex.execute_persistent_specialist_step(
+            settings,
+            prepared=prepared,
+            prompt_state=SimpleNamespace(),
+        )
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 1.0
+    assert blocking_stdin.write_started.is_set()
+    assert blocking_stdin.closed.is_set()
+    assert fake_process.terminated is True
+    assert finalized["turn_status"] == "timed_out"
+    assert finalized["step_status"] == "failed"
+    assert finalized["output_payload"] is None
+
+
+def test_execute_persistent_specialist_step_cleans_pipe_holding_descendant_before_finalize(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, settings, prepared = _prepare_persistent_test_step(tmp_path)
+    prepared.paths.final_output_path.write_text(json.dumps(_specialist_payload()), encoding="utf-8")
+    persistent = _persistent_step_for_test(persistent_codex, tmp_path, resumed=True)
+    stdout = _BlockingReadPipe(['{"type":"turn.completed"}\n'])
+    fake_process = _DeadlineFakeProcess(stdout=stdout, stderr=io.StringIO(""), returncode=0)
+    finalized = {}
+    record_calls = []
+
+    monkeypatch.setattr(persistent_codex, "_STREAM_JOIN_SECONDS", 0.01)
+    monkeypatch.setattr(persistent_codex, "_PROCESS_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(persistent_codex, "_PROCESS_KILL_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        persistent_codex,
+        "prepare_persistent_specialist_step",
+        lambda settings, prepared, prompt_state: persistent,
+    )
+    monkeypatch.setattr(persistent_codex.subprocess, "Popen", lambda *args, **kwargs: fake_process)
+
+    def record_event(settings, *, prepared, persistent, state, raw_line):
+        record_calls.append(raw_line)
+        state.accepted = True
+        state.completed = True
+
+    def finalize(settings, **kwargs):
+        assert stdout.closed.is_set()
+        assert fake_process.terminated is True
+        finalized.update(kwargs)
+
+    monkeypatch.setattr(persistent_codex, "_record_stdout_event", record_event)
+    monkeypatch.setattr(persistent_codex, "_finalize_persistent_step", finalize)
+
+    with pytest.raises(symbols["StepRunError"], match="output streams did not close"):
+        persistent_codex.execute_persistent_specialist_step(
+            settings,
+            prepared=prepared,
+            prompt_state=SimpleNamespace(),
+        )
+
+    assert record_calls == ['{"type":"turn.completed"}']
+    assert finalized["step_status"] == "failed"
+    assert finalized["output_payload"] is None
+
+
+def test_execute_persistent_specialist_step_does_not_finalize_with_live_output_pump(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, settings, prepared = _prepare_persistent_test_step(tmp_path)
+    prepared.paths.final_output_path.write_text(json.dumps(_specialist_payload()), encoding="utf-8")
+    persistent = _persistent_step_for_test(persistent_codex, tmp_path, resumed=True)
+    stdout = _NonClosingBlockingReadPipe()
+    fake_process = _DeadlineFakeProcess(stdout=stdout, stderr=io.StringIO(""), returncode=0)
+    finalized = {}
+
+    monkeypatch.setattr(persistent_codex, "_STREAM_JOIN_SECONDS", 0.01)
+    monkeypatch.setattr(persistent_codex, "_PROCESS_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(persistent_codex, "_PROCESS_KILL_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        persistent_codex,
+        "prepare_persistent_specialist_step",
+        lambda settings, prepared, prompt_state: persistent,
+    )
+    monkeypatch.setattr(persistent_codex.subprocess, "Popen", lambda *args, **kwargs: fake_process)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_record_stdout_event",
+        lambda *args, **kwargs: pytest.fail("blocked pump should not persist stdout events"),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_finalize_persistent_step",
+        lambda settings, **kwargs: finalized.update(kwargs),
+    )
+
+    started_at = time.monotonic()
+    try:
+        with pytest.raises(
+            symbols["PersistentCodexNonQuiescentCleanupError"],
+            match="output streams did not close after cleanup",
+        ):
+            persistent_codex.execute_persistent_specialist_step(
+                settings,
+                prepared=prepared,
+                prompt_state=SimpleNamespace(),
+            )
+        assert stdout.read_started.is_set()
+        assert stdout.close_called.is_set()
+        assert fake_process.terminated is True
+        assert finalized == {}
+        assert time.monotonic() - started_at < 1.0
+    finally:
+        stdout.release_read.set()
+
+
+def _pid_is_running(pid: int) -> bool:
+    proc_stat = Path(f"/proc/{pid}/stat")
+    try:
+        state = proc_stat.read_text(encoding="utf-8").split()[2]
+    except (FileNotFoundError, IndexError, OSError):
+        state = None
+    if state == "Z":
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def test_terminate_process_group_kills_pipe_holding_descendant_after_leader_exits():
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    leader_script = r"""
+import subprocess
+import sys
+import time
+
+child_script = '''
+import os
+import signal
+import time
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print(os.getpid(), flush=True)
+time.sleep(30)
+'''
+
+subprocess.Popen([sys.executable, "-c", child_script])
+time.sleep(0.05)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", leader_script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    assert process.stdout is not None
+    child_pid = int(process.stdout.readline().strip())
+    process.wait(timeout=1)
+
+    try:
+        returned = persistent_codex._terminate_process_group(
+            process,
+            grace_seconds=0.05,
+            kill_wait_seconds=0.2,
+        )
+        deadline = time.monotonic() + 1.0
+        while _pid_is_running(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert returned == 0
+        assert not _pid_is_running(child_pid)
+    finally:
+        if _pid_is_running(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
+
+
+def test_execute_persistent_specialist_step_does_not_finalize_during_pre_record_stdout_write(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, settings, prepared = _prepare_persistent_test_step(tmp_path)
+    prepared.paths.final_output_path.write_text(json.dumps(_specialist_payload()), encoding="utf-8")
+    persistent = _persistent_step_for_test(persistent_codex, tmp_path, resumed=True)
+    stdout = _BlockingReadPipe(['{"type":"turn.completed"}\n'])
+    fake_process = _DeadlineFakeProcess(stdout=stdout, stderr=io.StringIO(""), returncode=0)
+    blocking_handle = _BlockingWriteHandle()
+    finalized = {}
+    record_calls = []
+    original_path_open = Path.open
+
+    monkeypatch.setattr(persistent_codex, "_STREAM_JOIN_SECONDS", 0.01)
+    monkeypatch.setattr(persistent_codex, "_PROCESS_TERMINATION_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(persistent_codex, "_PROCESS_KILL_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        persistent_codex,
+        "prepare_persistent_specialist_step",
+        lambda settings, prepared, prompt_state: persistent,
+    )
+    monkeypatch.setattr(persistent_codex.subprocess, "Popen", lambda *args, **kwargs: fake_process)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_record_stdout_event",
+        lambda settings, *, prepared, persistent, state, raw_line: record_calls.append((raw_line, state.stop_streams.is_set())),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_finalize_persistent_step",
+        lambda settings, **kwargs: finalized.update(kwargs),
+    )
+
+    def fake_path_open(self, *args, **kwargs):
+        if self == prepared.paths.stdout_jsonl_path:
+            return blocking_handle
+        return original_path_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fake_path_open)
+
+    started_at = time.monotonic()
+    with pytest.raises(symbols["PersistentCodexNonQuiescentCleanupError"], match="persistence did not quiesce"):
+        persistent_codex.execute_persistent_specialist_step(
+            settings,
+            prepared=prepared,
+            prompt_state=SimpleNamespace(),
+        )
+
+    assert blocking_handle.write_started.is_set()
+    assert fake_process.terminated is True
+    assert finalized == {}
+    assert time.monotonic() - started_at < 1.0
+    blocking_handle.release_write.set()
+    assert blocking_handle.write_finished.wait(timeout=1)
+    assert record_calls == []
+
+
+def test_execute_persistent_specialist_step_broken_pipe_uses_strict_failure_path(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, settings, prepared = _prepare_persistent_test_step(tmp_path)
+    prepared.paths.final_output_path.write_text(json.dumps(_specialist_payload()), encoding="utf-8")
+    persistent = _persistent_step_for_test(persistent_codex, tmp_path)
+    fake_process = _DeadlineFakeProcess(stdin=_BrokenPipeStdin(), stdout=io.StringIO(""), stderr=io.StringIO(""))
+    finalized = {}
+
+    monkeypatch.setattr(
+        persistent_codex,
+        "prepare_persistent_specialist_step",
+        lambda settings, prepared, prompt_state: persistent,
+    )
+    monkeypatch.setattr(persistent_codex.subprocess, "Popen", lambda *args, **kwargs: fake_process)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_finalize_persistent_step",
+        lambda settings, **kwargs: finalized.update(kwargs),
+    )
+
+    with pytest.raises(symbols["StepRunError"], match="process supervision failed"):
+        persistent_codex.execute_persistent_specialist_step(
+            settings,
+            prepared=prepared,
+            prompt_state=SimpleNamespace(),
+        )
+
+    assert finalized["output_payload"] is None
+    assert finalized["step_status"] == "failed"
+    assert finalized["turn_status"] == "failed"
+
+
+def test_execute_persistent_specialist_step_broken_pipe_after_acceptance_is_ambiguous(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, settings, prepared = _prepare_persistent_test_step(tmp_path)
+    prepared.paths.final_output_path.write_text(json.dumps(_specialist_payload()), encoding="utf-8")
+    persistent = _persistent_step_for_test(persistent_codex, tmp_path, resumed=True)
+    fake_process = _DeadlineFakeProcess(
+        stdin=_BrokenPipeStdin(),
+        stdout=io.StringIO('{"type":"turn.started"}\n'),
+        stderr=io.StringIO(""),
+    )
+    finalized = {}
+
+    monkeypatch.setattr(
+        persistent_codex,
+        "prepare_persistent_specialist_step",
+        lambda settings, prepared, prompt_state: persistent,
+    )
+    monkeypatch.setattr(persistent_codex.subprocess, "Popen", lambda *args, **kwargs: fake_process)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_record_stdout_event",
+        lambda settings, *, prepared, persistent, state, raw_line: setattr(state, "accepted", True),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_finalize_persistent_step",
+        lambda settings, **kwargs: finalized.update(kwargs),
+    )
+
+    with pytest.raises(symbols["StepRunError"], match="process supervision failed"):
+        persistent_codex.execute_persistent_specialist_step(
+            settings,
+            prepared=prepared,
+            prompt_state=SimpleNamespace(),
+        )
+
+    assert finalized["output_payload"] is None
+    assert finalized["step_status"] == "failed"
+    assert finalized["turn_status"] == "ambiguous"
+
+
+def test_execute_persistent_specialist_step_accepts_successful_structured_completion(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, settings, prepared = _prepare_persistent_test_step(tmp_path)
+    prepared.paths.final_output_path.write_text(json.dumps(_specialist_payload()), encoding="utf-8")
+    persistent = _persistent_step_for_test(persistent_codex, tmp_path)
+    fake_process = _DeadlineFakeProcess(
+        stdout=io.StringIO(
+            '{"type":"thread.started","thread_id":"thread-1"}\n'
+            '{"type":"turn.started"}\n'
+            '{"type":"turn.completed"}\n'
+        ),
+        stderr=io.StringIO(""),
+        returncode=0,
+    )
+    finalized = {}
+
+    monkeypatch.setattr(
+        persistent_codex,
+        "prepare_persistent_specialist_step",
+        lambda settings, prepared, prompt_state: persistent,
+    )
+    monkeypatch.setattr(persistent_codex.subprocess, "Popen", lambda *args, **kwargs: fake_process)
+
+    def record_event(settings, *, prepared, persistent, state, raw_line):
+        event = json.loads(raw_line)
+        if event["type"] == "thread.started":
+            state.thread_id = event["thread_id"]
+        if event["type"] == "turn.started":
+            state.accepted = True
+        if event["type"] == "turn.completed":
+            state.completed = True
+
+    monkeypatch.setattr(persistent_codex, "_record_stdout_event", record_event)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_finalize_persistent_step",
+        lambda settings, **kwargs: finalized.update(kwargs),
+    )
+
+    result = persistent_codex.execute_persistent_specialist_step(
+        settings,
+        prepared=prepared,
+        prompt_state=SimpleNamespace(),
+    )
+
+    assert result.output_payload["publish_mode_recommendation"] == "auto_publish"
+    assert finalized["step_status"] == "succeeded"
+    assert finalized["turn_status"] == "completed"
+    assert finalized["error_text"] is None
+
+
+def test_execute_persistent_specialist_step_marks_timeout_after_acceptance_as_ambiguous(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    settings = Settings(**{**settings.__dict__, "codex_conversations_enabled": True})
+    context = _make_context()
+    spec = symbols["load_agent_spec"]("support")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
+        context=context,
+        router_result=router_result,
+        target_route_target_id="support",
+    )
+    persistent = persistent_codex.PreparedPersistentSpecialistStep(
+        step_id=uuid.uuid4(),
+        turn_id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        command_spec=persistent_codex.PersistentCommandSpec(
+            command=["codex", "exec"],
+            env={},
+            runtime_codex_home=tmp_path / ".codex" / "ticket-prod",
+            resumed=False,
+        ),
+    )
+    finalized = {}
+
+    monkeypatch.setattr(
+        persistent_codex,
+        "prepare_persistent_specialist_step",
+        lambda settings, prepared, prompt_state: persistent,
+    )
+    monkeypatch.setattr(
+        persistent_codex.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _FakePipeProcess(
+            stdout_text='{"type":"thread.started","thread_id":"thread-1"}\n{"type":"turn.started"}\n',
+            timeout_on_first_wait=True,
+        ),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_record_stdout_event",
+        lambda settings, *, prepared, persistent, state, raw_line: setattr(state, "accepted", True),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_finalize_persistent_step",
+        lambda settings, **kwargs: finalized.update(kwargs),
+    )
+
+    with pytest.raises(symbols["StepRunError"], match="timed out after Codex accepted"):
+        persistent_codex.execute_persistent_specialist_step(
+            settings,
+            prepared=prepared,
+            prompt_state=SimpleNamespace(),
+        )
+
+    assert finalized["turn_status"] == "ambiguous"
+    assert finalized["step_status"] == "failed"
+
+
+def test_classify_persistent_failure_distinguishes_resume_recovery_and_preaccept_failure():
+    pytest.importorskip("sqlalchemy")
+
+    from worker.persistent_codex import classify_persistent_failure
+
+    assert classify_persistent_failure(
+        accepted=False,
+        timed_out=False,
+        stderr_text="thread_not_found",
+    ) == (
+        "failed",
+        "Persistent specialist turn could not resume because the stored thread was not found.",
+    )
+    assert classify_persistent_failure(
+        accepted=False,
+        timed_out=False,
+        stderr_text="plain failure",
+    ) == (
+        "failed",
+        "Persistent specialist turn failed before Codex acceptance.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("returncode", "completed", "expected_error"),
+    [
+        (7, True, "exited with status 7"),
+        (0, False, "without a durable turn.completed"),
+    ],
+)
+def test_persistent_success_gate_rejects_valid_final_when_transport_is_not_terminal(
+    monkeypatch,
+    tmp_path,
+    returncode,
+    completed,
+    expected_error,
+):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols = _load_worker_symbols()
+    settings = Settings(**{**_make_settings(tmp_path).__dict__, "codex_conversations_enabled": True})
+    context = _make_context()
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        step_index=2,
+        step_kind="specialist",
+        spec=symbols["load_agent_spec"]("support"),
+        context=context,
+        router_result=symbols["RouterResult"].model_validate(_route_payload()),
+        target_route_target_id="support",
+    )
+    prepared.paths.final_output_path.write_text(json.dumps(_specialist_payload()), encoding="utf-8")
+    persistent = persistent_codex.PreparedPersistentSpecialistStep(
+        step_id=uuid.uuid4(),
+        turn_id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        command_spec=persistent_codex.PersistentCommandSpec(
+            command=["codex", "exec"],
+            env={},
+            runtime_codex_home=settings.resolved_codex_home,
+            resumed=False,
+        ),
+    )
+    finalized = {}
+
+    monkeypatch.setattr(
+        persistent_codex,
+        "prepare_persistent_specialist_step",
+        lambda settings, prepared, prompt_state: persistent,
+    )
+    monkeypatch.setattr(
+        persistent_codex.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _FakePipeProcess(
+            stdout_text='{"type":"turn.completed"}\n',
+            returncode=returncode,
+        ),
+    )
+
+    def record_event(settings, *, prepared, persistent, state, raw_line):
+        state.accepted = True
+        state.completed = completed
+        state.thread_id = "thread-1"
+
+    monkeypatch.setattr(persistent_codex, "_record_stdout_event", record_event)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_finalize_persistent_step",
+        lambda settings, **kwargs: finalized.update(kwargs),
+    )
+
+    with pytest.raises(symbols["StepRunError"], match=expected_error):
+        persistent_codex.execute_persistent_specialist_step(
+            settings,
+            prepared=prepared,
+            prompt_state=SimpleNamespace(),
+        )
+
+    assert finalized["step_status"] == "failed"
+    assert finalized["turn_status"] == "ambiguous"
+    assert finalized["output_payload"] is None
 
 
 def test_execute_step_passes_prompt_via_stdin(monkeypatch, tmp_path):
@@ -2416,6 +3542,652 @@ def test_process_ai_run_marks_failed_when_publication_step_raises(monkeypatch, t
     assert observed["error_text"] == "Unexpected worker error: publish failed"
 
 
+def test_process_ai_run_retains_nonquiescent_persistent_cleanup_for_stale_recovery(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="ai_triage",
+        requeue_requested=False,
+        requeue_trigger=None,
+        requeue_requested_by_user_id=None,
+        requeue_forced_route_target_id=None,
+        requeue_forced_specialist_id=None,
+        updated_at=None,
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=11),
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        last_heartbeat_at=None,
+        ended_at=None,
+        error_text=None,
+        triggered_by="new_ticket",
+        requested_by_user_id=None,
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+        recovery_attempt_count=0,
+    )
+    step = SimpleNamespace(
+        ai_run_id=run.id,
+        step_index=2,
+        status="running",
+        error_text=None,
+        ended_at=None,
+    )
+    conversation = SimpleNamespace(id=uuid.uuid4(), status="active")
+    session = SimpleNamespace(
+        id=uuid.uuid4(),
+        conversation_id=conversation.id,
+        thread_id="thread-from-prior-turn",
+        status="active",
+        ended_at=None,
+        lease_owner_run_id=run.id,
+        lease_worker_instance_id="worker-test",
+        lease_acquired_at=datetime.now(timezone.utc),
+        lease_heartbeat_at=datetime.now(timezone.utc),
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        ai_run_id=run.id,
+        conversation_id=conversation.id,
+        session_id=session.id,
+        accepted_at=None,
+        status="running",
+        ended_at=None,
+    )
+    prepared = SimpleNamespace(
+        run_id=run.id,
+        ticket_id=ticket.id,
+        worker_instance_id="worker-test",
+        context=SimpleNamespace(),
+    )
+
+    class PersistentRecoveryDb:
+        def __init__(self):
+            self.added = []
+
+        def execute(self, statement):
+            entity = statement.column_descriptions[0].get("entity") if getattr(statement, "column_descriptions", None) else None
+            first_name = statement.column_descriptions[0]["name"] if getattr(statement, "column_descriptions", None) else None
+            if first_name == "coalesce":
+                return _FakePersistentScalarResult(0)
+            entity_name = getattr(entity, "__name__", "")
+            if entity_name == "AIRun":
+                return _FakeWorkerStateResult([run])
+            if entity_name == "AIRunStep":
+                return _FakeWorkerStateResult([step])
+            if entity_name == "CodexTurn":
+                return _FakeWorkerStateResult([turn])
+            if entity_name == "CodexSession":
+                return _FakeWorkerStateResult([session])
+            return _FakeWorkerStateResult([])
+
+        def get(self, model, key):
+            name = getattr(model, "__name__", "")
+            if name == "Ticket" and key == ticket.id:
+                return ticket
+            if name == "CodexConversation" and key == conversation.id:
+                return conversation
+            return None
+
+        def add(self, item):
+            self.added.append(item)
+
+    fake_db = PersistentRecoveryDb()
+    observed = {
+        "triage_logs": [],
+        "queue_logs": [],
+        "failure_notes": [],
+        "status_changes": [],
+        "manifest_run_ids": [],
+    }
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    def raise_nonquiescent(*args, **kwargs):
+        raise symbols["PersistentCodexNonQuiescentCleanupError"](
+            "Codex output stream persistence did not quiesce after cleanup"
+        )
+
+    monkeypatch.setattr("worker.triage._prepare_run", lambda *args, **kwargs: prepared)
+    monkeypatch.setattr("worker.triage.execute_triage_pipeline", raise_nonquiescent)
+    monkeypatch.setattr("worker.triage._apply_success_result", lambda *args, **kwargs: pytest.fail("unexpected success"))
+    monkeypatch.setattr("worker.triage._mark_failed", lambda *args, **kwargs: pytest.fail("premature failure handling"))
+    monkeypatch.setattr("worker.triage.publish_ai_failure_note", lambda *args, **kwargs: pytest.fail("premature failure note"))
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: pytest.fail("premature internal note"))
+    monkeypatch.setattr("worker.triage.record_status_change", lambda *args, **kwargs: pytest.fail("premature status route"))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: pytest.fail("premature route"))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: pytest.fail("premature deferred requeue"))
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "worker.triage.log_worker_event",
+        lambda event, **kwargs: observed["triage_logs"].append((event, kwargs)),
+    )
+    monkeypatch.setattr("worker.queue.session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        "worker.queue.log_worker_event",
+        lambda event, **kwargs: observed["queue_logs"].append((event, kwargs)),
+    )
+    monkeypatch.setattr("worker.queue.process_deferred_requeue", lambda *args, **kwargs: pytest.fail("unexpected deferred requeue"))
+    monkeypatch.setattr("worker.queue.create_pending_ai_run", lambda *args, **kwargs: pytest.fail("unexpected stale-prompt retry"))
+    monkeypatch.setattr(
+        "worker.queue.publish_ai_failure_note",
+        lambda db, ticket, ai_run_id, body_markdown, created_at=None: observed["failure_notes"].append(
+            {"ai_run_id": ai_run_id, "body": body_markdown}
+        ),
+    )
+    monkeypatch.setattr(
+        "worker.queue.record_status_change",
+        lambda db, ticket, to_status, changed_by_type, changed_at, **kwargs: observed["status_changes"].append(
+            (ticket.status, to_status, changed_by_type)
+        )
+        or setattr(ticket, "status", to_status),
+    )
+    monkeypatch.setattr(
+        "worker.queue.write_run_manifest_snapshot",
+        lambda _settings, run_id: observed["manifest_run_ids"].append(run_id),
+    )
+
+    symbols["process_ai_run"](settings, run_id=run.id, worker_instance_id="worker-test")
+
+    assert run.status == "running"
+    assert run.ended_at is None
+    assert step.status == "running"
+    assert turn.status == "running"
+    assert session.status == "active"
+    assert session.lease_owner_run_id == run.id
+    assert conversation.status == "active"
+    assert observed["failure_notes"] == []
+    assert observed["status_changes"] == []
+    assert observed["triage_logs"][0][0] == "persistent_codex_cleanup_retained_for_stale_recovery"
+    stale_before = datetime.now(timezone.utc) - timedelta(seconds=settings.ai_run_stale_timeout_seconds)
+    assert run.last_heartbeat_at is None
+    assert run.started_at < stale_before
+
+    recovered_count = symbols["recover_stale_runs"](settings)
+
+    assert recovered_count == 1
+    assert run.status == "failed"
+    assert run.ended_at is not None
+    assert "stale" in run.error_text.lower()
+    assert step.status == "failed"
+    assert step.ended_at is not None
+    assert turn.status == "interrupted"
+    assert turn.ended_at is not None
+    assert session.status == "replaced"
+    assert session.ended_at is not None
+    assert session.lease_owner_run_id is None
+    assert session.lease_worker_instance_id is None
+    assert session.lease_expires_at is None
+    assert conversation.status == "recovery_required"
+    outcomes = [item for item in fake_db.added if item.__class__.__name__ == "CodexTurnOutcome"]
+    assert len(outcomes) == 1
+    assert outcomes[0].outcome_kind == "interrupted"
+    assert ticket.status == "waiting_on_dev_ti"
+    assert len(observed["failure_notes"]) == 1
+    assert "not retried automatically" in observed["failure_notes"][0]["body"]
+    assert observed["status_changes"] == [("ai_triage", "waiting_on_dev_ti", "system")]
+    assert observed["manifest_run_ids"] == [run.id]
+
+
+def test_process_ai_run_nonquiescent_accepted_turn_recovers_as_ambiguous(monkeypatch, tmp_path):
+    from worker import persistent_codex
+
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="ai_triage",
+        requeue_requested=False,
+        requeue_trigger=None,
+        requeue_requested_by_user_id=None,
+        requeue_forced_route_target_id=None,
+        requeue_forced_specialist_id=None,
+        updated_at=None,
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=11),
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        last_heartbeat_at=None,
+        ended_at=None,
+        error_text=None,
+        triggered_by="new_ticket",
+        requested_by_user_id=None,
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+        recovery_attempt_count=0,
+    )
+    step = SimpleNamespace(
+        ai_run_id=run.id,
+        step_index=2,
+        status="running",
+        error_text=None,
+        ended_at=None,
+    )
+    conversation = SimpleNamespace(id=uuid.uuid4(), status="active")
+    session = SimpleNamespace(
+        id=uuid.uuid4(),
+        conversation_id=conversation.id,
+        thread_id="thread-accepted-uncertain",
+        status="active",
+        ended_at=None,
+        lease_owner_run_id=run.id,
+        lease_worker_instance_id="worker-test",
+        lease_acquired_at=datetime.now(timezone.utc),
+        lease_heartbeat_at=datetime.now(timezone.utc),
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        ai_run_id=run.id,
+        conversation_id=conversation.id,
+        session_id=session.id,
+        accepted_at=datetime.now(timezone.utc) - timedelta(minutes=9),
+        status="running",
+        ended_at=None,
+    )
+    prepared = SimpleNamespace(
+        run_id=run.id,
+        ticket_id=ticket.id,
+        worker_instance_id="worker-test",
+        context=SimpleNamespace(),
+    )
+    fake_db = _PersistentQueueRecoveryDb(
+        stale_runs=[run],
+        steps_by_run_id={run.id: [step]},
+        tickets_by_id={ticket.id: ticket},
+        turns_by_run_id={run.id: [turn]},
+        sessions_by_id={session.id: session},
+        conversations_by_id={conversation.id: conversation},
+    )
+    observed = {
+        "triage_logs": [],
+        "failure_notes": [],
+        "status_changes": [],
+        "manifest_run_ids": [],
+    }
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    def raise_nonquiescent(*args, **kwargs):
+        raise symbols["PersistentCodexNonQuiescentCleanupError"](
+            "Codex output stream persistence did not quiesce after cleanup"
+        )
+
+    monkeypatch.setattr("worker.triage._prepare_run", lambda *args, **kwargs: prepared)
+    monkeypatch.setattr("worker.triage.execute_triage_pipeline", raise_nonquiescent)
+    monkeypatch.setattr("worker.triage._apply_success_result", lambda *args, **kwargs: pytest.fail("unexpected success"))
+    monkeypatch.setattr("worker.triage._mark_failed", lambda *args, **kwargs: pytest.fail("premature failure handling"))
+    monkeypatch.setattr("worker.triage.publish_ai_failure_note", lambda *args, **kwargs: pytest.fail("premature failure note"))
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: pytest.fail("premature internal note"))
+    monkeypatch.setattr("worker.triage.record_status_change", lambda *args, **kwargs: pytest.fail("premature status route"))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: pytest.fail("premature route"))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: pytest.fail("premature deferred requeue"))
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "worker.triage.log_worker_event",
+        lambda event, **kwargs: observed["triage_logs"].append((event, kwargs)),
+    )
+    monkeypatch.setattr("worker.queue.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.queue.log_worker_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.queue.process_deferred_requeue", lambda *args, **kwargs: pytest.fail("unexpected deferred requeue"))
+    monkeypatch.setattr("worker.queue.create_pending_ai_run", lambda *args, **kwargs: pytest.fail("unexpected stale-prompt retry"))
+    monkeypatch.setattr(
+        "worker.queue.publish_ai_failure_note",
+        lambda db, ticket, ai_run_id, body_markdown, created_at=None: observed["failure_notes"].append(
+            {"ai_run_id": ai_run_id, "body": body_markdown}
+        ),
+    )
+    monkeypatch.setattr(
+        "worker.queue.record_status_change",
+        lambda db, ticket, to_status, changed_by_type, changed_at, **kwargs: observed["status_changes"].append(
+            (ticket.status, to_status, changed_by_type)
+        )
+        or setattr(ticket, "status", to_status),
+    )
+    monkeypatch.setattr(
+        "worker.queue.write_run_manifest_snapshot",
+        lambda _settings, run_id: observed["manifest_run_ids"].append(run_id),
+    )
+
+    symbols["process_ai_run"](settings, run_id=run.id, worker_instance_id="worker-test")
+
+    assert run.status == "running"
+    assert step.status == "running"
+    assert turn.status == "running"
+    assert session.status == "active"
+    assert conversation.status == "active"
+    assert observed["triage_logs"][0][0] == "persistent_codex_cleanup_retained_for_stale_recovery"
+
+    recovered_count = symbols["recover_stale_runs"](settings)
+
+    assert recovered_count == 1
+    assert run.status == "failed"
+    assert step.status == "failed"
+    assert turn.status == "ambiguous"
+    assert turn.ended_at is not None
+    outcomes = [item for item in fake_db.added if item.__class__.__name__ == "CodexTurnOutcome"]
+    assert len(outcomes) == 1
+    assert outcomes[0].outcome_kind == "ambiguous"
+    assert outcomes[0].payload_json == {
+        "reason": "stale_run_recovery",
+        "stale_timeout_seconds": settings.ai_run_stale_timeout_seconds,
+        "accepted": True,
+    }
+    assert session.status == "replaced"
+    assert session.ended_at is not None
+    assert session.lease_owner_run_id is None
+    assert session.lease_worker_instance_id is None
+    assert session.lease_acquired_at is None
+    assert session.lease_heartbeat_at is None
+    assert session.lease_expires_at is None
+    assert conversation.status == "recovery_required"
+    assert persistent_codex._replacement_session_required(
+        conversation=conversation,
+        session=None,
+        prior_turn_count=1,
+    )
+    assert len(observed["failure_notes"]) == 1
+    assert observed["status_changes"] == [("ai_triage", "waiting_on_dev_ti", "system")]
+    assert observed["manifest_run_ids"] == [run.id]
+
+
+def test_process_ai_run_retains_deferred_nonquiescent_cleanup_without_requeue(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    requested_by_user_id = uuid.uuid4()
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="ai_triage",
+        requeue_requested=True,
+        requeue_trigger="requester_reply",
+        requeue_requested_by_user_id=requested_by_user_id,
+        requeue_forced_route_target_id="support",
+        requeue_forced_specialist_id="bug",
+        updated_at=None,
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=11),
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        last_heartbeat_at=None,
+        ended_at=None,
+        error_text=None,
+        triggered_by="new_ticket",
+        requested_by_user_id=None,
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+        recovery_attempt_count=0,
+    )
+    step = SimpleNamespace(
+        ai_run_id=run.id,
+        step_index=2,
+        status="running",
+        error_text=None,
+        ended_at=None,
+    )
+    conversation = SimpleNamespace(id=uuid.uuid4(), status="active")
+    session = SimpleNamespace(
+        id=uuid.uuid4(),
+        conversation_id=conversation.id,
+        thread_id="thread-from-prior-turn",
+        status="active",
+        ended_at=None,
+        lease_owner_run_id=run.id,
+        lease_worker_instance_id="worker-test",
+        lease_acquired_at=datetime.now(timezone.utc),
+        lease_heartbeat_at=datetime.now(timezone.utc),
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        ai_run_id=run.id,
+        conversation_id=conversation.id,
+        session_id=session.id,
+        accepted_at=None,
+        status="running",
+        ended_at=None,
+    )
+    prepared = SimpleNamespace(
+        run_id=run.id,
+        ticket_id=ticket.id,
+        worker_instance_id="worker-test",
+        context=SimpleNamespace(ticket=ticket),
+    )
+    replacement_run = SimpleNamespace(
+        id=uuid.uuid4(),
+        triggered_by=None,
+        requested_by_user_id=None,
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+    )
+    fake_db = _PersistentQueueRecoveryDb(
+        stale_runs=[run],
+        steps_by_run_id={run.id: [step]},
+        tickets_by_id={ticket.id: ticket},
+        turns_by_run_id={run.id: [turn]},
+        sessions_by_id={session.id: session},
+        conversations_by_id={conversation.id: conversation},
+    )
+    observed = {"triage_logs": [], "manifest_run_ids": [], "deferred_calls": 0, "deferred_metadata": None}
+
+    def raise_nonquiescent(*args, **kwargs):
+        raise symbols["PersistentCodexNonQuiescentCleanupError"](
+            "Codex output stream persistence did not quiesce after cleanup"
+        )
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    def fake_process_deferred_requeue(db, *, ticket):
+        observed["deferred_calls"] += 1
+        observed["deferred_metadata"] = {
+            "triggered_by": ticket.requeue_trigger,
+            "requested_by_user_id": ticket.requeue_requested_by_user_id,
+            "forced_route_target_id": ticket.requeue_forced_route_target_id,
+            "forced_specialist_id": ticket.requeue_forced_specialist_id,
+        }
+        replacement_run.triggered_by = ticket.requeue_trigger
+        replacement_run.requested_by_user_id = ticket.requeue_requested_by_user_id
+        replacement_run.forced_route_target_id = ticket.requeue_forced_route_target_id
+        replacement_run.forced_specialist_id = ticket.requeue_forced_specialist_id
+        ticket.requeue_requested = False
+        ticket.requeue_trigger = None
+        ticket.requeue_requested_by_user_id = None
+        ticket.requeue_forced_route_target_id = None
+        ticket.requeue_forced_specialist_id = None
+        return replacement_run
+
+    monkeypatch.setattr("worker.triage._prepare_run", lambda *args, **kwargs: prepared)
+    monkeypatch.setattr("worker.triage.execute_triage_pipeline", raise_nonquiescent)
+    monkeypatch.setattr("worker.triage._apply_success_result", lambda *args, **kwargs: pytest.fail("unexpected success"))
+    monkeypatch.setattr("worker.triage._mark_failed", lambda *args, **kwargs: pytest.fail("premature failure handling"))
+    monkeypatch.setattr("worker.triage.publish_ai_failure_note", lambda *args, **kwargs: pytest.fail("premature failure note"))
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: pytest.fail("premature internal note"))
+    monkeypatch.setattr("worker.triage.record_status_change", lambda *args, **kwargs: pytest.fail("premature status route"))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: pytest.fail("premature route"))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: pytest.fail("premature deferred requeue"))
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "worker.triage.log_worker_event",
+        lambda event, **kwargs: observed["triage_logs"].append((event, kwargs)),
+    )
+    monkeypatch.setattr("worker.queue.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.queue.log_worker_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.queue.create_pending_ai_run", lambda *args, **kwargs: pytest.fail("unexpected stale-prompt retry"))
+    monkeypatch.setattr("worker.queue.process_deferred_requeue", fake_process_deferred_requeue)
+    monkeypatch.setattr("worker.queue.publish_ai_failure_note", lambda *args, **kwargs: pytest.fail("unexpected failure note"))
+    monkeypatch.setattr("worker.queue.record_status_change", lambda *args, **kwargs: pytest.fail("unexpected status change"))
+    monkeypatch.setattr(
+        "worker.queue.write_run_manifest_snapshot",
+        lambda _settings, run_id: observed["manifest_run_ids"].append(run_id),
+    )
+
+    symbols["process_ai_run"](settings, run_id=run.id, worker_instance_id="worker-test")
+
+    assert run.status == "running"
+    assert run.ended_at is None
+    assert run.error_text is None
+    stale_before = datetime.now(timezone.utc) - timedelta(seconds=settings.ai_run_stale_timeout_seconds)
+    assert run.last_heartbeat_at is None
+    assert run.started_at < stale_before
+    assert ticket.requeue_requested is True
+    assert ticket.requeue_trigger == "requester_reply"
+    assert ticket.requeue_requested_by_user_id == requested_by_user_id
+    assert ticket.requeue_forced_route_target_id == "support"
+    assert ticket.requeue_forced_specialist_id == "bug"
+    assert observed["triage_logs"][0][0] == "persistent_codex_cleanup_retained_for_stale_recovery"
+
+    recovered_count = symbols["recover_stale_runs"](settings)
+
+    assert recovered_count == 1
+    assert run.status == "failed"
+    assert step.status == "failed"
+    assert turn.status == "interrupted"
+    assert session.status == "replaced"
+    assert session.lease_owner_run_id is None
+    assert conversation.status == "recovery_required"
+    assert observed["deferred_calls"] == 1
+    assert observed["deferred_metadata"] == {
+        "triggered_by": "requester_reply",
+        "requested_by_user_id": requested_by_user_id,
+        "forced_route_target_id": "support",
+        "forced_specialist_id": "bug",
+    }
+    assert replacement_run.triggered_by == "requester_reply"
+    assert replacement_run.requested_by_user_id == requested_by_user_id
+    assert ticket.requeue_requested is False
+    assert ticket.requeue_trigger is None
+    assert observed["manifest_run_ids"] == [run.id, replacement_run.id]
+
+
+def test_process_ai_run_marks_failed_for_ordinary_step_run_error(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    prepared = SimpleNamespace(
+        run_id=uuid.uuid4(),
+        ticket_id=uuid.uuid4(),
+        worker_instance_id="worker-test",
+        context=SimpleNamespace(),
+    )
+    observed = {}
+
+    monkeypatch.setattr("worker.triage._prepare_run", lambda *args, **kwargs: prepared)
+    monkeypatch.setattr(
+        "worker.triage.execute_triage_pipeline",
+        lambda *args, **kwargs: (_ for _ in ()).throw(symbols["StepRunError"]("ordinary supervision failure")),
+    )
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.triage.log_worker_event", lambda *args, **kwargs: pytest.fail("unexpected stale handoff"))
+    monkeypatch.setattr(
+        "worker.triage._mark_failed",
+        lambda settings, run_id, worker_instance_id, error_text: observed.update(
+            {"run_id": run_id, "worker_instance_id": worker_instance_id, "error_text": error_text}
+        ),
+    )
+
+    symbols["process_ai_run"](settings, run_id=prepared.run_id, worker_instance_id="worker-test")
+
+    assert observed == {
+        "run_id": prepared.run_id,
+        "worker_instance_id": "worker-test",
+        "error_text": "ordinary supervision failure",
+    }
+
+
+def test_process_ai_run_marks_failed_for_quiesced_persistent_cleanup_error_after_finalize(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    prepared = SimpleNamespace(
+        run_id=uuid.uuid4(),
+        ticket_id=uuid.uuid4(),
+        worker_instance_id="worker-test",
+        context=SimpleNamespace(),
+    )
+    finalized = {"called": False}
+    observed = {}
+    error_text = (
+        "Persistent specialist process supervision failed: "
+        "Codex output streams did not close after the process exited"
+    )
+
+    def raise_after_persistent_finalize(*args, **kwargs):
+        finalized["called"] = True
+        raise symbols["StepRunError"](error_text)
+
+    monkeypatch.setattr("worker.triage._prepare_run", lambda *args, **kwargs: prepared)
+    monkeypatch.setattr("worker.triage.execute_triage_pipeline", raise_after_persistent_finalize)
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.triage._apply_success_result", lambda *args, **kwargs: pytest.fail("unexpected success"))
+    monkeypatch.setattr("worker.triage.log_worker_event", lambda *args, **kwargs: pytest.fail("unexpected stale handoff"))
+    monkeypatch.setattr(
+        "worker.triage._mark_failed",
+        lambda settings, run_id, worker_instance_id, error_text: observed.update(
+            {"run_id": run_id, "worker_instance_id": worker_instance_id, "error_text": error_text}
+        ),
+    )
+
+    symbols["process_ai_run"](settings, run_id=prepared.run_id, worker_instance_id="worker-test")
+
+    assert finalized["called"] is True
+    assert observed == {
+        "run_id": prepared.run_id,
+        "worker_instance_id": "worker-test",
+        "error_text": error_text,
+    }
+
+
+def test_process_ai_run_marks_failed_for_publication_policy_error(monkeypatch, tmp_path):
+    from worker.publication_policy import PublicationPolicyError
+
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    prepared = SimpleNamespace(
+        run_id=uuid.uuid4(),
+        ticket_id=uuid.uuid4(),
+        worker_instance_id="worker-test",
+        context=SimpleNamespace(),
+    )
+    observed = {}
+
+    monkeypatch.setattr("worker.triage._prepare_run", lambda *args, **kwargs: prepared)
+    monkeypatch.setattr("worker.triage.execute_triage_pipeline", lambda *args, **kwargs: SimpleNamespace())
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "worker.triage._apply_success_result",
+        lambda *args, **kwargs: (_ for _ in ()).throw(PublicationPolicyError("invalid publication policy")),
+    )
+    monkeypatch.setattr("worker.triage.log_worker_event", lambda *args, **kwargs: pytest.fail("unexpected stale handoff"))
+    monkeypatch.setattr(
+        "worker.triage._mark_failed",
+        lambda settings, run_id, worker_instance_id, error_text: observed.update(
+            {"run_id": run_id, "worker_instance_id": worker_instance_id, "error_text": error_text}
+        ),
+    )
+
+    symbols["process_ai_run"](settings, run_id=prepared.run_id, worker_instance_id="worker-test")
+
+    assert observed == {
+        "run_id": prepared.run_id,
+        "worker_instance_id": "worker-test",
+        "error_text": "invalid publication policy",
+    }
+
+
 def test_mark_failed_publishes_internal_failure_note_and_routes_ticket(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
@@ -3090,6 +4862,329 @@ def test_recover_stale_runs_honors_deferred_requeue(monkeypatch, tmp_path):
     assert recovered_count == 1
     assert run.status == "failed"
     assert observed["deferred_requeue_calls"] == 1
+
+
+def test_recover_stale_runs_processes_deferred_requeue_after_persistent_recovery(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    requested_by_user_id = uuid.uuid4()
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="ai_triage",
+        requeue_requested=True,
+        requeue_trigger="manual_rerun",
+        requeue_requested_by_user_id=requested_by_user_id,
+        requeue_forced_route_target_id="support",
+        requeue_forced_specialist_id="bug",
+        updated_at=None,
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=11),
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        last_heartbeat_at=None,
+        ended_at=None,
+        error_text=None,
+        triggered_by="new_ticket",
+        requested_by_user_id=None,
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+        recovery_attempt_count=0,
+    )
+    fake_db = _QueueRecoveryDb(
+        stale_runs=[run],
+        steps_by_run_id={run.id: []},
+        tickets_by_id={ticket.id: ticket},
+    )
+    replacement_run = SimpleNamespace(
+        id=uuid.uuid4(),
+        triggered_by=None,
+        requested_by_user_id=None,
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+    )
+    observed = {"manifest_run_ids": [], "deferred_calls": 0, "deferred_metadata": None}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.queue.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.queue.log_worker_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.queue.handle_stale_persistent_run", lambda *args, **kwargs: True)
+    monkeypatch.setattr("worker.queue.create_pending_ai_run", lambda *args, **kwargs: pytest.fail("unexpected replacement"))
+
+    def fake_process_deferred_requeue(db, *, ticket):
+        observed["deferred_calls"] += 1
+        observed["deferred_metadata"] = {
+            "triggered_by": ticket.requeue_trigger,
+            "requested_by_user_id": ticket.requeue_requested_by_user_id,
+            "forced_route_target_id": ticket.requeue_forced_route_target_id,
+            "forced_specialist_id": ticket.requeue_forced_specialist_id,
+        }
+        replacement_run.triggered_by = ticket.requeue_trigger
+        replacement_run.requested_by_user_id = ticket.requeue_requested_by_user_id
+        replacement_run.forced_route_target_id = ticket.requeue_forced_route_target_id
+        replacement_run.forced_specialist_id = ticket.requeue_forced_specialist_id
+        ticket.requeue_requested = False
+        ticket.requeue_trigger = None
+        ticket.requeue_requested_by_user_id = None
+        ticket.requeue_forced_route_target_id = None
+        ticket.requeue_forced_specialist_id = None
+        return replacement_run
+
+    monkeypatch.setattr("worker.queue.process_deferred_requeue", fake_process_deferred_requeue)
+    monkeypatch.setattr("worker.queue.publish_ai_failure_note", lambda *args, **kwargs: pytest.fail("unexpected failure note"))
+    monkeypatch.setattr("worker.queue.record_status_change", lambda *args, **kwargs: pytest.fail("unexpected status change"))
+    monkeypatch.setattr(
+        "worker.queue.write_run_manifest_snapshot",
+        lambda _settings, run_id: observed["manifest_run_ids"].append(run_id),
+    )
+
+    recovered_count = symbols["recover_stale_runs"](settings)
+
+    assert recovered_count == 1
+    assert run.status == "failed"
+    assert observed["deferred_calls"] == 1
+    assert observed["deferred_metadata"] == {
+        "triggered_by": "manual_rerun",
+        "requested_by_user_id": requested_by_user_id,
+        "forced_route_target_id": "support",
+        "forced_specialist_id": "bug",
+    }
+    assert ticket.requeue_requested is False
+    assert ticket.requeue_trigger is None
+    assert replacement_run.triggered_by == "manual_rerun"
+    assert replacement_run.requested_by_user_id == requested_by_user_id
+    assert replacement_run.forced_route_target_id == "support"
+    assert replacement_run.forced_specialist_id == "bug"
+    assert observed["manifest_run_ids"] == [run.id, replacement_run.id]
+
+
+def test_recover_stale_persistent_deferred_requeue_retained_when_creation_loses_active_run_race(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    requested_by_user_id = uuid.uuid4()
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="ai_triage",
+        requeue_requested=True,
+        requeue_trigger="requester_reply",
+        requeue_requested_by_user_id=requested_by_user_id,
+        requeue_forced_route_target_id="support",
+        requeue_forced_specialist_id="bug",
+        updated_at=None,
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=11),
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        last_heartbeat_at=None,
+        ended_at=None,
+        error_text=None,
+        triggered_by="new_ticket",
+        requested_by_user_id=None,
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+        recovery_attempt_count=0,
+    )
+    fake_db = _QueueRecoveryDb(
+        stale_runs=[run],
+        steps_by_run_id={run.id: []},
+        tickets_by_id={ticket.id: ticket},
+    )
+    observed = {"deferred_calls": 0, "manifest_run_ids": []}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    def fake_process_deferred_requeue(db, *, ticket):
+        observed["deferred_calls"] += 1
+        return None
+
+    monkeypatch.setattr("worker.queue.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.queue.log_worker_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.queue.handle_stale_persistent_run", lambda *args, **kwargs: True)
+    monkeypatch.setattr("worker.queue.create_pending_ai_run", lambda *args, **kwargs: pytest.fail("unexpected stale-prompt retry"))
+    monkeypatch.setattr("worker.queue.process_deferred_requeue", fake_process_deferred_requeue)
+    monkeypatch.setattr("worker.queue.publish_ai_failure_note", lambda *args, **kwargs: pytest.fail("unexpected failure note"))
+    monkeypatch.setattr("worker.queue.record_status_change", lambda *args, **kwargs: pytest.fail("unexpected status change"))
+    monkeypatch.setattr(
+        "worker.queue.write_run_manifest_snapshot",
+        lambda _settings, run_id: observed["manifest_run_ids"].append(run_id),
+    )
+
+    recovered_count = symbols["recover_stale_runs"](settings)
+
+    assert recovered_count == 1
+    assert run.status == "failed"
+    assert observed["deferred_calls"] == 1
+    assert ticket.requeue_requested is True
+    assert ticket.requeue_trigger == "requester_reply"
+    assert ticket.requeue_requested_by_user_id == requested_by_user_id
+    assert ticket.requeue_forced_route_target_id == "support"
+    assert ticket.requeue_forced_specialist_id == "bug"
+    assert observed["manifest_run_ids"] == [run.id]
+
+
+def test_recover_stale_persistent_run_without_deferred_work_routes_internally(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="ai_triage",
+        requeue_requested=False,
+        requeue_trigger=None,
+        requeue_requested_by_user_id=None,
+        requeue_forced_route_target_id=None,
+        requeue_forced_specialist_id=None,
+        updated_at=None,
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=11),
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        last_heartbeat_at=None,
+        ended_at=None,
+        error_text=None,
+        triggered_by="new_ticket",
+        requested_by_user_id=None,
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+        recovery_attempt_count=0,
+    )
+    fake_db = _QueueRecoveryDb(
+        stale_runs=[run],
+        steps_by_run_id={run.id: []},
+        tickets_by_id={ticket.id: ticket},
+    )
+    observed = {"failure_notes": [], "status_changes": [], "manifest_run_ids": []}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.queue.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.queue.log_worker_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.queue.handle_stale_persistent_run", lambda *args, **kwargs: True)
+    monkeypatch.setattr("worker.queue.process_deferred_requeue", lambda *args, **kwargs: pytest.fail("unexpected deferred requeue"))
+    monkeypatch.setattr("worker.queue.create_pending_ai_run", lambda *args, **kwargs: pytest.fail("unexpected replacement run"))
+    monkeypatch.setattr(
+        "worker.queue.publish_ai_failure_note",
+        lambda db, ticket, ai_run_id, body_markdown, created_at=None: observed["failure_notes"].append(
+            {
+                "visibility_source": "publish_ai_failure_note",
+                "ai_run_id": ai_run_id,
+                "body": body_markdown,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "worker.queue.record_status_change",
+        lambda db, ticket, to_status, changed_by_type, changed_at, **kwargs: observed["status_changes"].append(
+            (ticket.status, to_status, changed_by_type)
+        )
+        or setattr(ticket, "status", to_status),
+    )
+    monkeypatch.setattr(
+        "worker.queue.write_run_manifest_snapshot",
+        lambda _settings, run_id: observed["manifest_run_ids"].append(run_id),
+    )
+
+    recovered_count = symbols["recover_stale_runs"](settings)
+
+    assert recovered_count == 1
+    assert run.status == "failed"
+    assert ticket.status == "waiting_on_dev_ti"
+    assert len(observed["failure_notes"]) == 1
+    assert observed["failure_notes"][0]["ai_run_id"] == run.id
+    assert "not retried automatically" in observed["failure_notes"][0]["body"]
+    assert observed["status_changes"] == [("ai_triage", "waiting_on_dev_ti", "system")]
+    assert observed["manifest_run_ids"] == [run.id]
+
+
+def test_handle_stale_persistent_run_retires_unaccepted_session_for_recovery():
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    run = SimpleNamespace(id=uuid.uuid4())
+    conversation = SimpleNamespace(id=uuid.uuid4(), status="active")
+    session = SimpleNamespace(
+        id=uuid.uuid4(),
+        conversation_id=conversation.id,
+        thread_id="thread-from-prior-turn",
+        status="active",
+        ended_at=None,
+        lease_owner_run_id=run.id,
+        lease_worker_instance_id="worker-test",
+        lease_acquired_at=datetime.now(timezone.utc),
+        lease_heartbeat_at=datetime.now(timezone.utc),
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        ai_run_id=run.id,
+        conversation_id=conversation.id,
+        session_id=session.id,
+        accepted_at=None,
+        status="running",
+        ended_at=None,
+    )
+
+    class StalePersistentDb:
+        def __init__(self):
+            self.added = []
+
+        def execute(self, statement):
+            descriptions = statement.column_descriptions
+            first_name = descriptions[0]["name"]
+            entity = descriptions[0].get("entity")
+            entity_name = getattr(entity, "__name__", "")
+            if first_name == "coalesce":
+                return _FakePersistentScalarResult(0)
+            if entity_name == "CodexTurn":
+                return _FakeWorkerStateResult([turn])
+            if entity_name == "CodexSession":
+                return _FakeWorkerStateResult([session])
+            return _FakeWorkerStateResult([])
+
+        def add(self, item):
+            self.added.append(item)
+
+        def get(self, model, key):
+            if getattr(model, "__name__", "") == "CodexConversation" and key == conversation.id:
+                return conversation
+            return None
+
+    fake_db = StalePersistentDb()
+
+    handled = persistent_codex.handle_stale_persistent_run(
+        fake_db,
+        run=run,
+        stale_timeout_seconds=600,
+    )
+
+    assert handled is True
+    assert turn.status == "interrupted"
+    assert turn.ended_at is not None
+    assert session.status == "replaced"
+    assert session.ended_at is not None
+    assert session.lease_owner_run_id is None
+    assert session.lease_worker_instance_id is None
+    assert session.lease_expires_at is None
+    assert conversation.status == "recovery_required"
+    outcomes = [item for item in fake_db.added if item.__class__.__name__ == "CodexTurnOutcome"]
+    assert len(outcomes) == 1
+    assert outcomes[0].outcome_kind == "interrupted"
+    assert outcomes[0].payload_json["accepted"] is False
 
 
 def test_recover_stale_runs_routes_ticket_when_retry_budget_is_exhausted(monkeypatch, tmp_path):

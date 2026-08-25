@@ -18,6 +18,7 @@ from shared.ticketing import (
     publish_ai_failure_note,
     record_status_change,
 )
+from worker.persistent_codex import handle_stale_persistent_run
 from worker.step_runner import write_run_manifest_snapshot
 
 STALE_RUN_RECOVERY_BATCH_SIZE = 20
@@ -71,6 +72,17 @@ def _recovery_exhausted_note_body(*, retry_budget: int, stale_timeout_seconds: i
     )
 
 
+def _persistent_stale_recovery_note_body(*, stale_timeout_seconds: int) -> str:
+    return "\n".join(
+        [
+            "Persistent AI triage run stalled and was not retried automatically.",
+            "",
+            "The retained Codex turn may be interrupted or ambiguous, so the original prompt was preserved in history.",
+            f"Stale-run threshold: {stale_timeout_seconds} seconds without a per-run heartbeat update.",
+        ]
+    )
+
+
 def _mark_running_steps_failed(db: Session, *, run_id, error_text: str, failed_at) -> None:
     running_steps = list(
         db.execute(
@@ -114,6 +126,59 @@ def recover_stale_runs(settings: Settings) -> int:
             run.error_text = error_text
             _mark_running_steps_failed(db, run_id=run.id, error_text=error_text, failed_at=failed_at)
             _append_manifest_run_id(manifest_run_ids, run.id)
+            if handle_stale_persistent_run(
+                db,
+                run=run,
+                stale_timeout_seconds=settings.ai_run_stale_timeout_seconds,
+            ):
+                ticket = db.get(Ticket, run.ticket_id)
+                if ticket is None:
+                    log_worker_event(
+                        "stale_persistent_run_retained_without_ticket",
+                        level="error",
+                        run_id=str(run.id),
+                        ticket_id=str(run.ticket_id),
+                        persistent_turn_retained=True,
+                    )
+                    recovered_count += 1
+                    continue
+                replacement_run = None
+                if ticket.requeue_requested and ticket.requeue_trigger:
+                    replacement_run = process_deferred_requeue(db, ticket=ticket)
+                    if replacement_run is not None:
+                        _append_manifest_run_id(manifest_run_ids, replacement_run.id)
+                else:
+                    publish_ai_failure_note(
+                        db,
+                        ticket=ticket,
+                        ai_run_id=run.id,
+                        body_markdown=_persistent_stale_recovery_note_body(
+                            stale_timeout_seconds=settings.ai_run_stale_timeout_seconds,
+                        ),
+                        created_at=failed_at,
+                    )
+                    if ticket.status != "waiting_on_dev_ti":
+                        record_status_change(
+                            db,
+                            slack_runtime=slack_runtime,
+                            ticket=ticket,
+                            to_status="waiting_on_dev_ti",
+                            changed_by_type="system",
+                            changed_at=failed_at,
+                        )
+                log_worker_event(
+                    "stale_persistent_run_retained",
+                    level="warning",
+                    run_id=str(run.id),
+                    ticket_id=str(run.ticket_id),
+                    persistent_turn_retained=True,
+                    replacement_run_id=str(replacement_run.id) if replacement_run is not None else None,
+                    deferred_requeue_retained=bool(
+                        ticket.requeue_requested and ticket.requeue_trigger and replacement_run is None
+                    ),
+                )
+                recovered_count += 1
+                continue
             ticket = db.get(Ticket, run.ticket_id)
             if ticket is None:
                 log_worker_event(
