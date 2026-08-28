@@ -257,6 +257,7 @@ Phase-3 implementation note:
 - if no later deferred work exists, stale persistent recovery does not leave the ticket indefinitely in `ai_triage` with no active run; it uses the existing internal failure-note and Dev/TI status-transition seams without requester-visible publication;
 - stale persistent recovery conservatively retires the native session segment and marks the logical conversation `recovery_required`, even when `turn.started` was never durably observed, because a missing acceptance row does not prove the CLI never received stdin;
 - `turn.started`, not a pre-existing native thread ID, is the durable acceptance evidence for the specific attempt; accepted stale attempts become ambiguous, unaccepted stale attempts remain interrupted, and the next genuine event starts a replacement native session with an explicit recovery boundary rather than resuming the uncertain session;
+- stale recovery records accepted input counts, steering receipt status counts, recovery markers, and the rule that late output from a retired native session may be retained as a raw item but is never publishable;
 - lease expiry and worker-instance ownership are the cross-host fencing boundary; host-local PID checks are intentionally not used.
 
 ### 12.2 Transport
@@ -297,6 +298,13 @@ Phase-3 implementation note:
 - resumed persistent specialist turns use `codex exec resume <stored-thread-id>`;
 - both paths add `--strict-config`, `-c 'sandbox_mode="read-only"'`, `-c 'web_search="disabled"'`, `-c 'tools.web_search=false'`, `--disable web_search_request`, and `--disable standalone_web_search`.
 
+Active-turn steering transport update:
+
+- `CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED=true` switches only persistent specialist turns to a run-scoped `codex app-server --stdio` process;
+- router and selector steps remain on the existing `execute_step` / `codex exec --ephemeral` path;
+- app-server specialist turns start or resume the stored thread ID, persist native thread and turn IDs as soon as they are returned, wait for `turn/completed`, and record accepted initial inputs only after `turn/start` acceptance;
+- the setting is default-off so the earlier persistent `codex exec` transport remains the rollback path.
+
 ## 13. Retention, permissions, backup, and deletion
 
 Persistent conversation storage is blocked on the following minimum controls:
@@ -316,7 +324,7 @@ Until those controls exist, persistent native session storage may be used in tes
 Deferred by design from the first shipped slice:
 
 - live JSONL streaming in the requester UI;
-- app-server migration;
+- removing the persistent-specialist `codex exec` transport before an app-server soak period;
 - routing every ordinary follow-up through the router;
 - multiple requester-visible publication channels;
 - a broad redesign of the ticket UI.
@@ -356,6 +364,7 @@ The first UI requirement is only minimal operations visibility plus requester-sa
 ### Phase 5: UI safe projection
 
 - add minimal ops-only lifecycle visibility;
+- expose ops-only steering receipt history, delivery states, native thread/turn IDs, effective input hashes, completion fences, ambiguous blockers, and recovery markers;
 - keep requester routes limited to published `TicketMessage` content and optional generic run-state indicators.
 
 ## 16. Rollout contract

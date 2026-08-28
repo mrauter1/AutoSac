@@ -38,16 +38,19 @@ MESSAGE_SOURCES = (
     "system",
 )
 AI_RUN_STATUSES = ("pending", "running", "succeeded", "human_review", "failed", "skipped", "superseded")
-AI_RUN_TRIGGERS = ("new_ticket", "requester_reply", "manual_rerun", "reopen")
+AI_RUN_TRIGGERS = ("new_ticket", "requester_reply", "manual_rerun", "reopen", "ticket_content")
 AI_RUN_STEP_KINDS = ("router", "selector", "specialist")
 AI_RUN_STEP_STATUSES = AI_RUN_STATUSES
-REQUEUE_TRIGGERS = ("requester_reply", "manual_rerun", "reopen")
+REQUEUE_TRIGGERS = ("requester_reply", "manual_rerun", "reopen", "ticket_content")
 AI_DRAFT_KINDS = ("public_reply",)
 AI_DRAFT_STATUSES = ("pending_approval", "approved", "rejected", "superseded", "published")
 CODEX_CONVERSATION_STATUSES = ("active", "recovery_required", "unavailable", "closed")
 CODEX_SESSION_STATUSES = ("pending", "active", "replaced", "expired", "deleted")
 CODEX_TURN_STATUSES = ("prepared", "running", "completed", "failed", "interrupted", "timed_out", "ambiguous", "superseded", "cancelled")
+CODEX_TURN_TRANSPORT_KINDS = ("exec", "app_server")
 CODEX_TURN_INPUT_SOURCE_KINDS = ("ticket", "ticket_message", "ticket_status_history", "ai_draft", "ai_run", "ticket_message_publication")
+CODEX_TURN_STEER_STATUSES = ("prepared", "sending", "accepted", "rejected", "ambiguous")
+CODEX_TURN_STEER_SOURCE_KINDS = CODEX_TURN_INPUT_SOURCE_KINDS
 CODEX_TURN_OUTCOME_KINDS = (
     "attempted",
     "accepted",
@@ -56,6 +59,7 @@ CODEX_TURN_OUTCOME_KINDS = (
     "draft_created",
     "draft_rejected",
     "published_with_edits",
+    "internal_note_published",
     "superseded",
     "internal_only_retained",
     "failed",
@@ -140,6 +144,7 @@ class Ticket(Base):
         Index("ix_tickets_created_by_user_id_updated_at", "created_by_user_id", text("updated_at DESC")),
         Index("ix_tickets_assigned_to_user_id_updated_at", "assigned_to_user_id", text("updated_at DESC")),
         Index("ix_tickets_urgent_status_updated_at", "urgent", "status", text("updated_at DESC")),
+        Index("ix_tickets_requeue_source_message_id", "requeue_source_message_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -166,6 +171,7 @@ class Ticket(Base):
     requeue_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     requeue_trigger: Mapped[str | None] = mapped_column(Text, nullable=True)
     requeue_requested_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    requeue_source_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ticket_messages.id"), nullable=True)
     requeue_forced_route_target_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     requeue_forced_specialist_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
@@ -475,10 +481,16 @@ class CodexTurn(Base):
     __tablename__ = "codex_turns"
     __table_args__ = (
         CheckConstraint(f"status IN {_enum_sql(CODEX_TURN_STATUSES)}", name="codex_turns_status"),
+        CheckConstraint(f"transport_kind IN {_enum_sql(CODEX_TURN_TRANSPORT_KINDS)}", name="codex_turns_transport_kind"),
         CheckConstraint("turn_index >= 1", name="codex_turns_turn_index_positive"),
         CheckConstraint("specialist_id <> ''", name="codex_turns_specialist_id_not_blank"),
         CheckConstraint("agent_spec_version <> ''", name="codex_turns_agent_spec_version_not_blank"),
         CheckConstraint("output_contract <> ''", name="codex_turns_output_contract_not_blank"),
+        CheckConstraint("native_turn_id IS NULL OR btrim(native_turn_id) <> ''", name="codex_turns_native_turn_id_not_blank"),
+        CheckConstraint(
+            "effective_input_hash IS NULL OR btrim(effective_input_hash) <> ''",
+            name="codex_turns_effective_input_hash_not_blank",
+        ),
         Index("uq_codex_turns_ai_run_id", "ai_run_id", unique=True),
         Index("uq_codex_turns_conversation_id_turn_index", "conversation_id", "turn_index", unique=True),
         Index(
@@ -488,6 +500,14 @@ class CodexTurn(Base):
             postgresql_where=text("status IN ('prepared', 'running')"),
         ),
         Index("ix_codex_turns_session_id_turn_index", "session_id", "turn_index"),
+        Index(
+            "uq_codex_turns_session_native_turn_id",
+            "session_id",
+            "native_turn_id",
+            unique=True,
+            postgresql_where=text("session_id IS NOT NULL AND native_turn_id IS NOT NULL"),
+            sqlite_where=text("session_id IS NOT NULL AND native_turn_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -496,6 +516,8 @@ class CodexTurn(Base):
     ai_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ai_runs.id"), nullable=False)
     turn_index: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="prepared", server_default=text("'prepared'"))
+    transport_kind: Mapped[str] = mapped_column(Text, nullable=False, default="exec", server_default=text("'exec'"))
+    native_turn_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     specialist_id: Mapped[str] = mapped_column(Text, nullable=False)
     agent_spec_version: Mapped[str] = mapped_column(Text, nullable=False)
     output_contract: Mapped[str] = mapped_column(Text, nullable=False)
@@ -509,6 +531,8 @@ class CodexTurn(Base):
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    steering_closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    effective_input_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
 
 
@@ -534,6 +558,45 @@ class CodexTurnInput(Base):
     source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     dedupe_key: Mapped[str] = mapped_column(Text, nullable=False)
     payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+
+
+class CodexTurnSteer(Base):
+    __tablename__ = "codex_turn_steers"
+    __table_args__ = (
+        CheckConstraint(
+            f"source_kind IN {_enum_sql(CODEX_TURN_STEER_SOURCE_KINDS)}",
+            name="codex_turn_steers_source_kind",
+        ),
+        CheckConstraint(f"status IN {_enum_sql(CODEX_TURN_STEER_STATUSES)}", name="codex_turn_steers_status"),
+        CheckConstraint("event_kind <> ''", name="codex_turn_steers_event_kind_not_blank"),
+        CheckConstraint("source_id IS NOT NULL", name="codex_turn_steers_source_id_not_null"),
+        CheckConstraint("dedupe_key <> ''", name="codex_turn_steers_dedupe_key_not_blank"),
+        CheckConstraint("btrim(expected_native_turn_id) <> ''", name="codex_turn_steers_expected_native_turn_id_not_blank"),
+        CheckConstraint("rpc_request_id IS NULL OR btrim(rpc_request_id) <> ''", name="codex_turn_steers_rpc_request_id_not_blank"),
+        CheckConstraint("payload_hash <> ''", name="codex_turn_steers_payload_hash_not_blank"),
+        Index("uq_codex_turn_steers_turn_id_dedupe_key", "turn_id", "dedupe_key", unique=True),
+        Index("ix_codex_turn_steers_turn_id_status_attempted_at", "turn_id", "status", "attempted_at"),
+        Index("ix_codex_turn_steers_source_kind_source_id", "source_kind", "source_id"),
+        Index("ix_codex_turn_steers_rpc_request_id", "rpc_request_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    turn_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("codex_turns.id"), nullable=False)
+    event_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_native_turn_id: Mapped[str] = mapped_column(Text, nullable=False)
+    rpc_request_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    payload_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="prepared", server_default=text("'prepared'"))
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, server_default=text("now()"))
 
 

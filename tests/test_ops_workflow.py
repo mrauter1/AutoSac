@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
@@ -14,11 +15,12 @@ from shared.config import Settings
 
 def _load_symbols():
     pytest.importorskip("sqlalchemy")
-    from shared.models import AIDraft, Ticket, TicketAttachment, TicketMessage, TicketStatusHistory, TicketView, User
+    from shared.models import AIRun, AIDraft, CodexTurn, Ticket, TicketAttachment, TicketMessage, TicketStatusHistory, TicketView, User
     from shared.ticketing import (
         add_ops_internal_note,
         add_ops_public_reply,
         assign_ticket_for_ops,
+        clear_matching_ticket_content_requeue,
         process_deferred_requeue,
         publish_ai_draft_for_ops,
         reject_ai_draft_for_ops,
@@ -27,7 +29,9 @@ def _load_symbols():
     )
 
     return {
+        "AIRun": AIRun,
         "AIDraft": AIDraft,
+        "CodexTurn": CodexTurn,
         "Ticket": Ticket,
         "TicketAttachment": TicketAttachment,
         "TicketMessage": TicketMessage,
@@ -37,6 +41,7 @@ def _load_symbols():
         "add_ops_internal_note": add_ops_internal_note,
         "add_ops_public_reply": add_ops_public_reply,
         "assign_ticket_for_ops": assign_ticket_for_ops,
+        "clear_matching_ticket_content_requeue": clear_matching_ticket_content_requeue,
         "process_deferred_requeue": process_deferred_requeue,
         "publish_ai_draft_for_ops": publish_ai_draft_for_ops,
         "reject_ai_draft_for_ops": reject_ai_draft_for_ops,
@@ -110,6 +115,79 @@ class _FakeSession:
 
     def commit(self):
         self.commit_calls += 1
+
+
+class _FakeScalarResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one(self):
+        return self._value
+
+
+def _make_active_turn_session(symbols):
+    from sqlalchemy.orm import Session
+
+    class _ActiveTurnSession(Session):
+        def __init__(self):
+            self._ai_run_type = pytest.importorskip("shared.models").AIRun
+            self._codex_turn_type = pytest.importorskip("shared.models").CodexTurn
+            self._ticket_view_type = pytest.importorskip("shared.models").TicketView
+            self.added = []
+            self.objects = {}
+            self.operations = []
+            self.ai_runs = []
+            self.turns = []
+
+        def add(self, item):
+            self.added.append(item)
+            self.operations.append(("add", item))
+            if isinstance(item, self._ai_run_type):
+                self.ai_runs.append(item)
+            elif isinstance(item, self._codex_turn_type):
+                self.turns.append(item)
+            key = getattr(item, "user_id", None), getattr(item, "ticket_id", None)
+            if key != (None, None):
+                self.objects[(type(item), key)] = item
+
+        def get(self, model, key):
+            return self.objects.get((model, key))
+
+        def flush(self):
+            self.operations.append(("flush", None))
+
+        def execute(self, statement, *args, **kwargs):
+            compiled = statement.compile()
+            sql = " ".join(str(compiled).split())
+            params = compiled.params
+            if "FROM ai_runs JOIN codex_turns" in sql:
+                count = 0
+                for run in self.ai_runs:
+                    if run.ticket_id != params["ticket_id_1"] or run.status not in params["status_1"]:
+                        continue
+                    if run.forced_route_target_id is not None or run.forced_specialist_id is not None:
+                        continue
+                    for turn in self.turns:
+                        if turn.ai_run_id != run.id:
+                            continue
+                        if turn.status not in params["status_2"]:
+                            continue
+                        if turn.steering_closed_at is not None:
+                            continue
+                        if turn.transport_kind != params["transport_kind_1"]:
+                            continue
+                        count += 1
+                return _FakeScalarResult(count)
+            if "FROM ai_runs" in sql and "JOIN codex_turns" not in sql:
+                count = sum(
+                    1
+                    for run in self.ai_runs
+                    if run.ticket_id == params["ticket_id_1"] and run.status in params["status_1"]
+                )
+                return _FakeScalarResult(count)
+            raise AssertionError(f"Unexpected execute: {sql}")
+
+    return _ActiveTurnSession()
 
 
 def _make_ops_user(symbols, *, role: str = "dev_ti"):
@@ -306,6 +384,129 @@ def test_add_ops_public_reply_ai_triage_delegates_to_manual_rerun(monkeypatch):
     assert history == []
 
 
+@pytest.mark.parametrize("next_status", ["waiting_on_user", "waiting_on_dev_ti", "resolved"])
+def test_add_ops_public_reply_non_ai_status_persists_without_scheduling(monkeypatch, next_status):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=52,
+        reference="T-000052",
+        title="Operator reply without AI",
+        created_by_user_id=uuid.uuid4(),
+        status="waiting_on_dev_ti" if next_status != "waiting_on_dev_ti" else "ai_triage",
+        urgent=False,
+    )
+
+    monkeypatch.setattr("shared.ticketing.request_manual_rerun", lambda *args, **kwargs: pytest.fail("unexpected manual rerun"))
+    monkeypatch.setattr("shared.ticketing.create_pending_ai_run", lambda *args, **kwargs: pytest.fail("unexpected AI run"))
+    monkeypatch.setattr("shared.ticketing.request_requeue", lambda *args, **kwargs: pytest.fail("unexpected requeue"))
+    monkeypatch.setattr(
+        "shared.ticketing.has_compatible_active_ai_triage_specialist_turn",
+        lambda *args, **kwargs: pytest.fail("unexpected steering compatibility check"),
+    )
+
+    message, attachments = symbols["add_ops_public_reply"](
+        fake_db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        actor=actor,
+        body_markdown="Public operator update.",
+        next_status=next_status,
+    )
+    history = [item for item in fake_db.added if isinstance(item, symbols["TicketStatusHistory"])]
+
+    assert message.source == "human_public_reply"
+    assert message.visibility == "public"
+    assert attachments == []
+    assert ticket.status == next_status
+    assert ticket.requeue_requested is None or ticket.requeue_requested is False
+    assert ticket.requeue_trigger is None
+    assert len(history) == 1
+    assert history[0].to_status == next_status
+
+
+def test_add_ops_public_reply_ai_triage_uses_content_escrow_for_compatible_active_turn(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=53,
+        reference="T-000053",
+        title="Active AI follow-up",
+        created_by_user_id=uuid.uuid4(),
+        status="ai_triage",
+        urgent=False,
+    )
+
+    monkeypatch.setattr(
+        "shared.ticketing.has_compatible_active_ai_triage_specialist_turn",
+        lambda db, *, settings=None, ticket, forced_route_target_id=None, forced_specialist_id=None: True,
+    )
+    monkeypatch.setattr("shared.ticketing.request_manual_rerun", lambda *args, **kwargs: pytest.fail("unexpected manual rerun"))
+
+    message, attachments = symbols["add_ops_public_reply"](
+        fake_db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        actor=actor,
+        body_markdown="Please include this in the active answer.",
+        next_status="ai_triage",
+    )
+    history = [item for item in fake_db.added if isinstance(item, symbols["TicketStatusHistory"])]
+
+    assert attachments == []
+    assert ticket.status == "ai_triage"
+    assert ticket.requeue_requested is True
+    assert ticket.requeue_trigger == "ticket_content"
+    assert ticket.requeue_source_message_id == message.id
+    assert ticket.requeue_requested_by_user_id == actor.id
+    assert history == []
+
+
+def test_add_ops_public_reply_ai_triage_forced_override_preserves_manual_rerun(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=54,
+        reference="T-000054",
+        title="Forced AI follow-up",
+        created_by_user_id=uuid.uuid4(),
+        status="ai_triage",
+        urgent=False,
+    )
+    observed = {"manual_rerun": 0}
+
+    monkeypatch.setattr(
+        "shared.ticketing.has_compatible_active_ai_triage_specialist_turn",
+        lambda db, *, settings=None, ticket, forced_route_target_id=None, forced_specialist_id=None: False,
+    )
+    monkeypatch.setattr(
+        "shared.ticketing.request_manual_rerun",
+        lambda *args, **kwargs: observed.__setitem__("manual_rerun", observed["manual_rerun"] + 1),
+    )
+
+    symbols["add_ops_public_reply"](
+        fake_db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        actor=actor,
+        body_markdown="Use the architect specialist.",
+        next_status="ai_triage",
+        forced_route_target_id="software_architect",
+        forced_specialist_id="software-architect",
+    )
+
+    assert observed["manual_rerun"] == 1
+
+
 def test_add_ops_internal_note_keeps_status_and_adds_internal_message():
     symbols = _load_symbols()
     fake_db = _FakeSession()
@@ -322,6 +523,7 @@ def test_add_ops_internal_note_keeps_status_and_adds_internal_message():
 
     message = symbols["add_ops_internal_note"](
         fake_db,
+        settings=_make_settings(),
         ticket=ticket,
         actor=actor,
         body_markdown="Internal note for Dev/TI only.",
@@ -334,6 +536,468 @@ def test_add_ops_internal_note_keeps_status_and_adds_internal_message():
     assert message.source == "human_internal_note"
     assert ticket.status == "waiting_on_dev_ti"
     assert history == []
+
+
+def test_add_ops_internal_note_creates_ticket_content_escrow_for_compatible_active_turn(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=55,
+        reference="T-000055",
+        title="Active internal context",
+        created_by_user_id=uuid.uuid4(),
+        status="ai_triage",
+        urgent=False,
+    )
+
+    monkeypatch.setattr(
+        "shared.ticketing.has_compatible_active_ai_triage_specialist_turn",
+        lambda db, *, settings=None, ticket: True,
+    )
+
+    message = symbols["add_ops_internal_note"](
+        fake_db,
+        settings=_make_settings(),
+        ticket=ticket,
+        actor=actor,
+        body_markdown="Internal context for the active specialist.",
+    )
+
+    assert message.visibility == "internal"
+    assert ticket.requeue_requested is True
+    assert ticket.requeue_trigger == "ticket_content"
+    assert ticket.requeue_source_message_id == message.id
+    assert ticket.requeue_requested_by_user_id == actor.id
+
+
+def test_add_ops_internal_note_without_compatible_turn_remains_dormant(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=56,
+        reference="T-000056",
+        title="Dormant internal context",
+        created_by_user_id=uuid.uuid4(),
+        status="waiting_on_dev_ti",
+        urgent=False,
+    )
+
+    monkeypatch.setattr(
+        "shared.ticketing.has_compatible_active_ai_triage_specialist_turn",
+        lambda db, *, settings=None, ticket: False,
+    )
+
+    message = symbols["add_ops_internal_note"](
+        fake_db,
+        settings=_make_settings(),
+        ticket=ticket,
+        actor=actor,
+        body_markdown="Internal context for a later AI run.",
+    )
+
+    assert message.visibility == "internal"
+    assert ticket.status == "waiting_on_dev_ti"
+    assert ticket.requeue_requested is None or ticket.requeue_requested is False
+    assert ticket.requeue_trigger is None
+    assert ticket.requeue_source_message_id is None
+
+
+def test_add_ops_internal_note_does_not_overwrite_stronger_requeue(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    actor = _make_ops_user(symbols)
+    source_message_id = uuid.uuid4()
+    previous_updated_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=57,
+        reference="T-000057",
+        title="Manual rerun already queued",
+        created_by_user_id=uuid.uuid4(),
+        status="ai_triage",
+        urgent=False,
+        requeue_requested=True,
+        requeue_trigger="manual_rerun",
+        requeue_requested_by_user_id=uuid.uuid4(),
+        requeue_source_message_id=source_message_id,
+        requeue_forced_route_target_id="software_architect",
+        requeue_forced_specialist_id="software-architect",
+        updated_at=previous_updated_at,
+    )
+
+    monkeypatch.setattr(
+        "shared.ticketing.has_compatible_active_ai_triage_specialist_turn",
+        lambda db, *, settings=None, ticket: True,
+    )
+
+    message = symbols["add_ops_internal_note"](
+        fake_db,
+        settings=_make_settings(),
+        ticket=ticket,
+        actor=actor,
+        body_markdown="Do not replace the forced rerun.",
+    )
+
+    assert message.source == "human_internal_note"
+    assert ticket.requeue_trigger == "manual_rerun"
+    assert ticket.requeue_source_message_id == source_message_id
+    assert ticket.requeue_forced_route_target_id == "software_architect"
+    assert ticket.requeue_forced_specialist_id == "software-architect"
+    assert ticket.updated_at > previous_updated_at
+
+
+def test_add_ops_public_reply_touches_ticket_when_stronger_requeue_prevents_content_escrow(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
+    actor = _make_ops_user(symbols)
+    source_message_id = uuid.uuid4()
+    previous_updated_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=58,
+        reference="T-000058",
+        title="Manual rerun already queued",
+        created_by_user_id=uuid.uuid4(),
+        status="ai_triage",
+        urgent=False,
+        requeue_requested=True,
+        requeue_trigger="manual_rerun",
+        requeue_requested_by_user_id=uuid.uuid4(),
+        requeue_source_message_id=source_message_id,
+        requeue_forced_route_target_id="software_architect",
+        requeue_forced_specialist_id="software-architect",
+        updated_at=previous_updated_at,
+    )
+    monkeypatch.setattr(
+        "shared.ticketing.has_compatible_active_ai_triage_specialist_turn",
+        lambda db, *, settings=None, ticket, forced_route_target_id=None, forced_specialist_id=None: True,
+    )
+    monkeypatch.setattr("shared.ticketing.request_manual_rerun", lambda *args, **kwargs: pytest.fail("unexpected rerun"))
+
+    symbols["add_ops_public_reply"](
+        fake_db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        actor=actor,
+        body_markdown="Additional context without replacing the forced rerun.",
+        next_status="ai_triage",
+    )
+
+    assert ticket.requeue_trigger == "manual_rerun"
+    assert ticket.requeue_source_message_id == source_message_id
+    assert ticket.requeue_forced_route_target_id == "software_architect"
+    assert ticket.requeue_forced_specialist_id == "software-architect"
+    assert ticket.updated_at > previous_updated_at
+
+
+def test_publish_ai_internal_note_links_exact_publication_outcome(monkeypatch):
+    from shared.models import Ticket
+    from shared.ticketing import publish_ai_internal_note
+
+    fake_db = _FakeSession()
+    ticket = Ticket(
+        id=uuid.uuid4(),
+        reference_num=59,
+        reference="T-000059",
+        title="Internal AI note",
+        created_by_user_id=uuid.uuid4(),
+        status="ai_triage",
+        urgent=False,
+    )
+    ai_run_id = uuid.uuid4()
+    outcome_id = uuid.uuid4()
+    observed = {}
+
+    def append_outcome(db, *, ai_run_id, outcome_kind, payload_json):
+        observed.update(ai_run_id=ai_run_id, outcome_kind=outcome_kind, payload_json=payload_json)
+        return outcome_id
+
+    monkeypatch.setattr("shared.ticketing._append_turn_outcome_for_message", append_outcome)
+
+    message = publish_ai_internal_note(
+        fake_db,
+        ticket=ticket,
+        ai_run_id=ai_run_id,
+        body_markdown="Exact internal note.",
+    )
+
+    assert observed["ai_run_id"] == ai_run_id
+    assert observed["outcome_kind"] == "internal_note_published"
+    assert observed["payload_json"]["internal_note_markdown"] == "Exact internal note."
+    assert message.codex_turn_outcome_id == outcome_id
+    assert message.ai_run_id == ai_run_id
+
+
+def test_active_turn_compatibility_requires_ai_triage_unforced_open_specialist_turn():
+    symbols = _load_symbols()
+    from sqlalchemy.orm import Session
+    from shared.ticketing import has_compatible_active_ai_triage_specialist_turn
+
+    class _ScalarResult:
+        def scalar_one(self):
+            return 1
+
+    class _InspectingSession(Session):
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, statement, *args, **kwargs):
+            self.statements.append(statement)
+            return _ScalarResult()
+
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=58,
+        reference="T-000058",
+        title="Compatibility",
+        created_by_user_id=uuid.uuid4(),
+        status="waiting_on_user",
+        urgent=False,
+    )
+    db = _InspectingSession()
+    settings = Settings(
+        app_base_url="https://autosac.example.local",
+        app_secret_key="secret",
+        database_url="postgresql+psycopg://triage:triage@localhost:5432/triage",
+        uploads_dir=Path("/tmp/autosac-ops-workflow/workspace/attachments_store"),
+        triage_workspace_dir=Path("/tmp/autosac-ops-workflow/workspace"),
+        repo_mount_dir=Path("/tmp/autosac-ops-workflow/workspace/app"),
+        manuals_mount_dir=Path("/tmp/autosac-ops-workflow/workspace/manuals"),
+        codex_bin="codex",
+        codex_api_key="key",
+        codex_model="",
+        codex_timeout_seconds=3600,
+        worker_poll_seconds=10,
+        auto_support_reply_min_confidence=0.85,
+        auto_confirm_intent_min_confidence=0.90,
+        max_images_per_message=3,
+        max_image_bytes=5 * 1024 * 1024,
+        session_default_hours=12,
+        session_remember_days=30,
+        codex_conversations_enabled=True,
+        codex_app_server_specialist_transport_enabled=True,
+        codex_active_turn_steering_enabled=True,
+    )
+
+    assert has_compatible_active_ai_triage_specialist_turn(db, settings=settings, ticket=ticket) is False
+    assert db.statements == []
+
+    ticket.status = "ai_triage"
+    disabled_settings = replace(settings, codex_active_turn_steering_enabled=False)
+    disabled_transport_settings = replace(settings, codex_app_server_specialist_transport_enabled=False)
+    assert has_compatible_active_ai_triage_specialist_turn(db, settings=disabled_settings, ticket=ticket) is False
+    assert has_compatible_active_ai_triage_specialist_turn(db, settings=disabled_transport_settings, ticket=ticket) is False
+    assert has_compatible_active_ai_triage_specialist_turn(
+        db,
+        settings=settings,
+        ticket=ticket,
+        forced_route_target_id="support",
+    ) is False
+    assert has_compatible_active_ai_triage_specialist_turn(
+        db,
+        settings=settings,
+        ticket=ticket,
+        forced_specialist_id="support",
+    ) is False
+    assert db.statements == []
+
+    assert has_compatible_active_ai_triage_specialist_turn(db, settings=settings, ticket=ticket) is True
+    compiled = str(db.statements[0].compile(compile_kwargs={"literal_binds": True}))
+
+    assert "ai_runs" in compiled
+    assert "codex_turns" in compiled
+    assert "ai_runs.status IN ('pending', 'running')" in compiled
+    assert "ai_runs.forced_route_target_id IS NULL" in compiled
+    assert "ai_runs.forced_specialist_id IS NULL" in compiled
+    assert "codex_turns.status IN ('prepared', 'running')" in compiled
+    assert "codex_turns.steering_closed_at IS NULL" in compiled
+    assert "codex_turns.transport_kind = 'app_server'" in compiled
+
+
+@pytest.mark.parametrize(
+    (
+        "steering_enabled",
+        "app_server_transport_enabled",
+        "transport_kind",
+        "ticket_status",
+        "forced_route_target_id",
+        "forced_specialist_id",
+        "expected_trigger",
+    ),
+    [
+        (True, True, "app_server", "ai_triage", None, None, "ticket_content"),
+        (False, True, "app_server", "ai_triage", None, None, "manual_rerun"),
+        (True, False, "app_server", "ai_triage", None, None, "manual_rerun"),
+        (True, True, "exec", "ai_triage", None, None, "manual_rerun"),
+        (True, True, "app_server", "waiting_on_user", None, None, "manual_rerun"),
+        (True, True, "app_server", "ai_triage", "support", None, "manual_rerun"),
+        (True, True, "app_server", "ai_triage", None, "support-specialist", "manual_rerun"),
+    ],
+)
+def test_add_ops_public_reply_real_compatibility_matrix(
+    monkeypatch,
+    steering_enabled,
+    app_server_transport_enabled,
+    transport_kind,
+    ticket_status,
+    forced_route_target_id,
+    forced_specialist_id,
+    expected_trigger,
+):
+    symbols = _load_symbols()
+    db = _make_active_turn_session(symbols)
+    monkeypatch.setattr("shared.ticketing.record_ticket_public_message_added_event", lambda *args, **kwargs: None)
+    settings = _make_settings()
+    settings = replace(
+        settings,
+        codex_conversations_enabled=True,
+        codex_app_server_specialist_transport_enabled=app_server_transport_enabled,
+        codex_active_turn_steering_enabled=steering_enabled,
+    )
+    slack_runtime = _make_slack_runtime(settings)
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=59,
+        reference="T-000059",
+        title="Compatibility matrix",
+        created_by_user_id=uuid.uuid4(),
+        status=ticket_status,
+        urgent=False,
+    )
+    active_run = symbols["AIRun"](
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        triggered_by="requester_reply",
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+    )
+    active_turn = symbols["CodexTurn"](
+        id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        ai_run_id=active_run.id,
+        turn_index=1,
+        status="running",
+        transport_kind=transport_kind,
+        specialist_id="support",
+        agent_spec_version="v1",
+        output_contract="specialist_result",
+        steering_closed_at=None,
+    )
+    db.add(active_run)
+    db.add(active_turn)
+    observed = {"manual_rerun": 0}
+
+    monkeypatch.setattr(
+        "shared.ticketing.request_manual_rerun",
+        lambda *args, **kwargs: observed.__setitem__("manual_rerun", observed["manual_rerun"] + 1),
+    )
+
+    message, attachments = symbols["add_ops_public_reply"](
+        db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        actor=actor,
+        body_markdown="Use this in the answer.",
+        next_status="ai_triage",
+        settings=settings,
+        forced_route_target_id=forced_route_target_id,
+        forced_specialist_id=forced_specialist_id,
+    )
+
+    assert message.source == "human_public_reply"
+    assert attachments == []
+    if expected_trigger == "ticket_content":
+        assert observed["manual_rerun"] == 0
+        assert ticket.requeue_trigger == "ticket_content"
+        assert ticket.requeue_source_message_id == message.id
+    else:
+        assert observed["manual_rerun"] == 1
+        assert ticket.requeue_trigger is None
+        assert ticket.requeue_source_message_id is None
+
+
+@pytest.mark.parametrize(
+    ("steering_enabled", "app_server_transport_enabled", "transport_kind", "ticket_status", "expected_requeue"),
+    [
+        (True, True, "app_server", "ai_triage", "ticket_content"),
+        (False, True, "app_server", "ai_triage", None),
+        (True, False, "app_server", "ai_triage", None),
+        (True, True, "exec", "ai_triage", None),
+        (True, True, "app_server", "waiting_on_dev_ti", None),
+    ],
+)
+def test_add_ops_internal_note_real_compatibility_matrix(
+    monkeypatch,
+    steering_enabled,
+    app_server_transport_enabled,
+    transport_kind,
+    ticket_status,
+    expected_requeue,
+):
+    symbols = _load_symbols()
+    db = _make_active_turn_session(symbols)
+    monkeypatch.setattr("shared.ticketing.record_ticket_public_message_added_event", lambda *args, **kwargs: None)
+    settings = replace(
+        _make_settings(),
+        codex_conversations_enabled=True,
+        codex_app_server_specialist_transport_enabled=app_server_transport_enabled,
+        codex_active_turn_steering_enabled=steering_enabled,
+    )
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=60,
+        reference="T-000060",
+        title="Internal compatibility matrix",
+        created_by_user_id=uuid.uuid4(),
+        status=ticket_status,
+        urgent=False,
+    )
+    active_run = symbols["AIRun"](
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        triggered_by="requester_reply",
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+    )
+    active_turn = symbols["CodexTurn"](
+        id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        ai_run_id=active_run.id,
+        turn_index=1,
+        status="running",
+        transport_kind=transport_kind,
+        specialist_id="support",
+        agent_spec_version="v1",
+        output_contract="specialist_result",
+        steering_closed_at=None,
+    )
+    db.add(active_run)
+    db.add(active_turn)
+
+    message = symbols["add_ops_internal_note"](
+        db,
+        settings=settings,
+        ticket=ticket,
+        actor=actor,
+        body_markdown="Internal follow-up.",
+    )
+
+    assert message.source == "human_internal_note"
+    assert message.visibility == "internal"
+    assert ticket.requeue_trigger == expected_requeue
+    if expected_requeue == "ticket_content":
+        assert ticket.requeue_source_message_id == message.id
+    else:
+        assert ticket.requeue_source_message_id is None
 
 
 def test_assign_ticket_for_ops_touches_ticket_and_view_only_when_assignment_changes():
@@ -609,6 +1273,129 @@ def test_process_deferred_requeue_transfers_forced_specialist_override(monkeypat
     assert ticket.requeue_requested_by_user_id is None
     assert ticket.requeue_forced_route_target_id is None
     assert ticket.requeue_forced_specialist_id is None
+
+
+@pytest.mark.parametrize("trigger", ["requester_reply", "ticket_content"])
+def test_process_deferred_requeue_retires_content_driven_requests_outside_ai_triage(monkeypatch, trigger):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    source_message_id = uuid.uuid4()
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=74,
+        reference="T-000074",
+        title="Dormant content",
+        created_by_user_id=uuid.uuid4(),
+        status="waiting_on_user",
+        urgent=False,
+        requeue_requested=True,
+        requeue_trigger=trigger,
+        requeue_requested_by_user_id=uuid.uuid4(),
+        requeue_source_message_id=source_message_id,
+    )
+
+    monkeypatch.setattr("shared.ticketing.has_active_ai_run", lambda *args, **kwargs: pytest.fail("unexpected active-run check"))
+    monkeypatch.setattr("shared.ticketing.create_pending_ai_run", lambda *args, **kwargs: pytest.fail("unexpected AI run"))
+
+    run = symbols["process_deferred_requeue"](fake_db, ticket=ticket)
+
+    assert run is None
+    assert ticket.requeue_requested is False
+    assert ticket.requeue_trigger is None
+    assert ticket.requeue_requested_by_user_id is None
+    assert ticket.requeue_source_message_id is None
+
+
+@pytest.mark.parametrize("trigger", ["manual_rerun", "reopen"])
+def test_process_deferred_requeue_honors_stronger_control_requests_outside_ai_triage(monkeypatch, trigger):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    requested_by_user_id = uuid.uuid4()
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=75,
+        reference="T-000075",
+        title="Strong control",
+        created_by_user_id=uuid.uuid4(),
+        status="waiting_on_user",
+        urgent=False,
+        requeue_requested=True,
+        requeue_trigger=trigger,
+        requeue_requested_by_user_id=requested_by_user_id,
+        requeue_source_message_id=uuid.uuid4(),
+        requeue_forced_route_target_id="support",
+        requeue_forced_specialist_id="support",
+    )
+    observed = {}
+    expected_run = object()
+
+    monkeypatch.setattr("shared.ticketing.has_active_ai_run", lambda db, ticket_id: False)
+    monkeypatch.setattr("shared.ticketing.create_pending_ai_run", lambda *args, **kwargs: observed.update(kwargs) or expected_run)
+
+    run = symbols["process_deferred_requeue"](fake_db, ticket=ticket)
+
+    assert run is expected_run
+    assert observed["triggered_by"] == trigger
+    assert observed["requested_by_user_id"] == requested_by_user_id
+    assert observed["forced_route_target_id"] == "support"
+    assert observed["forced_specialist_id"] == "support"
+    assert ticket.requeue_requested is False
+    assert ticket.requeue_trigger is None
+    assert ticket.requeue_source_message_id is None
+
+
+def test_clear_matching_ticket_content_requeue_only_clears_exact_content_source():
+    symbols = _load_symbols()
+    source_message_id = uuid.uuid4()
+    newer_source_message_id = uuid.uuid4()
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=76,
+        reference="T-000076",
+        title="Clear matching content",
+        created_by_user_id=uuid.uuid4(),
+        status="ai_triage",
+        urgent=False,
+        requeue_requested=True,
+        requeue_trigger="ticket_content",
+        requeue_requested_by_user_id=uuid.uuid4(),
+        requeue_source_message_id=newer_source_message_id,
+    )
+
+    assert symbols["clear_matching_ticket_content_requeue"](ticket, source_message_id=source_message_id) is False
+    assert ticket.requeue_requested is True
+    assert ticket.requeue_source_message_id == newer_source_message_id
+
+    assert symbols["clear_matching_ticket_content_requeue"](ticket, source_message_id=newer_source_message_id) is True
+    assert ticket.requeue_requested is False
+    assert ticket.requeue_trigger is None
+    assert ticket.requeue_source_message_id is None
+
+
+def test_clear_matching_ticket_content_requeue_preserves_stronger_control_request():
+    symbols = _load_symbols()
+    source_message_id = uuid.uuid4()
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=77,
+        reference="T-000077",
+        title="Preserve manual control",
+        created_by_user_id=uuid.uuid4(),
+        status="ai_triage",
+        urgent=False,
+        requeue_requested=True,
+        requeue_trigger="manual_rerun",
+        requeue_requested_by_user_id=uuid.uuid4(),
+        requeue_source_message_id=source_message_id,
+        requeue_forced_route_target_id="software_architect",
+        requeue_forced_specialist_id="software-architect",
+    )
+
+    assert symbols["clear_matching_ticket_content_requeue"](ticket, source_message_id=source_message_id) is False
+    assert ticket.requeue_requested is True
+    assert ticket.requeue_trigger == "manual_rerun"
+    assert ticket.requeue_source_message_id == source_message_id
+    assert ticket.requeue_forced_route_target_id == "software_architect"
 
 
 def test_publish_ai_draft_for_ops_creates_ai_message_and_status_change():
@@ -967,6 +1754,10 @@ def test_present_codex_turn_summary_tracks_publication_and_recovery_state():
         accepted_at=started_at,
         started_at=started_at,
         ended_at=ended_at,
+        transport_kind="app_server",
+        native_turn_id="native-turn-2",
+        steering_closed_at=ended_at,
+        effective_input_hash="effective-hash",
     )
     run = SimpleNamespace(
         triggered_by="manual_rerun",
@@ -993,6 +1784,23 @@ def test_present_codex_turn_summary_tracks_publication_and_recovery_state():
         body_markdown="Edited published reply.",
         created_at=ended_at,
     )
+    receipt = SimpleNamespace(
+        id=uuid.uuid4(),
+        event_kind="ticket_message",
+        source_kind="ticket_message",
+        source_id=uuid.uuid4(),
+        dedupe_key="ticket-message:steered",
+        expected_native_turn_id="native-turn-2",
+        rpc_request_id="autosac-4",
+        payload_json={"body_text": "Steered message."},
+        payload_hash="payload-hash",
+        status="accepted",
+        attempted_at=started_at,
+        acknowledged_at=started_at + timedelta(milliseconds=250),
+        resolved_at=started_at + timedelta(milliseconds=250),
+        error_code=None,
+        error_text=None,
+    )
 
     presented = present_codex_turn_summary(
         turn,
@@ -1004,6 +1812,25 @@ def test_present_codex_turn_summary_tracks_publication_and_recovery_state():
         published_message=published_message,
         raw_item_count=3,
         conversation_status="recovery_required",
+        receipts=[receipt],
+        delivery_events=[
+            {
+                "event_kind": "ticket_message",
+                "source_kind": "ticket_message",
+                "source_id": uuid.uuid4(),
+                "dedupe_key": "ticket-message:dormant",
+                "delivery_state": "waiting_future_context",
+                "payload_excerpt": "Dormant content.",
+            },
+            {
+                "event_kind": "ticket_message",
+                "source_kind": "ticket_message",
+                "source_id": uuid.uuid4(),
+                "dedupe_key": "ticket-message:queued",
+                "delivery_state": "queued_another_run",
+                "payload_excerpt": "Queued content.",
+            },
+        ],
     )
 
     assert presented["publication"]["state"] == "edited_before_publish"
@@ -1015,6 +1842,208 @@ def test_present_codex_turn_summary_tracks_publication_and_recovery_state():
         "ops.detail.recovery_marker.replacement_session_segment",
     ]
     assert presented["specialist_display_name"] == "Support Specialist"
+    assert presented["transport_kind"] == "app_server"
+    assert presented["native_turn_id"] == "native-turn-2"
+    assert presented["steering_receipt_count"] == 1
+    assert presented["delivery_state_counts"] == {
+        "included_active_turn": 1,
+        "waiting_future_context": 1,
+        "queued_another_run": 1,
+    }
+
+
+def test_present_codex_turn_detail_classifies_rejected_queued_receipt():
+    pytest.importorskip("fastapi")
+    from app.codex_turn_presenters import present_codex_turn_detail
+
+    queued_source_id = uuid.uuid4()
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        ai_run_id=uuid.uuid4(),
+        turn_index=1,
+        status="completed",
+        specialist_id="support",
+        route_target_id="support",
+        output_contract="specialist_result",
+        transport_kind="app_server",
+        native_turn_id="native-turn-1",
+        steering_closed_at=datetime.now(timezone.utc),
+        effective_input_hash="effective-input",
+    )
+    receipt = SimpleNamespace(
+        id=uuid.uuid4(),
+        event_kind="ticket_message",
+        source_kind="ticket_message",
+        source_id=queued_source_id,
+        dedupe_key=f"ticket-message:{queued_source_id}",
+        expected_native_turn_id="native-turn-1",
+        rpc_request_id="autosac-9",
+        payload_json={"body_text": "Queued after rejected steering."},
+        payload_hash="payload-hash",
+        status="rejected",
+        attempted_at=datetime.now(timezone.utc),
+        acknowledged_at=None,
+        resolved_at=datetime.now(timezone.utc),
+        error_code="steering_closed",
+        error_text="Native turn was closed.",
+    )
+
+    presented = present_codex_turn_detail(
+        turn,
+        run=SimpleNamespace(triggered_by="ticket_content", final_output_contract="specialist_result", final_output_json={}),
+        outcomes=[],
+        items=[],
+        session=SimpleNamespace(status="active", thread_id="thread-1"),
+        session_segment_index=1,
+        draft=None,
+        published_message=None,
+        conversation_status="active",
+        receipts=[receipt],
+        inputs=[],
+        delivery_events=[],
+        queued_source_id=queued_source_id,
+    )
+
+    assert presented["steering_receipts"][0]["delivery_state"] == "queued_another_run"
+    assert presented["delivery_state_counts"] == {"queued_another_run": 1}
+
+
+def test_ops_delivery_event_loader_marks_queued_and_dormant_without_represented_duplicates():
+    pytest.importorskip("fastapi")
+    from app import routes_ops
+    from shared.codex_knowledge import KnownConversationInputs
+
+    ticket_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    queued_message_id = uuid.uuid4()
+    dormant_message_id = uuid.uuid4()
+    accepted_message_id = uuid.uuid4()
+    receipted_message_id = uuid.uuid4()
+    current_run_message_id = uuid.uuid4()
+    previously_known_message_id = uuid.uuid4()
+    prior_run_id = uuid.uuid4()
+    causal_ai_message_id = uuid.uuid4()
+    edited_ai_message_id = uuid.uuid4()
+    causal_outcome_id = uuid.uuid4()
+    edited_outcome_id = uuid.uuid4()
+    ticket = SimpleNamespace(
+        id=ticket_id,
+        requeue_requested=True,
+        requeue_trigger="ticket_content",
+        requeue_source_message_id=queued_message_id,
+    )
+    turn = SimpleNamespace(ai_run_id=run_id)
+    messages = [
+        SimpleNamespace(
+            id=accepted_message_id,
+            ticket_id=ticket_id,
+            body_text="Already accepted.",
+            body_markdown=None,
+            ai_run_id=None,
+        ),
+        SimpleNamespace(
+            id=receipted_message_id,
+            ticket_id=ticket_id,
+            body_text="Already represented by a receipt.",
+            body_markdown=None,
+            ai_run_id=None,
+        ),
+        SimpleNamespace(
+            id=current_run_message_id,
+            ticket_id=ticket_id,
+            body_text="AI output from this turn.",
+            body_markdown=None,
+            ai_run_id=run_id,
+        ),
+        SimpleNamespace(
+            id=previously_known_message_id,
+            ticket_id=ticket_id,
+            body_text="Already included in an earlier turn.",
+            body_markdown=None,
+            ai_run_id=None,
+        ),
+        SimpleNamespace(
+            id=causal_ai_message_id,
+            ticket_id=ticket_id,
+            body_text="Exact prior AI note.",
+            body_markdown="Exact prior AI note.",
+            author_type="ai",
+            source="ai_internal_note",
+            ai_run_id=prior_run_id,
+            codex_turn_outcome_id=causal_outcome_id,
+        ),
+        SimpleNamespace(
+            id=edited_ai_message_id,
+            ticket_id=ticket_id,
+            body_text="Edited by an operator.",
+            body_markdown="Edited by an operator.",
+            author_type="ai",
+            source="ai_draft_published",
+            ai_run_id=prior_run_id,
+            codex_turn_outcome_id=edited_outcome_id,
+        ),
+        SimpleNamespace(
+            id=dormant_message_id,
+            ticket_id=ticket_id,
+            body_text="Dormant future context.",
+            body_markdown=None,
+            ai_run_id=None,
+        ),
+        SimpleNamespace(
+            id=queued_message_id,
+            ticket_id=ticket_id,
+            body_text="Queued successor context.",
+            body_markdown=None,
+            ai_run_id=None,
+        ),
+    ]
+    message_by_id = {message.id: message for message in messages}
+
+    class ScalarResult:
+        def __init__(self, items):
+            self.items = items
+
+        def scalars(self):
+            return iter(self.items)
+
+    class Db:
+        def get(self, model, key):
+            return message_by_id.get(key)
+
+        def execute(self, statement):
+            return ScalarResult(messages)
+
+    events = routes_ops._load_delivery_events_for_turn_detail(
+        Db(),
+        ticket=ticket,
+        turn=turn,
+        inputs=[SimpleNamespace(source_kind="ticket_message", source_id=accepted_message_id)],
+        receipts=[SimpleNamespace(source_kind="ticket_message", source_id=receipted_message_id)],
+        known_inputs=KnownConversationInputs(
+            dedupe_keys=frozenset(),
+            causal_ai_run_ids=frozenset({prior_run_id}),
+            causal_outcome_payloads={
+                causal_outcome_id: {"internal_note_markdown": "Exact prior AI note."},
+                edited_outcome_id: {
+                    "edited": True,
+                    "published_body_markdown": "Edited by an operator.",
+                    "original_draft_body_markdown": "Original draft.",
+                },
+            },
+            outcome_ai_run_ids={causal_outcome_id: prior_run_id, edited_outcome_id: prior_run_id},
+            ticket_message_ids=frozenset({previously_known_message_id}),
+        ),
+    )
+
+    states_by_source_id = {event["source_id"]: event["delivery_state"] for event in events}
+    assert states_by_source_id == {
+        queued_message_id: "queued_another_run",
+        dormant_message_id: "waiting_future_context",
+        edited_ai_message_id: "waiting_future_context",
+    }
+    assert all(event["event_kind"] == "ticket_message" for event in events)
 
 
 class _RouteDb:
@@ -3278,6 +4307,12 @@ def test_ops_persistent_turn_detail_route_renders_outcomes_and_raw_items(monkeyp
                 "session_status": "active",
                 "session_segment_index": 2,
                 "session_thread_id": "thread-123",
+                "transport_kind": "app_server",
+                "native_turn_id": "native-turn-2",
+                "steering_closed_at": datetime(2026, 8, 24, 12, 4, tzinfo=timezone.utc),
+                "effective_input_hash": "effective-input-hash",
+                "steering_receipt_count": 2,
+                "ambiguous_blocker_count": 1,
                 "lease_owner_run_id": uuid.uuid4(),
                 "lease_worker_instance_id": "worker-a",
                 "lease_expires_at": datetime(2026, 8, 24, 12, 5, tzinfo=timezone.utc),
@@ -3293,6 +4328,54 @@ def test_ops_persistent_turn_detail_route_renders_outcomes_and_raw_items(monkeyp
                 },
                 "recovery_marker_keys": ["ops.detail.recovery_marker.replacement_session_segment"],
                 "artifact_paths": ["/tmp/persistent/stdout.jsonl"],
+                "delivery_events": [
+                    {
+                        "event_kind": "ticket_message",
+                        "source_kind": "ticket_message",
+                        "source_id": uuid.uuid4(),
+                        "dedupe_key": "ticket-message:included",
+                        "delivery_state": "included_active_turn",
+                        "delivery_state_label_key": "ops.detail.delivery_state.included_active_turn",
+                        "payload_excerpt": "Included content.",
+                    },
+                    {
+                        "event_kind": "ticket_message",
+                        "source_kind": "ticket_message",
+                        "source_id": uuid.uuid4(),
+                        "dedupe_key": "ticket-message:dormant",
+                        "delivery_state": "waiting_future_context",
+                        "delivery_state_label_key": "ops.detail.delivery_state.waiting_future_context",
+                        "payload_excerpt": "Dormant content.",
+                    },
+                    {
+                        "event_kind": "ticket_message",
+                        "source_kind": "ticket_message",
+                        "source_id": uuid.uuid4(),
+                        "dedupe_key": "ticket-message:queued",
+                        "delivery_state": "queued_another_run",
+                        "delivery_state_label_key": "ops.detail.delivery_state.queued_another_run",
+                        "payload_excerpt": "Queued content.",
+                    },
+                ],
+                "steering_receipts": [
+                    {
+                        "status": "ambiguous",
+                        "delivery_state": "delivery_uncertain",
+                        "delivery_state_label_key": "ops.detail.delivery_state.delivery_uncertain",
+                        "source_kind": "ticket_message",
+                        "source_id": uuid.uuid4(),
+                        "dedupe_key": "ticket-message:uncertain",
+                        "expected_native_turn_id": "native-turn-2",
+                        "rpc_request_id": "autosac-5",
+                        "payload_hash": "receipt-hash",
+                        "attempted_at": datetime(2026, 8, 24, 12, 3, tzinfo=timezone.utc),
+                        "acknowledged_at": None,
+                        "commit_to_ack_latency_ms": None,
+                        "error_code": "stale_run_recovery",
+                        "error_text": "Delivery became ambiguous.",
+                        "payload_json_pretty": '{\n  "body_text": "uncertain"\n}',
+                    }
+                ],
                 "outcomes": [
                     {
                         "outcome_index": 1,
@@ -3327,6 +4410,13 @@ def test_ops_persistent_turn_detail_route_renders_outcomes_and_raw_items(monkeyp
     assert response.status_code == 200
     assert translate(locale, "ops.detail.outcome_history") in response.text
     assert translate(locale, "ops.detail.raw_turn_items") in response.text
+    assert translate(locale, "ops.detail.steering_receipt_history") in response.text
+    assert translate(locale, "ops.detail.delivery_state.included_active_turn") in response.text
+    assert translate(locale, "ops.detail.delivery_state.waiting_future_context") in response.text
+    assert translate(locale, "ops.detail.delivery_state.queued_another_run") in response.text
+    assert translate(locale, "ops.detail.delivery_state.delivery_uncertain") in response.text
+    assert "effective-input-hash" in response.text
+    assert "native-turn-2" in response.text
     assert "thread.started" in response.text
     assert "Requester-facing draft." in response.text
     assert "/tmp/persistent/stdout.jsonl" in response.text

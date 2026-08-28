@@ -155,6 +155,22 @@
                 <dt>{{ t("ops.detail.thread_id") }}</dt>
                 <dd>{{ turn.session_thread_id or none_yet_label }}</dd>
               </div>
+              <div>
+                <dt>{{ t("ops.detail.transport_kind") }}</dt>
+                <dd>{{ turn.transport_kind or none_yet_label }}</dd>
+              </div>
+              <div>
+                <dt>{{ t("ops.detail.native_turn_id") }}</dt>
+                <dd>{{ turn.native_turn_id or none_yet_label }}</dd>
+              </div>
+              <div>
+                <dt>{{ t("ops.detail.steering_receipts") }}</dt>
+                <dd>{{ turn.steering_receipt_count or 0 }}</dd>
+              </div>
+              <div>
+                <dt>{{ t("ops.detail.ambiguous_blockers") }}</dt>
+                <dd>{{ turn.ambiguous_blocker_count or 0 }}</dd>
+              </div>
             </dl>
             {% if turn.structured_result.summary_internal_excerpt or turn.structured_result.summary_short_excerpt or turn.structured_result.public_reply_excerpt or turn.publication.generated_excerpt or turn.publication.published_excerpt %}
             <div class="stack stack--tight">

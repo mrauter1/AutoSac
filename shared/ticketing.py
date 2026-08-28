@@ -19,7 +19,19 @@ from shared.integrations import (
     record_ticket_public_message_added_event,
     record_ticket_status_changed_event,
 )
-from shared.models import AIDraft, AIRun, SystemState, Ticket, TicketAttachment, TicketMessage, TicketStatusHistory, TicketView, TICKET_STATUSES, User
+from shared.models import (
+    AIDraft,
+    AIRun,
+    CodexTurn,
+    SystemState,
+    Ticket,
+    TicketAttachment,
+    TicketMessage,
+    TicketStatusHistory,
+    TicketView,
+    TICKET_STATUSES,
+    User,
+)
 from shared.slack_dm import SLACK_DM_DELIVERY_HEALTH_STATE_KEY
 from shared.slack_user_sync import SLACK_DM_USER_SYNC_STATE_KEY
 from shared.security import utc_now
@@ -178,12 +190,14 @@ def request_requeue(
     trigger: str,
     *,
     requested_by_user_id: uuid.UUID | None = None,
+    source_message_id: uuid.UUID | None = None,
     forced_route_target_id: str | None = None,
     forced_specialist_id: str | None = None,
 ) -> None:
     ticket.requeue_requested = True
     ticket.requeue_trigger = trigger
     ticket.requeue_requested_by_user_id = requested_by_user_id
+    ticket.requeue_source_message_id = source_message_id
     ticket.requeue_forced_route_target_id = forced_route_target_id
     ticket.requeue_forced_specialist_id = forced_specialist_id
     touch_ticket(ticket)
@@ -193,9 +207,96 @@ def clear_requeue_request(ticket: Ticket, *, touched_at=None) -> None:
     ticket.requeue_requested = False
     ticket.requeue_trigger = None
     ticket.requeue_requested_by_user_id = None
+    ticket.requeue_source_message_id = None
     ticket.requeue_forced_route_target_id = None
     ticket.requeue_forced_specialist_id = None
     touch_ticket(ticket, touched_at)
+
+
+def requeue_request_is_stronger_control(ticket: Ticket) -> bool:
+    if not ticket.requeue_requested:
+        return False
+    return (
+        ticket.requeue_trigger in {"manual_rerun", "reopen"}
+        or ticket.requeue_forced_route_target_id is not None
+        or ticket.requeue_forced_specialist_id is not None
+    )
+
+
+def request_ticket_content_requeue(
+    ticket: Ticket,
+    *,
+    source_message_id: uuid.UUID,
+    requested_by_user_id: uuid.UUID | None = None,
+) -> bool:
+    if requeue_request_is_stronger_control(ticket):
+        return False
+    request_requeue(
+        ticket,
+        "ticket_content",
+        requested_by_user_id=requested_by_user_id,
+        source_message_id=source_message_id,
+    )
+    return True
+
+
+def clear_matching_ticket_content_requeue(
+    ticket: Ticket,
+    *,
+    source_message_id: uuid.UUID,
+    touched_at=None,
+) -> bool:
+    if (
+        not ticket.requeue_requested
+        or ticket.requeue_trigger != "ticket_content"
+        or ticket.requeue_source_message_id != source_message_id
+    ):
+        return False
+    clear_requeue_request(ticket, touched_at=touched_at)
+    return True
+
+
+def _active_turn_steering_enabled(settings: Settings | None) -> bool:
+    return bool(
+        settings is not None
+        and settings.codex_conversations_enabled
+        and settings.codex_app_server_specialist_transport_enabled
+        and settings.codex_active_turn_steering_enabled
+    )
+
+
+def has_compatible_active_ai_triage_specialist_turn(
+    db: Session,
+    *,
+    settings: Settings | None = None,
+    ticket: Ticket,
+    forced_route_target_id: str | None = None,
+    forced_specialist_id: str | None = None,
+) -> bool:
+    if (
+        not _active_turn_steering_enabled(settings)
+        or ticket.status != "ai_triage"
+        or forced_route_target_id is not None
+        or forced_specialist_id is not None
+    ):
+        return False
+    if not isinstance(db, Session):
+        return False
+    statement = (
+        select(func.count())
+        .select_from(AIRun)
+        .join(CodexTurn, CodexTurn.ai_run_id == AIRun.id)
+        .where(
+            AIRun.ticket_id == ticket.id,
+            AIRun.status.in_(("pending", "running")),
+            AIRun.forced_route_target_id.is_(None),
+            AIRun.forced_specialist_id.is_(None),
+            CodexTurn.status.in_(("prepared", "running")),
+            CodexTurn.steering_closed_at.is_(None),
+            CodexTurn.transport_kind == "app_server",
+        )
+    )
+    return bool(db.execute(statement).scalar_one())
 
 
 def _persistent_turn_exists(db: Session, *, ai_run_id: uuid.UUID) -> bool:
@@ -527,6 +628,11 @@ def add_requester_reply(
     attachments: list[AttachmentUpload],
 ) -> tuple[TicketMessage, list[TicketAttachment], AIRun | None]:
     created_at = utc_now()
+    steerable_active_turn = has_compatible_active_ai_triage_specialist_turn(
+        db,
+        settings=settings,
+        ticket=ticket,
+    )
     message = _create_public_message(
         ticket_id=ticket.id,
         author_user_id=requester.id,
@@ -562,12 +668,20 @@ def add_requester_reply(
         touch_ticket(ticket, created_at)
         ticket.resolved_at = None
 
-    run = enqueue_or_requeue_ai_run(
-        db,
-        ticket=ticket,
-        trigger=trigger,
-        requested_by_user_id=requester.id,
-    )
+    if steerable_active_turn:
+        request_ticket_content_requeue(
+            ticket,
+            source_message_id=message.id,
+            requested_by_user_id=requester.id,
+        )
+        run = None
+    else:
+        run = enqueue_or_requeue_ai_run(
+            db,
+            ticket=ticket,
+            trigger=trigger,
+            requested_by_user_id=requester.id,
+        )
     upsert_ticket_view(db, user_id=requester.id, ticket_id=ticket.id, viewed_at=created_at)
     record_ticket_public_message_added_event(
         db,
@@ -587,6 +701,18 @@ def publish_ai_internal_note(
     created_at=None,
 ) -> TicketMessage:
     note_time = created_at or utc_now()
+    outcome_id = _append_turn_outcome_for_message(
+        db,
+        ai_run_id=ai_run_id,
+        outcome_kind="internal_note_published",
+        payload_json={
+            "body_markdown": body_markdown,
+            "internal_note_markdown": body_markdown,
+            "visibility": "internal",
+            "source": "ai_internal_note",
+            "published_at": note_time.isoformat(),
+        },
+    )
     message = _create_message(
         ticket_id=ticket.id,
         author_user_id=None,
@@ -596,6 +722,7 @@ def publish_ai_internal_note(
         body_markdown=body_markdown,
         created_at=note_time,
         ai_run_id=ai_run_id,
+        codex_turn_outcome_id=outcome_id,
     )
     db.add(message)
     touch_ticket(ticket, note_time)
@@ -758,6 +885,9 @@ def route_ticket_after_ai(
 def process_deferred_requeue(db: Session, *, ticket: Ticket) -> AIRun | None:
     if not ticket.requeue_requested or not ticket.requeue_trigger:
         return None
+    if ticket.requeue_trigger in {"requester_reply", "ticket_content"} and ticket.status != "ai_triage":
+        clear_requeue_request(ticket)
+        return None
     db.flush()
     if has_active_ai_run(db, ticket.id):
         return None
@@ -837,14 +967,30 @@ def add_ops_public_reply(
         created_at=created_at,
     )
     if next_status == "ai_triage":
-        request_manual_rerun(
+        if has_compatible_active_ai_triage_specialist_turn(
             db,
-            slack_runtime=slack_runtime,
+            settings=settings,
             ticket=ticket,
-            actor=actor,
             forced_route_target_id=forced_route_target_id,
             forced_specialist_id=forced_specialist_id,
-        )
+        ):
+            content_escrowed = request_ticket_content_requeue(
+                ticket,
+                source_message_id=message.id,
+                requested_by_user_id=actor.id,
+            )
+            if not content_escrowed:
+                touch_ticket(ticket, created_at)
+            upsert_ticket_view(db, user_id=actor.id, ticket_id=ticket.id, viewed_at=created_at)
+        else:
+            request_manual_rerun(
+                db,
+                slack_runtime=slack_runtime,
+                ticket=ticket,
+                actor=actor,
+                forced_route_target_id=forced_route_target_id,
+                forced_specialist_id=forced_specialist_id,
+            )
         record_ticket_public_message_added_event(
             db,
             slack_runtime=slack_runtime,
@@ -877,6 +1023,7 @@ def add_ops_public_reply(
 def add_ops_internal_note(
     db: Session,
     *,
+    settings: Settings | None = None,
     ticket: Ticket,
     actor: User,
     body_markdown: str,
@@ -892,7 +1039,20 @@ def add_ops_internal_note(
         created_at=created_at,
     )
     db.add(message)
-    touch_ticket(ticket, created_at)
+    if has_compatible_active_ai_triage_specialist_turn(
+        db,
+        settings=settings,
+        ticket=ticket,
+    ):
+        content_escrowed = request_ticket_content_requeue(
+            ticket,
+            source_message_id=message.id,
+            requested_by_user_id=actor.id,
+        )
+        if not content_escrowed:
+            touch_ticket(ticket, created_at)
+    else:
+        touch_ticket(ticket, created_at)
     upsert_ticket_view(db, user_id=actor.id, ticket_id=ticket.id, viewed_at=created_at)
     return message
 

@@ -147,6 +147,20 @@ def recover_stale_runs(settings: Settings) -> int:
                     replacement_run = process_deferred_requeue(db, ticket=ticket)
                     if replacement_run is not None:
                         _append_manifest_run_id(manifest_run_ids, replacement_run.id)
+                    else:
+                        log_worker_event(
+                            "stale_persistent_run_deferred_request_retained",
+                            level="warning",
+                            run_id=str(run.id),
+                            ticket_id=str(ticket.id),
+                            ticket_status=ticket.status,
+                            requeue_trigger=ticket.requeue_trigger,
+                            requeue_source_message_id=str(getattr(ticket, "requeue_source_message_id", None))
+                            if getattr(ticket, "requeue_source_message_id", None) is not None
+                            else None,
+                            dormant_content_retained=True,
+                            avoided_successor_run=True,
+                        )
                 else:
                     publish_ai_failure_note(
                         db,
@@ -174,6 +188,12 @@ def recover_stale_runs(settings: Settings) -> int:
                     persistent_turn_retained=True,
                     replacement_run_id=str(replacement_run.id) if replacement_run is not None else None,
                     deferred_requeue_retained=bool(
+                        ticket.requeue_requested and ticket.requeue_trigger and replacement_run is None
+                    ),
+                    dormant_content_retained=bool(
+                        ticket.requeue_requested and ticket.requeue_trigger and replacement_run is None
+                    ),
+                    avoided_successor_run=bool(
                         ticket.requeue_requested and ticket.requeue_trigger and replacement_run is None
                     ),
                 )

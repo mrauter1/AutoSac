@@ -10,12 +10,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from shared.agent_specs import PIPELINE_VERSION
-from shared.codex_turns import append_codex_turn_outcome_for_ai_run
+from shared.codex_turns import append_codex_turn_outcome_for_ai_run, load_codex_turn_for_ai_run
 from shared.config import Settings
 from shared.db import session_scope
 from shared.integrations import build_slack_runtime_context
 from shared.logging import log_worker_event
-from shared.models import AIRun, Ticket
+from shared.models import AIRun, CodexTurnSteer, Ticket
 from shared.permissions import ADMIN_ROLE, DEV_TI_ROLE
 from shared.security import utc_now
 from shared.ticketing import (
@@ -26,10 +26,10 @@ from shared.ticketing import (
     publish_ai_internal_note,
     publish_ai_public_reply,
     record_status_change,
-    request_requeue,
+    requeue_request_is_stronger_control,
     route_ticket_after_ai,
 )
-from worker.codex_inputs import PromptConversationState, build_prompt_conversation_state
+from worker.codex_inputs import PromptConversationState, build_prompt_conversation_state, load_strictly_unseen_input_events
 from worker.output_contracts import HumanHandoffResult, SpecialistResult
 from worker.pipeline import PipelineExecutionResult, PersistentCodexNonQuiescentCleanupError, execute_triage_pipeline
 from worker.publication_policy import PublicationDecision, PublicationPolicyError, resolve_effective_publication_mode
@@ -188,9 +188,29 @@ def _prepare_run(settings: Settings, *, run_id, worker_instance_id: str) -> Prep
         )
 
 
-def _mark_superseded_due_to_stale_input(db, *, run: AIRun, ticket: Ticket) -> None:
-    if not ticket.requeue_requested:
-        request_requeue(ticket, ticket.requeue_trigger or "requester_reply")
+def _publication_freshness_baseline_hash(db, *, settings: Settings, run: AIRun) -> str | None:
+    turn = load_codex_turn_for_ai_run(db, ai_run_id=run.id)
+    if (
+        turn is not None
+        and getattr(turn, "transport_kind", None) == "app_server"
+        and getattr(turn, "effective_input_hash", None)
+    ):
+        return turn.effective_input_hash
+    return run.input_hash
+
+
+def _ticket_has_deferred_execution_request(ticket: Ticket) -> bool:
+    return bool(ticket.requeue_requested and ticket.requeue_trigger)
+
+
+def _mark_superseded_due_to_stale_input(
+    db,
+    *,
+    run: AIRun,
+    ticket: Ticket,
+    reason: str = "stale_input",
+) -> None:
+    had_deferred_request = _ticket_has_deferred_execution_request(ticket)
     run.status = "superseded"
     run.ended_at = utc_now()
     run.error_text = None
@@ -199,11 +219,64 @@ def _mark_superseded_due_to_stale_input(db, *, run: AIRun, ticket: Ticket) -> No
         ai_run_id=run.id,
         outcome_kind="superseded",
         payload_json={
-            "reason": "stale_input",
+            "reason": reason,
             "requeue_trigger": ticket.requeue_trigger,
+            "had_deferred_request": had_deferred_request,
+            "successor_run_avoided": not had_deferred_request,
+            "dormant_content_retained": not had_deferred_request,
         },
     )
-    process_deferred_requeue(db, ticket=ticket)
+    if had_deferred_request:
+        process_deferred_requeue(db, ticket=ticket)
+
+
+def _app_server_turn_publication_blocker(
+    db,
+    *,
+    settings: Settings,
+    context: LoadedTicketContext,
+    run: AIRun,
+    turn,
+) -> str | None:
+    if turn is None or getattr(turn, "transport_kind", None) != "app_server":
+        return None
+    if getattr(turn, "status", None) != "completed" or getattr(turn, "steering_closed_at", None) is None:
+        return "completion_fence_incomplete"
+    if not getattr(turn, "effective_input_hash", None):
+        return "effective_input_hash_missing"
+
+    blocking_receipts = list(
+        db.execute(
+            select(CodexTurnSteer)
+            .where(
+                CodexTurnSteer.turn_id == turn.id,
+                CodexTurnSteer.status.in_(("prepared", "sending", "ambiguous")),
+            )
+            .limit(1)
+        ).scalars()
+    )
+    if blocking_receipts:
+        return "blocking_steering_receipts"
+
+    if context.ticket.status != "ai_triage":
+        return "workflow_status_changed"
+    if requeue_request_is_stronger_control(context.ticket):
+        return "stronger_control_request"
+
+    conversation_id = getattr(turn, "conversation_id", None)
+    if conversation_id is not None:
+        unseen_events = load_strictly_unseen_input_events(
+            db,
+            context=context,
+            run=run,
+            conversation_id=conversation_id,
+            include_turn_summaries=False,
+            max_attachment_bytes=settings.max_image_bytes,
+        )
+        if unseen_events:
+            return "unseen_authorized_content"
+
+    return None
 
 
 def _synthesized_direct_ai_internal_note(result: SpecialistResult) -> str:
@@ -387,8 +460,30 @@ def _apply_success_result(
             run=run,
         )
 
-        if context.ticket.requeue_requested or publication_hash != run.input_hash:
-            _mark_superseded_due_to_stale_input(db, run=run, ticket=context.ticket)
+        turn = load_codex_turn_for_ai_run(db, ai_run_id=run.id)
+        publication_blocker = _app_server_turn_publication_blocker(
+            db,
+            settings=settings,
+            context=context,
+            run=run,
+            turn=turn,
+        )
+        freshness_baseline_hash = (
+            turn.effective_input_hash
+            if (
+                turn is not None
+                and getattr(turn, "transport_kind", None) == "app_server"
+                and getattr(turn, "effective_input_hash", None)
+            )
+            else _publication_freshness_baseline_hash(db, settings=settings, run=run)
+        )
+        if publication_blocker is not None or context.ticket.requeue_requested or publication_hash != freshness_baseline_hash:
+            _mark_superseded_due_to_stale_input(
+                db,
+                run=run,
+                ticket=context.ticket,
+                reason=publication_blocker or "stale_input",
+            )
             should_write_manifest = True
         else:
             completed_at = utc_now()

@@ -87,7 +87,10 @@ The routing registry is cached in-process. Changes to spec or registry files req
 | `worker.main` | Builds worker identity; starts heartbeat, Slack sync and Slack delivery threads; runs stale sweep, queue claim and AI processing loop | Top-level worker composition root |
 | `worker.queue` | Claims oldest pending run with `SKIP LOCKED`; identifies stale running runs; marks active steps failed; creates recovery runs or routes exhausted work to humans | Owns queue/recovery state transitions |
 | `worker.triage` | Prepares/fingerprints runs, executes pipeline, checks stale input, maps output to ticket effects, handles failure and deferred requeue | AI application-service layer |
-| `worker.pipeline` | Runs router, optional selector, and optional specialist according to registry; supports synthetic router steps for forced reruns | Pure orchestration around step runner |
+| `worker.pipeline` | Runs router, optional selector, and optional specialist according to registry; supports synthetic router steps for forced reruns | Router and selector always use `worker.step_runner.execute_step`; persistent transport is specialist-only |
+| `worker.codex_inputs` | Builds ordered persistent Codex input events, canonical ticket-message bundles with attachment custody metadata, strict unseen deltas, and causal known-input checks | Cursor between ticket content, persistent turns, and active-turn steering |
+| `worker.persistent_codex` | Owns persistent specialist turn preparation, conversation/session leases, exec/app-server transport selection, active-turn steering receipts, accepted input custody, native IDs, and persistent turn finalization | Specialist-only adapter used by `worker.pipeline` when persistent conversations are enabled |
+| `worker.codex_app_server` | Run-scoped `codex app-server --stdio` JSON-RPC client with request correlation, protocol item persistence, thread start/resume, turn start/steer, completion wait, failure classification, and bounded cleanup | Used only by persistent specialist execution behind the app-server transport flag |
 | `worker.step_runner` | Materializes attachments, renders prompts/schemas, invokes Codex, persists step state/artifacts, validates output and ownership, snapshots run manifest | Infrastructure adapter for model execution |
 | `worker.prompt_renderer` | Injects ticket context, visibility flags, route/specialist catalogs, shared specialist policy, and attachment paths into versioned prompts | Consumes specs and routing registry |
 | `worker.output_contracts` | Pydantic models and semantic validation for router, selector, specialist, human handoff, and legacy triage results | Validation boundary between model and domain |
@@ -123,7 +126,7 @@ Every spec directory contains:
 | `software-data-engineer` | specialist | Repository-grounded change authoring for internal users only |
 | `unknown` | specialist | Historical/ambiguous compatibility specialist |
 
-The normal pipeline always runs a router. Direct targets run their fixed specialist as step 2. The human-assist `manual_review` target runs the selector as step 2 and selected specialist as step 3. A forced manual rerun records a synthetic successful router step, then directly runs the selected specialist.
+The normal pipeline always runs a router. Direct targets run their fixed specialist as step 2. The human-assist `manual_review` target runs the selector as step 2 and selected specialist as step 3. A forced manual rerun records a synthetic successful router step, then directly runs the selected specialist. Persistent Codex conversations and the app-server transport do not replace router or selector execution.
 
 ## 6. Scripts and lifecycle tooling
 
@@ -158,7 +161,6 @@ Superloop resolves configuration in this order: built-ins, config beside the Sup
 
 ## 8. Tests
 
-The repository contains roughly 449 named test functions. The AutoSac suite covers auth/requester flows, persistence, operations, AI worker behavior, routing registry, Slack foundation/emission/delivery/sync, upload handling, i18n, and validation hardening. Superloop tests cover loop-control parsing, phase-local artifacts, Git tracking, events, resume and observability.
+The repository contains roughly 471 named test functions. The AutoSac suite covers auth/requester flows, persistence, operations, AI worker behavior, routing registry, Slack foundation/emission/delivery/sync, upload handling, i18n, and validation hardening. Superloop tests cover loop-control parsing, phase-local artifacts, Git tracking, events, resume and observability.
 
 Tests use pytest and extensive fakes/monkeypatching for database/session and external-process/network boundaries. The root `requirements.txt` includes both runtime and test dependencies; there is no separate package metadata or dependency lock file.
-

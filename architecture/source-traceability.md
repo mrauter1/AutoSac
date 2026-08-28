@@ -14,6 +14,7 @@
 | Router/selector/specialist orchestration | `worker/pipeline.py`, `shared/routing_registry.py`, `agent_specs/registry.json` |
 | Prompt/spec/skill system | `shared/agent_specs.py`, `worker/prompt_renderer.py`, `agent_specs/*` |
 | Codex command, sandbox, artifacts and validation | `worker/step_runner.py`, `worker/artifacts.py`, `worker/output_contracts.py` |
+| Persistent specialist conversation and active-turn steering | `worker/persistent_codex.py`, `worker/codex_app_server.py`, `worker/codex_inputs.py`, `shared/codex_turns.py` |
 | Publication and stale-input protection | `worker/triage.py`, `worker/publication_policy.py` |
 | Upload validation/storage | `app/uploads.py`, requester/ops route call sites, `worker/step_runner.py` |
 | Slack outbox event emission | `shared/integrations.py`, ticketing call sites |
@@ -74,18 +75,18 @@ The report resolves conflicts in favor of executable source:
 - The root numeric `AUTO_*_MIN_CONFIDENCE` settings remain configured, but current publication decisions use categorical confidence/risk thresholds from `agent_specs/registry.json`.
 - Upload setting names refer to images, while current upload validation intentionally accepts arbitrary files and only uses Pillow to enrich recognized images.
 - `worker/codex_runner.py` is not an alternative current runner. It contains compatibility failures and re-exports only command construction.
+- Persistent specialist app-server transport and active-turn steering are default-off rollout paths. Router and selector source files remain on the existing `execute_step` / `codex exec --ephemeral` path.
 - Product requirement files under `tasks/` record design evolution and should not be treated as runtime dependencies.
 
 ## 4. Scope and freshness
 
-This is a static architecture report for the checked-out source. It does not inspect a live database, deployed environment, Slack workspace, Codex account, or generated triage workspace. Consequently:
+This is a static architecture report for the current working tree. It does not inspect a live database, deployed environment, Slack workspace, Codex account, or generated triage workspace. Consequently:
 
 - runtime row volumes, latency, deployment health and actual environment values are out of scope;
 - the ER model represents the latest ORM/migration source, not a verified live schema;
 - external service behavior is described from adapters and tests, not live calls;
 - ignored/untracked runtime directories such as `.autoloop/` and `.superloop/` are not production AutoSac modules.
-
-The repository was clean on branch `dev` when inspected. The last committed source revision was `22af53afb980e4fbfff3cc9c05af979707fd2ade` dated 2026-05-19.
+- dirty working-tree entries may include intentional baseline implementation work and are part of this report only when they are current source, configuration, migrations, tests, or architecture artifacts.
 
 ## 5. Suggested maintenance rule
 
@@ -101,4 +102,3 @@ Update this report when any of these contracts change:
 - Superloop artifact/session/control protocol.
 
 A lightweight review can compare these source files against the claim table above and update only the affected report sections and Mermaid sources.
-

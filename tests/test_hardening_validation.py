@@ -598,6 +598,47 @@ def test_get_settings_allows_missing_codex_api_key(monkeypatch, tmp_path):
     assert settings.codex_api_key is None
     assert settings.default_ui_locale == "pt-BR"
     assert settings.codex_conversations_enabled is False
+    assert settings.codex_app_server_specialist_transport_enabled is False
+    assert settings.codex_active_turn_steering_enabled is False
+    assert settings.resolved_codex_home == Path.home() / "autosac" / "codex"
+    get_settings.cache_clear()
+
+
+def test_get_settings_reads_codex_rollout_flags_without_changing_shared_home(monkeypatch, tmp_path):
+    workspace_dir = tmp_path / "workspace"
+    uploads_dir = workspace_dir / "attachments_store"
+    monkeypatch.setenv("APP_BASE_URL", "http://localhost:8000")
+    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{(tmp_path / 'triage.db').resolve()}")
+    monkeypatch.setenv("UI_DEFAULT_LOCALE", "en")
+    monkeypatch.setenv("UPLOADS_DIR", str(uploads_dir))
+    monkeypatch.setenv("TRIAGE_WORKSPACE_DIR", str(workspace_dir))
+    monkeypatch.setenv("REPO_MOUNT_DIR", str(workspace_dir / "app"))
+    monkeypatch.setenv("MANUALS_MOUNT_DIR", str(workspace_dir / "manuals"))
+    monkeypatch.setenv("CODEX_BIN", "codex")
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    monkeypatch.setenv("CODEX_MODEL", "")
+    monkeypatch.setenv("CODEX_TIMEOUT_SECONDS", "3600")
+    monkeypatch.setenv("WORKER_POLL_SECONDS", "10")
+    monkeypatch.setenv("AUTO_SUPPORT_REPLY_MIN_CONFIDENCE", "0.85")
+    monkeypatch.setenv("AUTO_CONFIRM_INTENT_MIN_CONFIDENCE", "0.90")
+    monkeypatch.setenv("MAX_IMAGES_PER_MESSAGE", "3")
+    monkeypatch.setenv("MAX_IMAGE_BYTES", str(5 * 1024 * 1024))
+    monkeypatch.setenv("SESSION_DEFAULT_HOURS", "12")
+    monkeypatch.setenv("SESSION_REMEMBER_DAYS", "30")
+    monkeypatch.setenv("CODEX_CONVERSATIONS_ENABLED", "true")
+    monkeypatch.setenv("CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED", "true")
+    monkeypatch.setenv("CODEX_ACTIVE_TURN_STEERING_ENABLED", "true")
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+
+    from shared.config import get_settings
+
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    assert settings.codex_conversations_enabled is True
+    assert settings.codex_app_server_specialist_transport_enabled is True
+    assert settings.codex_active_turn_steering_enabled is True
     assert settings.resolved_codex_home == Path.home() / "autosac" / "codex"
     get_settings.cache_clear()
 
@@ -745,6 +786,34 @@ def test_settings_web_contract_does_not_require_codex_home_mount(tmp_path):
     )
 
     settings.validate_contracts()
+
+
+def test_settings_rejects_codex_app_server_transport_without_persistent_conversations(tmp_path):
+    settings = Settings(
+        **{
+            **_make_settings(tmp_path).__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+        }
+    )
+
+    with pytest.raises(SettingsError, match="CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED requires CODEX_CONVERSATIONS_ENABLED"):
+        settings.validate_contracts()
+
+
+def test_settings_rejects_active_turn_steering_without_app_server_transport(tmp_path):
+    settings = Settings(
+        **{
+            **_make_settings(tmp_path).__dict__,
+            "codex_conversations_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+
+    with pytest.raises(
+        SettingsError,
+        match="CODEX_ACTIVE_TURN_STEERING_ENABLED requires CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED",
+    ):
+        settings.validate_contracts()
 
 
 def test_settings_validate_worker_contracts_requires_existing_codex_home(tmp_path):

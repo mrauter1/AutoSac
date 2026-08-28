@@ -124,6 +124,10 @@ DATABASE_URL=postgresql+psycopg://triage:CHOOSE_A_DB_PASSWORD@localhost:5432/tri
 
 CODEX_BIN=codex
 CODEX_API_KEY=
+CODEX_HOME=/home/YOUR_USER/autosac/codex
+CODEX_CONVERSATIONS_ENABLED=false
+CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED=false
+CODEX_ACTIVE_TURN_STEERING_ENABLED=false
 
 UPLOADS_DIR=/home/YOUR_USER/autosac-data/triage_workspace/attachments_store
 TRIAGE_WORKSPACE_DIR=/home/YOUR_USER/autosac-data/triage_workspace

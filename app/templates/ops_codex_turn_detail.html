@@ -55,6 +55,26 @@
             <dd>{{ persistent_turn.session_thread_id or none_yet_label }}</dd>
           </div>
           <div>
+            <dt>{{ t("ops.detail.transport_kind") }}</dt>
+            <dd>{{ persistent_turn.transport_kind or none_yet_label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.native_turn_id") }}</dt>
+            <dd>{{ persistent_turn.native_turn_id or none_yet_label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.steering_closed_at") }}</dt>
+            <dd>{% if persistent_turn.steering_closed_at %}{{ format_datetime_utc(persistent_turn.steering_closed_at) }}{% else %}{{ none_yet_label }}{% endif %}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.effective_input_hash") }}</dt>
+            <dd>{% if persistent_turn.effective_input_hash %}<code>{{ persistent_turn.effective_input_hash }}</code>{% else %}{{ none_yet_label }}{% endif %}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.ambiguous_blockers") }}</dt>
+            <dd>{{ persistent_turn.ambiguous_blocker_count or 0 }}</dd>
+          </div>
+          <div>
             <dt>{{ t("ops.detail.lease_owner") }}</dt>
             <dd>{{ persistent_turn.lease_owner_run_id or none_yet_label }}</dd>
           </div>
@@ -130,6 +150,101 @@
       </section>
 
       <section class="panel stack ops-ticket-detail__thread">
+        <h2>{{ t("ops.detail.delivery_state_history") }}</h2>
+        {% if persistent_turn.delivery_events %}
+        <div class="ops-ticket-detail__turn-list stack">
+          {% for event in persistent_turn.delivery_events %}
+          <article class="message-card ops-ticket-detail__turn-card ops-ticket-detail__delivery-card">
+            <div class="message-card__meta">
+              <span class="lane-pill lane-pill--internal">{{ t(event.delivery_state_label_key) }}</span>
+              <strong>{{ event.event_kind or none_yet_label }}</strong>
+              {% if event.source_id %}
+              <span><code>{{ event.source_id }}</code></span>
+              {% endif %}
+            </div>
+            <dl class="meta-list meta-list--compact">
+              <div>
+                <dt>{{ t("ops.detail.source_kind") }}</dt>
+                <dd>{{ event.source_kind or none_yet_label }}</dd>
+              </div>
+              <div>
+                <dt>{{ t("ops.detail.dedupe_key") }}</dt>
+                <dd>{% if event.dedupe_key %}<code>{{ event.dedupe_key }}</code>{% else %}{{ none_yet_label }}{% endif %}</dd>
+              </div>
+            </dl>
+            {% if event.payload_excerpt %}
+            <p class="muted ops-ticket-detail__long-text">{{ event.payload_excerpt }}</p>
+            {% endif %}
+          </article>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="muted">{{ t("ops.detail.no_delivery_events") }}</p>
+        {% endif %}
+      </section>
+
+      <section class="panel stack ops-ticket-detail__thread">
+        <h2>{{ t("ops.detail.steering_receipt_history") }}</h2>
+        {% if persistent_turn.steering_receipts %}
+        {% for receipt in persistent_turn.steering_receipts %}
+        <article class="message-card ops-ticket-detail__turn-card ops-ticket-detail__delivery-card">
+          <div class="message-card__meta">
+            <span class="lane-pill lane-pill--internal">{{ t(receipt.delivery_state_label_key) }}</span>
+            <strong>{{ receipt.status }}</strong>
+            {% if receipt.rpc_request_id %}
+            <span><code>{{ receipt.rpc_request_id }}</code></span>
+            {% endif %}
+          </div>
+          <dl class="meta-list meta-list--compact">
+            <div>
+              <dt>{{ t("ops.detail.source_kind") }}</dt>
+              <dd>{{ receipt.source_kind or none_yet_label }}</dd>
+            </div>
+            <div>
+              <dt>{{ t("ops.detail.source_id") }}</dt>
+              <dd>{{ receipt.source_id or none_yet_label }}</dd>
+            </div>
+            <div>
+              <dt>{{ t("ops.detail.dedupe_key") }}</dt>
+              <dd><code>{{ receipt.dedupe_key }}</code></dd>
+            </div>
+            <div>
+              <dt>{{ t("ops.detail.expected_native_turn_id") }}</dt>
+              <dd>{{ receipt.expected_native_turn_id }}</dd>
+            </div>
+            <div>
+              <dt>{{ t("ops.detail.payload_hash") }}</dt>
+              <dd><code>{{ receipt.payload_hash }}</code></dd>
+            </div>
+            <div>
+              <dt>{{ t("ops.detail.attempted_at") }}</dt>
+              <dd>{% if receipt.attempted_at %}{{ format_datetime_utc(receipt.attempted_at) }}{% else %}{{ none_yet_label }}{% endif %}</dd>
+            </div>
+            <div>
+              <dt>{{ t("ops.detail.acknowledged_at") }}</dt>
+              <dd>{% if receipt.acknowledged_at %}{{ format_datetime_utc(receipt.acknowledged_at) }}{% else %}{{ none_yet_label }}{% endif %}</dd>
+            </div>
+            <div>
+              <dt>{{ t("ops.detail.commit_to_ack_latency") }}</dt>
+              <dd>{% if receipt.commit_to_ack_latency_ms is not none %}{{ receipt.commit_to_ack_latency_ms }} ms{% else %}{{ none_yet_label }}{% endif %}</dd>
+            </div>
+            <div>
+              <dt>{{ t("ops.detail.error_code") }}</dt>
+              <dd>{{ receipt.error_code or none_yet_label }}</dd>
+            </div>
+          </dl>
+          {% if receipt.error_text %}
+          <p class="muted ops-ticket-detail__long-text">{{ receipt.error_text }}</p>
+          {% endif %}
+          <pre class="ops-ticket-detail__json">{{ receipt.payload_json_pretty }}</pre>
+        </article>
+        {% endfor %}
+        {% else %}
+        <p class="muted">{{ t("ops.detail.no_steering_receipts") }}</p>
+        {% endif %}
+      </section>
+
+      <section class="panel stack ops-ticket-detail__thread">
         <h2>{{ t("ops.detail.outcome_history") }}</h2>
         {% if persistent_turn["outcomes"] %}
         {% for outcome in persistent_turn["outcomes"] %}
@@ -184,6 +299,18 @@
           <div>
             <dt>{{ t("ops.detail.current_thread") }}</dt>
             <dd>{{ persistent_turn.session_thread_id or none_yet_label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.native_turn_id") }}</dt>
+            <dd>{{ persistent_turn.native_turn_id or none_yet_label }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.steering_receipts") }}</dt>
+            <dd>{{ persistent_turn.steering_receipt_count or 0 }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("ops.detail.ambiguous_blockers") }}</dt>
+            <dd>{{ persistent_turn.ambiguous_blocker_count or 0 }}</dd>
           </div>
           <div>
             <dt>{{ t("ops.detail.turn_count") }}</dt>

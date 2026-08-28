@@ -43,7 +43,7 @@ The route layer coordinates database commit and filesystem writes and removes cr
 
 ## 3. Requester and operations mutations
 
-- A requester reply adds a public message, changes/reopens the ticket to `ai_triage`, creates a run or sets deferred requeue, updates the requester view, and emits a public-message event.
+- A requester reply adds a public message, changes/reopens the ticket to `ai_triage`, and either creates the existing successor run path or, when active-turn steering is enabled and a compatible AI Triage app-server turn was already active, stores source-provenanced `ticket_content` escrow for active-turn delivery. It always updates the requester view and emits a public-message event.
 - Requester resolve writes status history and updates the view.
 - An ops public reply can set waiting/resolved state or request AI triage; internal notes never emit public Slack events.
 - Assignment changes the assignee and view time but does not emit a dedicated integration event.
@@ -95,7 +95,7 @@ sequenceDiagram
         P->>S: selector step
       end
       opt selected specialist
-        P->>S: specialist step
+        P->>S: specialist step, or persistent specialist adapter when enabled
       end
       P-->>T: PipelineExecutionResult
       T->>DB: Re-lock run; reload context; compare fingerprint/requeue
@@ -122,6 +122,60 @@ The step runner:
 - persists step result to PostgreSQL and manifests.
 
 Codex is allowed to read only the bootstrapped workspace. The workspace contract forbids edits, live DB/log access, web search, promises of fixes, and public disclosure of internal messages.
+
+When `CODEX_CONVERSATIONS_ENABLED=true`, specialist steps use the persistent
+conversation adapter instead of the ephemeral step runner. With
+`CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED=false`, that adapter preserves the
+existing `codex exec` transport. With the app-server transport enabled, it
+starts a run-owned `codex app-server --stdio` process, initializes JSON-RPC,
+starts or resumes the ticket's stored native thread, sends the already-rendered
+specialist prompt through `turn/start`, records the native thread and turn IDs
+immediately, waits for the matching `turn/completed`, and then validates the
+same structured output contract before ordinary pipeline finalization. Router
+and selector steps remain on `execute_step` in all rollout states.
+
+When `CODEX_ACTIVE_TURN_STEERING_ENABLED=true`, the app-server specialist
+supervisor checks a lightweight ticket change token at a short interval while
+the native turn remains open. The first poll always performs a strict unseen
+ticket-message scan; later polls repeat the full scan only after the token
+changes. The token is captured before scanning, so content committed during a
+scan remains visible to the next poll. Each bundle is delivered through
+`turn/steer` only after the worker revalidates ticket status, run/session lease
+ownership, native thread and turn IDs, the open steering fence, forced-routing
+absence, deadline, and bundle representability. Delivery is all-or-nothing: the
+worker sends one canonical text envelope and any supported image attachments as
+native `localImage` items, but if any attachment is unreadable, outside the
+trusted upload boundary, oversize, or otherwise unrepresentable, none of the
+bundle is sent and the content stays strictly unseen. Delivery uses
+`codex_turn_steers` custody receipts: `sending` is committed before the JSON-RPC
+write; only an acknowledgement for the expected native turn marks the receipt
+`accepted`, inserts `CodexTurnInput`, advances the effective input hash only when
+that acceptance now matches the full accepted ticket frontier, and clears
+matching `ticket_content` escrow only for the exact accepted source when no
+older or newer authorized unseen content and no stronger control request
+remain. Rejected or ambiguous receipts do not consume input, so content remains
+available for a later authorized turn.
+
+For app-server specialist turns, `turn/completed` is a publication fence, not
+just another observed item. Before output selection, the worker locks the run,
+session, turn and ticket, closes `steering_closed_at`, marks unresolved steering
+receipts ambiguous, and preserves `CodexTurn.effective_input_hash` as the latest
+durably accepted frontier rather than recomputing it from the current ticket
+snapshot. The turn's `CodexTurnInput` rows still retain the exact initial and
+steered deltas delivered during that turn. Triage publication then rechecks that
+the turn is completed and fenced, there are no ambiguous or unresolved receipts,
+no stronger control request, no relevant strictly unseen input event, current
+ownership is intact, and the ticket is still in an AI-compatible workflow state.
+If input is stale but there is no authorized requeue request, the run is
+superseded without synthesizing a requester-reply successor; dormant content
+remains available for the next authorized turn.
+
+Ops persistent-turn pages expose this custody state without changing requester
+visibility: accepted inputs and receipts show as included in the active AI
+turn, rejected or dormant ticket content remains waiting for future AI context,
+deferred `ticket_content` escrow is shown as queued for another AI run, and
+unresolved or ambiguous receipts are marked as delivery uncertain/recovery
+required.
 
 ### Routing variants
 

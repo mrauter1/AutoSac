@@ -20,5 +20,13 @@ erDiagram
     AI_RUN ||--o{ AI_DRAFT : produces
     AI_RUN ||--o{ TICKET_MESSAGE : produces
     TICKET_MESSAGE ||--o| AI_DRAFT : publishes
+    TICKET ||--o| CODEX_CONVERSATION : owns
+    CODEX_CONVERSATION ||--o{ CODEX_SESSION : contains
+    CODEX_CONVERSATION ||--o{ CODEX_TURN : records
+    CODEX_SESSION ||--o{ CODEX_TURN : executes
+    CODEX_TURN ||--o{ CODEX_TURN_INPUT : accepts
+    CODEX_TURN ||--o{ CODEX_TURN_ITEM : observes
+    CODEX_TURN ||--o{ CODEX_TURN_OUTCOME : summarizes
+    CODEX_TURN ||--o{ CODEX_TURN_STEER : receipts
     INTEGRATION_EVENT ||--o{ INTEGRATION_EVENT_LINK : links
     INTEGRATION_EVENT ||--o{ INTEGRATION_EVENT_TARGET : delivers_to

@@ -334,7 +334,7 @@
         </button>
       </div>
 
-      <section class="hero" id="overview" data-search="overview modular monolith fastapi worker postgresql codex slack superloop">
+      <section class="hero" id="overview" data-search="overview modular monolith fastapi worker postgresql codex app-server active steering slack superloop">
         <div class="eyebrow">Repository architecture · interactive map</div>
         <h1>See the system.<br><span>Follow the work.</span></h1>
         <p class="lede">AutoSac is a database-coordinated, two-process ticket triage application. The web process captures intent; the worker turns durable queue rows into policy-controlled AI responses and Slack notifications.</p>
@@ -342,14 +342,14 @@
           <span class="badge"><strong>Style</strong> · modular monolith</span>
           <span class="badge"><strong>UI</strong> · server-rendered + HTMX</span>
           <span class="badge"><strong>Async</strong> · PostgreSQL queues</span>
-          <span class="badge"><strong>AI</strong> · read-only Codex pipeline</span>
-          <span class="badge"><strong>Snapshot</strong> · 22af53a</span>
+          <span class="badge"><strong>AI</strong> · exec + app-server specialists</span>
+          <span class="badge"><strong>Snapshot</strong> · current working tree</span>
         </div>
         <div class="stats" aria-label="Architecture statistics">
           <div class="stat"><b>2</b><span>AutoSac runtime processes</span></div>
-          <div class="stat"><b>16</b><span>PostgreSQL entities</span></div>
+          <div class="stat"><b>24</b><span>PostgreSQL entities</span></div>
           <div class="stat"><b>10</b><span>Versioned agent specs</span></div>
-          <div class="stat"><b>449</b><span>Named regression tests</span></div>
+          <div class="stat"><b>561</b><span>Named regression tests</span></div>
         </div>
       </section>
 
@@ -361,7 +361,7 @@
         <div class="panel map-layout">
           <svg class="system-map" viewBox="0 0 820 500" role="img" aria-labelledby="mapTitle mapDesc">
             <title id="mapTitle">AutoSac system context</title>
-            <desc id="mapDesc">Browser and operators connect to the web process. Web and worker share PostgreSQL and a filesystem workspace. Worker calls Codex and Slack. Superloop is independent.</desc>
+            <desc id="mapDesc">Browser and operators connect to the web process. Web and worker share PostgreSQL and a filesystem workspace. Worker calls Codex through ephemeral exec and persistent specialist transports, and calls Slack. Superloop is independent.</desc>
             <defs>
               <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="context-stroke"/></marker>
             </defs>
@@ -381,7 +381,7 @@
             <g class="node" data-node="worker" tabindex="0" role="button" aria-label="Worker process"><rect x="260" y="300" width="190" height="100"/><text x="355" y="339" text-anchor="middle">Worker process</text><text class="sub" x="355" y="362" text-anchor="middle">AI · recovery · Slack</text></g>
             <g class="node" data-node="db" tabindex="0" role="button" aria-label="PostgreSQL"><rect x="560" y="80" width="120" height="80"/><text x="620" y="114" text-anchor="middle">PostgreSQL</text><text class="sub" x="620" y="135" text-anchor="middle">record + queues</text></g>
             <g class="node" data-node="workspace" tabindex="0" role="button" aria-label="Persistent workspace"><rect x="560" y="210" width="120" height="80"/><text x="620" y="244" text-anchor="middle">Workspace</text><text class="sub" x="620" y="265" text-anchor="middle">uploads · runs</text></g>
-            <g class="node" data-node="codex" tabindex="0" role="button" aria-label="Codex CLI"><rect x="755" y="165" width="60" height="80"/><text x="785" y="199" text-anchor="middle">Codex</text><text class="sub" x="785" y="220" text-anchor="middle">CLI</text></g>
+            <g class="node" data-node="codex" tabindex="0" role="button" aria-label="Codex CLI"><rect x="755" y="165" width="60" height="80"/><text x="785" y="199" text-anchor="middle">Codex</text><text class="sub" x="785" y="220" text-anchor="middle">exec · stdio</text></g>
             <g class="node" data-node="slack" tabindex="0" role="button" aria-label="Slack API"><rect x="755" y="255" width="60" height="80"/><text x="785" y="289" text-anchor="middle">Slack</text><text class="sub" x="785" y="310" text-anchor="middle">API</text></g>
             <g class="node" data-node="superloop" tabindex="0" role="button" aria-label="Independent Superloop subsystem"><rect x="260" y="420" width="190" height="65"/><text x="355" y="449" text-anchor="middle">Superloop CLI</text><text class="sub" x="355" y="469" text-anchor="middle">independent subsystem</text></g>
           </svg>
@@ -389,7 +389,7 @@
         </div>
       </section>
 
-      <section id="flows" data-search="runtime flow ticket authentication ai pipeline router selector specialist publication slack delivery outbox superloop">
+      <section id="flows" data-search="runtime flow ticket authentication ai pipeline router selector specialist publication app-server steering slack delivery outbox superloop">
         <div class="section-head">
           <div><div class="eyebrow">02 · Behavior</div><h2>Follow a runtime flow</h2></div>
           <p>Switch flows, then select any step for its transaction boundary, safety mechanism, or durable output.</p>
@@ -414,7 +414,7 @@
         <div class="module-grid" id="moduleGrid"></div>
       </section>
 
-      <section id="data" data-search="data model entities tables users sessions tickets messages attachments ai runs steps drafts integration events targets slack system state">
+      <section id="data" data-search="data model entities tables users sessions tickets messages attachments ai runs steps codex conversations turns steering drafts integration events targets slack system state">
         <div class="section-head">
           <div><div class="eyebrow">04 · Persistence</div><h2>Data relationship explorer</h2></div>
           <p>PostgreSQL is both the system of record and queue. Select a domain, then an entity to inspect its role and nearest relationships.</p>
@@ -436,7 +436,7 @@
           <details data-search="publication policy confidence risk auto publish human review"><summary>Model output is not publication authority</summary><div>Pydantic validates structure; the registry validates eligibility; publication policy separately checks route allowance, confidence, risk, and reply presence. Unsafe recommendations are downgraded to draft or manual review.</div></details>
           <details data-search="filesystem workspace audit artifacts uploads atomicity"><summary>Two coordinated durable stores</summary><div>PostgreSQL owns business state; disk owns bytes and AI evidence. Routes clean up files when SQL fails, but there is no cross-resource transaction. Shared, persistent storage is therefore a deployment requirement.</div></details>
           <details data-search="security csrf cookie sandbox markdown slack encryption"><summary>Defense in depth</summary><div>Opaque hashed sessions, two-stage CSRF, role/ownership checks, safe redirects, sanitized Markdown, generated attachment paths, schema-constrained output, read-only Codex, and encrypted Slack tokens protect different trust boundaries.</div></details>
-          <details data-search="reliability heartbeat recovery stale fingerprint requeue idempotency"><summary>Stale-work protection</summary><div>One active AI run per ticket, deferred requeue, input fingerprints, worker ownership, heartbeats, recovery lineage, outbox dedupe keys, delivery claims, and dead letters prevent stale or duplicate effects.</div></details>
+          <details data-search="reliability heartbeat recovery stale fingerprint requeue steering app-server idempotency"><summary>Stale-work protection</summary><div>One active AI run per ticket, deferred requeue, input fingerprints, worker ownership, app-server steering receipts, completion fences, heartbeats, recovery lineage, outbox dedupe keys, delivery claims, and dead letters prevent stale or duplicate effects.</div></details>
           <details data-search="hotspots routes ops ticketing step runner slack delivery superloop maintainability"><summary>Change-risk hotspots</summary><div>The largest coordination modules are <code>app/routes_ops.py</code>, <code>shared/ticketing.py</code>, <code>worker/step_runner.py</code>, <code>worker/slack_delivery.py</code>, and <code>superloop/superloop.py</code>. Changes there cross multiple state or infrastructure boundaries.</div></details>
         </div>
         <div class="boundary-note"><strong>Separate product boundary:</strong> <code>superloop/</code> is a co-located development-orchestration CLI. It has no imports, database tables, or runtime calls connecting it to the AutoSac web/worker application.</div>
@@ -454,11 +454,12 @@
           <a class="doc-card" href="runtime-flows.md"><b>Runtime flows</b><span>Auth, tickets, AI, recovery, Slack and Superloop sequences.</span><em>OPEN REPORT →</em></a>
           <a class="doc-card" href="deployment-and-operations.md"><b>Deployment & operations</b><span>Configuration, security, reliability, topology and quality.</span><em>OPEN REPORT →</em></a>
           <a class="doc-card" href="source-traceability.md"><b>Source traceability</b><span>Claims mapped to implementation evidence and known caveats.</span><em>OPEN REPORT →</em></a>
+          <a class="doc-card" href="codex-active-turn-steering-plan.md"><b>Active-turn steering</b><span>Approved app-server specialist flow, delivery receipts, fencing, recovery and rollout gates.</span><em>OPEN PLAN →</em></a>
         </div>
         <div class="no-results">No architecture items match this search.</div>
       </section>
 
-      <footer>AutoSac Architecture Atlas · standalone, dependency-free HTML · source snapshot <code>22af53a</code></footer>
+      <footer>AutoSac Architecture Atlas · standalone, dependency-free HTML · source snapshot <code>current working tree</code></footer>
     </main>
   </div>
 
@@ -473,10 +474,10 @@
         browser: { kind: "Actor boundary", title: "Browser users", text: "Requesters and operations users interact through server-rendered HTML forms and HTMX fragments. There is no separate SPA or public JSON API.", items: ["Requester: owned public ticket thread", "Dev/TI: global queue and review", "Admin: users and Slack configuration"] },
         scripts: { kind: "Operator boundary", title: "Lifecycle scripts", text: "Command-line tools own bootstrap, migrations, readiness, local accounts, and service startup.", items: ["Deterministic workspace bootstrap", "Alembic schema lifecycle", "Separate or combined process startup"] },
         web: { kind: "Runtime process", title: "FastAPI web", text: "Owns HTTP interaction and synchronous domain transactions. It renders Jinja templates, enforces auth/CSRF/roles, writes uploads, and emits integration outbox rows with ticket changes.", items: ["app routes → shared domain services", "Structured request logging", "Liveness and strict readiness"] },
-        worker: { kind: "Runtime process", title: "Background worker", text: "Claims durable AI runs and hosts three daemon loops for heartbeat, Slack directory sync, and Slack DM delivery.", items: ["One AI run at a time per process", "Ownership and stale-run recovery", "Registry-driven Codex steps"] },
-        db: { kind: "System of record", title: "PostgreSQL", text: "Stores domain state, sessions, structured AI history, integration events, and operational snapshots. It is also the concurrency and queue coordination layer.", items: ["UUID + JSONB + sequence", "FOR UPDATE SKIP LOCKED", "Partial active-run uniqueness"] },
+        worker: { kind: "Runtime process", title: "Background worker", text: "Claims durable AI runs and hosts three daemon loops for heartbeat, Slack directory sync, and Slack DM delivery.", items: ["One AI run at a time per process", "Ownership and stale-run recovery", "Router/selector exec plus persistent specialists"] },
+        db: { kind: "System of record", title: "PostgreSQL", text: "Stores domain state, sessions, structured AI history, Codex conversation custody, integration events, and operational snapshots. It is also the concurrency and queue coordination layer.", items: ["UUID + JSONB + sequence", "FOR UPDATE SKIP LOCKED", "AI run and Codex turn uniqueness"] },
         workspace: { kind: "Durable filesystem", title: "Triage workspace", text: "Holds the read-only evidence mounts, uploaded attachment bytes, bootstrapped skills, and per-step AI audit artifacts.", items: ["app/ and manuals/ evidence", "attachments_store/<ticket>/", "runs/<ticket>/<run>/"] },
-        codex: { kind: "External execution", title: "Codex CLI", text: "Receives prompts on stdin and returns schema-constrained JSON. It runs with approval disabled, a read-only sandbox, and web search disabled.", items: ["Router / selector / specialist", "Optional image inputs", "Prompt, streams and final JSON retained"] },
+        codex: { kind: "External execution", title: "Codex CLI", text: "Receives prompts through ephemeral exec for router/selector and through specialist persistent exec or app-server stdio behind rollout flags. It runs with approval disabled, a read-only sandbox, and web search disabled.", items: ["Router and selector stay on exec", "Persistent specialist native thread", "Prompt, streams, protocol items and final JSON retained"] },
         slack: { kind: "External integration", title: "Slack Web API", text: "Supports token validation, exact-email directory sync, DM conversation opening, and message delivery.", items: ["auth.test + users.list", "conversations.open", "chat.postMessage"] },
         superloop: { kind: "Independent subsystem", title: "Superloop CLI", text: "Runs verifier-gated plan, implement, and test Codex loops against a target Git repository. It is not part of AutoSac runtime.", items: ["Filesystem event and decision state", "Persistent per-phase Codex sessions", "Git-backed checkpoints by default"] }
       };
@@ -501,7 +502,8 @@
             ["Claim", "Own the run", "Oldest pending row via SKIP LOCKED.", "The worker stamps PID, instance ID, start time, and heartbeat before leaving the claim transaction."],
             ["Guard", "Fingerprint input", "Skip duplicate work; detect stale publication.", "Requester-visible title, urgency, status, public messages, and attachment hashes form the SHA-256 fingerprint."],
             ["Step 1", "Route", "Choose an enabled target eligible for requester role.", "The router output is checked by both Pydantic and the registry."],
-            ["Step 2/3", "Select & specialize", "Fixed specialist or automatic human-assist selection.", "Each step gets its own prompt, schema, streams, output JSON, database row, and manifest."],
+            ["Step 2/3", "Select & specialize", "Fixed specialist or automatic human-assist selection.", "Router and selector always use ephemeral exec; persistent specialists can use app-server stdio behind rollout flags."],
+            ["Fence", "Close active turn", "App-server specialists wait for the matching turn/completed.", "Accepted steering receipts become turn inputs; ambiguous receipts or unseen authorized content block publication."],
             ["Policy", "Authorize output", "Confidence + risk + route policy.", "A model's auto-publish recommendation can be downgraded; it cannot bypass the route-target policy."],
             ["Effect", "Publish or review", "Public reply, pending draft, or manual queue.", "Before mutation, the worker reloads input. Changed or requeued work supersedes the result instead of publishing stale content."]
           ]
@@ -549,6 +551,9 @@
         ["worker", "worker.main + queue", "Worker threads, oldest-first run claims, heartbeat and stale-run recovery.", "triage · Slack loops"],
         ["worker", "worker.triage", "Input fingerprint, pipeline execution, stale-result guard and ticket/run finalization.", "pipeline · publication · ticketing"],
         ["worker", "worker.pipeline", "Router, optional selector and specialist orchestration including forced synthetic routing.", "registry · step_runner"],
+        ["worker", "worker.codex_inputs", "Canonical persistent input events, strict unseen deltas, attachment-bundle custody and causal deduplication.", "ticket loader · Codex turns"],
+        ["worker", "worker.persistent_codex", "Persistent specialist sessions, leases, exec/app-server selection, steering receipts, completion fences and recovery.", "pipeline · codex_app_server", true],
+        ["worker", "worker.codex_app_server", "Run-scoped app-server stdio client with JSON-RPC correlation, turn start/steer, protocol items and bounded cleanup.", "persistent_codex · Codex CLI"],
         ["worker", "worker.step_runner", "Attachment materialization, prompt/schema artifacts, Codex subprocess, validation and manifests.", "output contracts · artifacts", true],
         ["worker", "worker.output_contracts + publication_policy", "Typed output boundary and independent confidence/risk publication authorization.", "Pydantic · registry"],
         ["worker", "worker.slack_delivery", "Slack preflight, claim, rendering, error classification, retry, dead letter and stale-lock recovery.", "integrations · slack_dm", true],
@@ -568,6 +573,15 @@
           ["TicketAttachment", "ticket_attachments", "File metadata and durable path; bytes live in the filesystem.", ["belongs to TicketMessage and Ticket"]],
           ["TicketStatusHistory", "ticket_status_history", "Append-oriented from/to state audit with actor and note.", ["belongs to Ticket", "may link IntegrationEvent"]],
           ["TicketView", "ticket_views", "Per-user last-viewed marker for unread state.", ["composite key User + Ticket"]]
+        ],
+        codex: [
+          ["CodexConversation", "codex_conversations", "One logical persistent Codex conversation per ticket.", ["belongs to Ticket", "has sessions and turns"]],
+          ["CodexSession", "codex_sessions", "Native thread segment and worker lease state for persistent specialist execution.", ["belongs to CodexConversation", "executes CodexTurns"]],
+          ["CodexTurn", "codex_turns", "Persistent specialist turn with transport kind, native turn ID, completion fence and effective input hash.", ["belongs to AIRun, conversation and session", "has inputs, items, outcomes and steer receipts"]],
+          ["CodexTurnInput", "codex_turn_inputs", "Ordered input events accepted by a native turn.", ["belongs to CodexTurn", "dedupe key custody"]],
+          ["CodexTurnSteer", "codex_turn_steers", "Prepared/sending/accepted/rejected/ambiguous delivery receipts for active-turn steering.", ["belongs to CodexTurn", "unique turn + dedupe key"]],
+          ["CodexTurnItem", "codex_turn_items", "Bounded protocol and native item artifacts observed during persistent execution.", ["belongs to CodexTurn"]],
+          ["CodexTurnOutcome", "codex_turn_outcomes", "Append-only lifecycle, acceptance, completion, recovery, supersession and publication outcomes.", ["belongs to CodexTurn"]]
         ],
         ai: [
           ["AIRun", "ai_runs", "Durable queue row, worker ownership, input hash, recovery lineage and final structured output.", ["belongs to Ticket", "has ordered AIRunSteps", "produces messages/drafts"]],
@@ -668,7 +682,7 @@
         }));
         renderModules();
 
-        const groupLabels = {auth: "Identity & access", ticket: "Ticket core", ai: "AI pipeline", integration: "Integration & ops"};
+        const groupLabels = {auth: "Identity & access", ticket: "Ticket core", codex: "Codex custody", ai: "AI pipeline", integration: "Integration & ops"};
         $("#entityGroups").innerHTML = Object.entries(groupLabels).map(([key, value], i) => `<button class="filter${i === 0 ? " active" : ""}" data-group="${key}">${value}</button>`).join("");
         $$("#entityGroups .filter").forEach(button => button.addEventListener("click", () => renderEntityGroup(button.dataset.group)));
         renderEntityGroup("auth");

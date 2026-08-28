@@ -47,7 +47,7 @@ flowchart LR
     WEB -->|write/read uploads| FS[(Persistent triage workspace)]
     WORKER[AutoSac worker] -->|claim/update runs and events| DB
     WORKER -->|read tickets and attachments; write run artifacts| FS
-    WORKER -->|subprocess, JSON schema, read-only sandbox| CODEX[Codex CLI / model service]
+    WORKER -->|exec and app-server stdio, JSON schema, read-only sandbox| CODEX[Codex CLI / model service]
     WORKER -->|auth.test, users.list, conversations.open, chat.postMessage| SLACK[Slack Web API]
     ADMIN[Administrator CLI] -->|users, migrations, bootstrap| DB
     ADMIN -->|workspace bootstrap| FS
@@ -70,11 +70,15 @@ flowchart TB
     subgraph Worker_Process[Worker process]
       POLLER[AI run poller and stale recovery]
       PIPELINE[Router / selector / specialist pipeline]
-      CODEX_RUNNER[Codex subprocess execution]
+      CODEX_RUNNER[Codex exec step runner]
+      PERSISTENT[Persistent specialist adapter]
+      APP_SERVER[Run-scoped app-server stdio client]
       SLACK_SYNC[Slack user sync thread]
       SLACK_DELIVERY[Slack delivery thread]
       HEARTBEAT[Heartbeat thread]
-      POLLER --> PIPELINE --> CODEX_RUNNER
+      POLLER --> PIPELINE
+      PIPELINE --> CODEX_RUNNER
+      PIPELINE --> PERSISTENT --> APP_SERVER
     end
 
     DB[(PostgreSQL)]
@@ -136,7 +140,7 @@ Bootstrap copies each versioned agent skill into `.agents/skills/<skill-id>/SKIL
 | Dependency | Purpose | Interaction |
 | --- | --- | --- |
 | PostgreSQL | Primary data store and queues | SQLAlchemy + psycopg; Alembic migrations |
-| Codex CLI | Structured ticket analysis | Local subprocess, stdin prompt, JSONL stdout, schema-constrained final file |
+| Codex CLI | Structured ticket analysis | Router/selector use ephemeral exec; persistent specialists can use legacy exec or run-scoped `app-server --stdio`; all paths keep read-only sandboxing, web search disabled, and schema-constrained output |
 | Model service | Model inference behind Codex CLI | Authentication through CLI login or `CODEX_API_KEY` |
 | Slack Web API | DM notifications and user-ID synchronization | `auth.test`, `users.list`, `conversations.open`, `chat.postMessage` over `httpx` |
 | Persistent disk | Uploads, workspace contract, run artifacts | Direct filesystem access by web and worker |
@@ -163,7 +167,9 @@ flowchart LR
 
 Current enabled direct-AI targets are support, access/configuration, data operations, bug, feature, business analyst, software architect, and software/data engineer. `manual_review` is an enabled human-assist target with automatic specialist selection. `unknown` is retained disabled for historical compatibility. The software/data-engineer specialist is restricted to `dev_ti` and `admin` requesters.
 
-Publication is a separate policy decision after model output validation. An `auto_publish` recommendation is accepted only when the route target permits it, response confidence meets the target threshold, risk does not exceed the target maximum, and a public reply is present. Otherwise it is safely downgraded to draft or manual handling.
+Publication is a separate policy decision after model output validation. An `auto_publish` recommendation is accepted only when the route target permits it, response confidence meets the target threshold, risk does not exceed the target maximum, and a public reply is present. Otherwise it is safely downgraded to draft or manual handling. App-server persistent specialist results have an additional completion fence: output is publishable only after the matching `turn/completed`, no ambiguous steering receipt remains, no newer authorized content is unseen, and the ticket workflow state is still compatible.
+
+Persistent conversations are specialist-only. When `CODEX_CONVERSATIONS_ENABLED=true`, each ticket has at most one active Codex conversation/session lease. When `CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED=true`, only specialist execution starts a run-owned `codex app-server --stdio` process with `CODEX_HOME` resolved to the shared AutoSac Codex home. When `CODEX_ACTIVE_TURN_STEERING_ENABLED=true`, compatible AI Triage content can be appended to the active native turn through `turn/steer`; waiting/resolved operator replies remain dormant future context and do not schedule or steer AI work.
 
 ## 7. Independent Superloop subsystem
 
@@ -194,4 +200,3 @@ Its architecture is documented further in the module catalog and runtime flows.
 - Attachments are written after database mutations are prepared; route handlers must clean up files on transaction failure. Database/filesystem atomicity is therefore managed in application code, not by a single transaction manager.
 - The combined PaaS script runs web and worker in one service; scaling that service horizontally also scales both worker polling and web capacity together.
 - Superloop’s implementation is concentrated in a single large module and uses filesystem/Git state instead of the AutoSac database.
-

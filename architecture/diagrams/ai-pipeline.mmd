@@ -6,8 +6,19 @@ flowchart LR
     TARGET -->|auto| SELECTOR[Selector step]
     SELECTOR --> SPECIALIST
     TARGET -->|none| HANDOFF[Human handoff]
-    SPECIALIST --> POLICY[Validate publication policy]
+    SPECIALIST --> TRANSPORT{Persistent conversations enabled?}
+    TRANSPORT -->|no| EXEC[Ephemeral codex exec]
+    TRANSPORT -->|yes| PERSIST[Persistent specialist adapter]
+    PERSIST --> APP_SERVER{App-server transport enabled?}
+    APP_SERVER -->|no| PEXEC[Persistent codex exec]
+    APP_SERVER -->|yes| STDIO[Run-scoped app-server stdio]
+    STDIO --> STEER{Active steering enabled?}
+    STEER -->|yes| CUSTODY[Strict unseen steer receipts]
+    STEER -->|no| FENCE[turn/completed fence]
+    CUSTODY --> FENCE
+    EXEC --> POLICY[Validate publication policy]
+    PEXEC --> POLICY
+    FENCE --> POLICY
     POLICY -->|auto_publish| PUBLIC[Public reply and succeeded]
     POLICY -->|draft_for_human| DRAFT[Draft and human_review]
     POLICY -->|manual_only| HUMAN[Internal note and human_review]
-

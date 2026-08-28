@@ -1,6 +1,6 @@
 # AutoSac architecture report
 
-This report documents the implemented architecture of the repository at commit `22af53afb980e4fbfff3cc9c05af979707fd2ade` (2026-05-19). It is based on the source code, configuration, migrations, templates, tests, and deployment scripts in the repository; planning documents are treated as context rather than as proof of implemented behavior.
+This report documents the implemented architecture of the current working tree. It is based on the source code, configuration, migrations, templates, tests, and deployment scripts in the repository; planning documents are treated as context unless explicitly marked implementation-ready and reflected in source.
 
 For a visual, searchable, and interactive entry point, open the dependency-free [Architecture Atlas](index.html) directly in a browser.
 
@@ -15,11 +15,12 @@ For a visual, searchable, and interactive entry point, open the dependency-free 
 | [Deployment and operations](deployment-and-operations.md) | Configuration, startup, readiness, observability, security controls, failure handling, deployment shapes, and testing |
 | [Source traceability](source-traceability.md) | Architectural claims mapped to their primary implementation files and known documentation caveats |
 
-## Proposed evolution
+## Active implementation notes
 
-The implemented architecture above remains the source-of-truth report for commit `22af53a`. The following document is a forward-looking implementation plan and must not be read as current behavior:
+Persistent Codex conversation support and app-server active-turn steering are implemented behind default-off rollout flags. These documents capture the approved scope and the implementation constraints that the current code follows:
 
 - [Persistent Codex conversation plan](persistent-codex-conversation-plan.md) — one append-only Codex conversation per ticket, retained turn history, per-turn structured output, publication metadata, conversation UI, migration, and rollout plan.
+- [Codex active-turn steering plan](codex-active-turn-steering-plan.md) — run-scoped `codex app-server --stdio` specialist transport, strict unseen-content steering, delivery receipts, completion/publication fencing, recovery, rollout gates, and unchanged router/selector paths.
 
 Standalone Mermaid sources are in [`diagrams/`](diagrams/):
 
@@ -44,7 +45,7 @@ The repository also contains Superloop, a standalone development-orchestration C
 - Database-backed asynchronous work queues using row locks and `SKIP LOCKED`; no external broker.
 - Server-rendered HTML with Jinja2 and HTMX fragments; no separate SPA or public JSON API.
 - Registry-driven AI routing and publication policy, with versioned prompt/skill specifications.
-- Read-only Codex execution with web search disabled and schema-constrained JSON output.
+- Read-only Codex execution with web search disabled and schema-constrained JSON output. Router and selector remain on ephemeral `codex exec`; persistent specialists can use either the legacy exec transport or the default-off run-scoped app-server transport.
 - Transactional ticket mutations coupled to an outbox-style integration event model.
 - Defense-in-depth around auth tokens, CSRF, role checks, path validation, output validation, stale-lock recovery, and worker ownership.
 - PostgreSQL-specific persistence through JSONB, UUID, partial indexes, and sequences.
@@ -60,6 +61,8 @@ Browser
 Worker process
   -> PostgreSQL AI-run queue
   -> Codex CLI in triage workspace
+       -> router/selector ephemeral exec
+       -> specialist persistent exec or app-server stdio
   -> run artifact store
   -> Slack Web API
 

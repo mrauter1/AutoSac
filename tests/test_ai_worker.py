@@ -658,6 +658,231 @@ class _FakePersistentScalarResult:
         return self._value
 
 
+class _SteeringResult:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def all(self):
+        return list(self._rows)
+
+    def scalar_one(self):
+        if not self._rows:
+            raise AssertionError("expected one row")
+        return self._rows[0]
+
+    def scalar_one_or_none(self):
+        return self._rows[0] if self._rows else None
+
+    def scalars(self):
+        return self
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class _SteeringDb:
+    def __init__(self, *, run, session, turn, step, ticket):
+        self.run = run
+        self.session = session
+        self.turn = turn
+        self.step = step
+        self.ticket = ticket
+        self.receipts = []
+        self.inputs = []
+        self.outcomes = []
+        self.added = []
+        self.flush_calls = 0
+
+    def add(self, item):
+        self.added.append(item)
+        name = item.__class__.__name__
+        if name == "CodexTurnSteer":
+            self.receipts.append(item)
+        elif name == "CodexTurnInput":
+            self.inputs.append(item)
+        elif name == "CodexTurnOutcome":
+            self.outcomes.append(item)
+
+    def _criterion_value(self, statement, column_name: str):
+        for criterion in getattr(statement, "_where_criteria", ()):
+            left = getattr(criterion, "left", None)
+            right = getattr(criterion, "right", None)
+            if getattr(left, "name", None) == column_name and hasattr(right, "value"):
+                return right.value
+        return None
+
+    def flush(self):
+        self.flush_calls += 1
+
+    def get(self, model, key):
+        name = getattr(model, "__name__", "")
+        if name == "AIRun" and key == self.run.id:
+            return self.run
+        if name == "Ticket" and key == self.ticket.id:
+            return self.ticket
+        if name == "CodexConversation":
+            return SimpleNamespace(id=self.turn.conversation_id, status="active")
+        return None
+
+    def execute(self, statement):
+        descriptions = statement.column_descriptions if getattr(statement, "column_descriptions", None) else []
+        first = descriptions[0] if descriptions else {}
+        name = first.get("name")
+        entity = first.get("entity")
+        entity_name = getattr(entity, "__name__", "")
+        query_text = str(statement)
+        if entity_name == "AIRun":
+            return _SteeringResult([self.run])
+        if entity_name == "Ticket":
+            return _SteeringResult([self.ticket])
+        if entity_name == "CodexTurn":
+            return _SteeringResult([self.turn])
+        if entity_name == "CodexTurnSteer":
+            if "codex_turn_steers.status IN" in query_text:
+                return _SteeringResult([receipt for receipt in self.receipts if receipt.status in {"prepared", "sending"}])
+            receipt_id = self._criterion_value(statement, "id")
+            dedupe_key = self._criterion_value(statement, "dedupe_key")
+            rows = self.receipts
+            if receipt_id is not None:
+                rows = [receipt for receipt in rows if receipt.id == receipt_id]
+            if dedupe_key is not None:
+                rows = [receipt for receipt in rows if receipt.dedupe_key == dedupe_key]
+            return _SteeringResult(rows[:1])
+        if name == "dedupe_key":
+            return _SteeringResult([(receipt.dedupe_key,) for receipt in self.receipts])
+        if name == "id":
+            dedupe_key = self._criterion_value(statement, "dedupe_key")
+            rows = self.inputs
+            if dedupe_key is not None:
+                rows = [item for item in rows if item.dedupe_key == dedupe_key]
+            return _SteeringResult([rows[0].id] if rows else [])
+        if name == "coalesce":
+            return _FakePersistentScalarResult(max((item.input_index for item in self.inputs), default=0))
+        if name == "event_kind":
+            return _SteeringResult(
+                [
+                    (item.event_kind, item.source_kind, item.source_id, item.dedupe_key, item.payload_json)
+                    for item in sorted(self.inputs, key=lambda item: item.input_index)
+                ]
+            )
+        return _SteeringResult([])
+
+
+def _steering_attachment(path: Path, *, is_image: bool, size_bytes: int | None = None, mime_type: str | None = None):
+    return {
+        "attachment_id": str(uuid.uuid4()),
+        "message_id": str(uuid.uuid4()),
+        "visibility": "public",
+        "original_filename": path.name,
+        "mime_type": mime_type or ("image/png" if is_image else "application/pdf"),
+        "sha256": "sha-test",
+        "size_bytes": path.stat().st_size if size_bytes is None and path.exists() else size_bytes,
+        "width": 10 if is_image else None,
+        "height": 10 if is_image else None,
+        "representation_status": "supported",
+        "representation_errors": (),
+        "safe_input": {
+            "kind": "file_path",
+            "stored_path": str(path),
+            "is_image": is_image,
+        },
+    }
+
+
+def _steering_event(
+    body: str = "Need this in the active turn.",
+    *,
+    source_id=None,
+    supported: bool = True,
+    attachments=(),
+    author_type: str = "dev_ti",
+    visibility: str = "internal",
+    source: str = "human_internal_note",
+):
+    source_id = source_id or uuid.uuid4()
+    return SimpleNamespace(
+        event_kind="ticket_message",
+        source_kind="ticket_message",
+        source_id=source_id,
+        dedupe_key=f"ticket-message:{source_id}",
+        payload_json={
+            "message_id": str(source_id),
+            "dedupe_key": f"ticket-message:{source_id}",
+            "ticket_id": str(uuid.uuid4()),
+            "author_type": author_type,
+            "visibility": visibility,
+            "source": source,
+            "body_text": body,
+            "body": {"text": body, "markdown": body},
+            "attachments": tuple(attachments),
+            "bundle": {
+                "logical_input": "ticket_message_with_attachments",
+                "attachment_count": len(tuple(attachments)),
+                "representation_status": "supported" if supported else "unsupported",
+                "representation_errors": () if supported else ("unsupported_attachment",),
+            },
+            "causal": {"ai_run_id": None, "codex_turn_outcome_id": None},
+        },
+        order_key=(2, str(source_id)),
+    )
+
+
+def _steering_runtime(persistent_codex, prepared, *, ticket_status: str = "ai_triage"):
+    persistent = persistent_codex.PreparedPersistentSpecialistStep(
+        step_id=uuid.uuid4(),
+        turn_id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        command_spec=persistent_codex.PersistentCommandSpec(
+            command=["codex", "app-server", "--stdio"],
+            env={},
+            runtime_codex_home=Path("/tmp/codex-home"),
+            resumed=False,
+        ),
+        transport_kind="app_server",
+        stored_thread_id="thread-1",
+        pending_events=(),
+        effective_input_hash="initial-hash",
+    )
+    run = SimpleNamespace(
+        id=prepared.run_id,
+        ticket_id=prepared.ticket_id,
+        status="running",
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+        last_heartbeat_at=None,
+    )
+    session = SimpleNamespace(
+        id=persistent.session_id,
+        thread_id="thread-1",
+        lease_owner_run_id=prepared.run_id,
+        lease_worker_instance_id=prepared.worker_instance_id,
+        lease_heartbeat_at=None,
+        lease_expires_at=None,
+    )
+    turn = SimpleNamespace(
+        id=persistent.turn_id,
+        conversation_id=persistent.conversation_id,
+        status="running",
+        native_turn_id="turn-1",
+        steering_closed_at=None,
+        effective_input_hash="initial-hash",
+    )
+    step = SimpleNamespace(id=persistent.step_id)
+    ticket = SimpleNamespace(
+        id=prepared.ticket_id,
+        status=ticket_status,
+        requeue_requested=True,
+        requeue_trigger="ticket_content",
+        requeue_source_message_id=None,
+        requeue_requested_by_user_id=uuid.uuid4(),
+        requeue_forced_route_target_id=None,
+        requeue_forced_specialist_id=None,
+        updated_at=None,
+    )
+    return persistent, run, session, turn, step, ticket
+
+
 def _prepare_persistent_test_step(tmp_path: Path, *, timeout_seconds: float | None = None):
     symbols = _load_worker_symbols()
     settings = Settings(**{**_make_settings(tmp_path).__dict__, "codex_conversations_enabled": True})
@@ -680,6 +905,13 @@ def _prepare_persistent_test_step(tmp_path: Path, *, timeout_seconds: float | No
 
 
 def _persistent_step_for_test(persistent_codex, tmp_path: Path, *, resumed: bool = False):
+    event = SimpleNamespace(
+        event_kind="ticket_message",
+        source_kind="ticket_message",
+        source_id=uuid.uuid4(),
+        dedupe_key=f"ticket-message:{uuid.uuid4()}",
+        payload_json={"body_text": "accepted"},
+    )
     return persistent_codex.PreparedPersistentSpecialistStep(
         step_id=uuid.uuid4(),
         turn_id=uuid.uuid4(),
@@ -691,6 +923,10 @@ def _persistent_step_for_test(persistent_codex, tmp_path: Path, *, resumed: bool
             runtime_codex_home=tmp_path / ".codex" / "ticket-prod",
             resumed=resumed,
         ),
+        transport_kind="exec",
+        stored_thread_id="thread-1" if resumed else None,
+        pending_events=(event,),
+        effective_input_hash="test-input-hash",
     )
 
 
@@ -1065,18 +1301,7 @@ def test_persistent_stdout_event_persists_thread_started_immediately(monkeypatch
         router_result=router_result,
         target_route_target_id="support",
     )
-    persistent = persistent_codex.PreparedPersistentSpecialistStep(
-        step_id=uuid.uuid4(),
-        turn_id=uuid.uuid4(),
-        conversation_id=uuid.uuid4(),
-        session_id=uuid.uuid4(),
-        command_spec=persistent_codex.PersistentCommandSpec(
-            command=["codex", "exec"],
-            env={},
-            runtime_codex_home=tmp_path / ".codex" / "ticket-prod",
-            resumed=False,
-        ),
-    )
+    persistent = _persistent_step_for_test(persistent_codex, tmp_path)
     run = SimpleNamespace(id=prepared.run_id, last_heartbeat_at=None)
     session = SimpleNamespace(
         id=persistent.session_id,
@@ -1099,6 +1324,7 @@ def test_persistent_stdout_event_persists_thread_started_immediately(monkeypatch
         yield fake_db
 
     monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.codex_app_server.session_scope", fake_session_scope)
     monkeypatch.setattr(
         persistent_codex,
         "_load_locked_owned_runtime_records",
@@ -1134,7 +1360,1689 @@ def test_persistent_stdout_event_persists_thread_started_immediately(monkeypatch
     assert state.accepted is True
     assert state.next_item_index == 3
     assert fake_db.added[0].item_kind == "thread.started"
-    assert captured == [("accepted", {"event_type": "turn.started", "thread_id": "thread-1"})]
+    assert captured == [
+        (
+            "accepted",
+            {
+                "event_type": "turn.started",
+                "thread_id": "thread-1",
+                "native_turn_id": None,
+                "effective_input_hash": "test-input-hash",
+            },
+        )
+    ]
+
+
+def test_app_server_persistent_specialist_starts_accepts_inputs_once_and_completes(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+    from worker.codex_inputs import hash_input_events
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+        }
+    )
+    events = (
+        SimpleNamespace(
+            event_kind="ticket_state_snapshot",
+            source_kind="ticket",
+            source_id=prepared.ticket_id,
+            dedupe_key="ticket-state:1",
+            payload_json={"status": "ai_triage"},
+        ),
+        SimpleNamespace(
+            event_kind="ticket_message",
+            source_kind="ticket_message",
+            source_id=uuid.uuid4(),
+            dedupe_key="ticket-message:1",
+            payload_json={"body_text": "Please continue."},
+        ),
+    )
+    effective_input_hash = hash_input_events(events)
+    persistent = persistent_codex.PreparedPersistentSpecialistStep(
+        step_id=uuid.uuid4(),
+        turn_id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        command_spec=persistent_codex.PersistentCommandSpec(
+            command=["codex", "app-server", "--stdio"],
+            env={},
+            runtime_codex_home=settings.resolved_codex_home,
+            resumed=False,
+        ),
+        transport_kind="app_server",
+        stored_thread_id=None,
+        pending_events=events,
+        effective_input_hash=effective_input_hash,
+    )
+    run = SimpleNamespace(id=prepared.run_id, last_heartbeat_at=None)
+    session = SimpleNamespace(
+        id=persistent.session_id,
+        lease_owner_run_id=prepared.run_id,
+        lease_worker_instance_id=prepared.worker_instance_id,
+        thread_id=None,
+        status="pending",
+        started_at=None,
+        lease_heartbeat_at=None,
+        lease_expires_at=None,
+        lease_acquired_at=None,
+    )
+    turn = SimpleNamespace(
+        id=persistent.turn_id,
+        accepted_at=None,
+        native_turn_id=None,
+        effective_input_hash=None,
+        transport_kind="app_server",
+        steering_closed_at=None,
+        status="running",
+        ended_at=None,
+    )
+    step = SimpleNamespace(id=persistent.step_id, ended_at=None, status="running", output_json=None, error_text=None)
+
+    class AppServerDb:
+        def __init__(self):
+            self.inputs = []
+            self.items = []
+            self.added = []
+            self.accepted_outcomes = 0
+
+        def add(self, item):
+            self.added.append(item)
+            if item.__class__.__name__ == "CodexTurnInput":
+                self.inputs.append(item)
+            elif item.__class__.__name__ == "CodexTurnItem":
+                self.items.append(item)
+
+        def execute(self, statement):
+            descriptions = statement.column_descriptions
+            first_name = descriptions[0]["name"]
+            entity = descriptions[0].get("entity")
+            entity_name = getattr(entity, "__name__", "")
+            if first_name == "dedupe_key":
+                return _FakeWorkerStateResult([(item.dedupe_key,) for item in self.inputs])
+            if first_name == "event_kind":
+                return _FakeWorkerStateResult(
+                    [
+                        (item.event_kind, item.source_kind, item.source_id, item.dedupe_key, item.payload_json)
+                        for item in self.inputs
+                    ]
+                )
+            if first_name == "count" or "count" in first_name:
+                return _FakePersistentScalarResult(self.accepted_outcomes)
+            if entity_name == "Ticket":
+                return _FakeWorkerStateResult([SimpleNamespace(id=prepared.ticket_id, status="ai_triage")])
+            if entity_name == "CodexTurnSteer":
+                return _FakeWorkerStateResult([])
+            return _FakeWorkerStateResult([])
+
+        def get(self, model, key):
+            return SimpleNamespace(id=persistent.conversation_id, status="active")
+
+    fake_db = AppServerDb()
+    outcomes = []
+    calls = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    class FakeAppServerClient:
+        def __init__(self, *args, on_protocol_item=None, on_thread_id=None, on_turn_id=None, **kwargs):
+            self.on_protocol_item = on_protocol_item
+            self.on_thread_id = on_thread_id
+            self.on_turn_id = on_turn_id
+            self.stderr_text = ""
+            self.process = SimpleNamespace(poll=lambda: 0)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def initialize(self, *, timeout_seconds=None):
+            calls.append(("initialize", timeout_seconds))
+            return {}
+
+        def start_or_resume_thread(self, *, stored_thread_id, prepared, timeout_seconds=None):
+            calls.append(("thread/start", stored_thread_id))
+            assert stored_thread_id is None
+            self.on_thread_id("thread-new")
+            return SimpleNamespace(thread_id="thread-new", resumed=False)
+
+        def start_turn(self, *, thread_id, input_payload, prepared, timeout_seconds=None):
+            calls.append(("turn/start", thread_id, input_payload))
+            self.on_protocol_item(
+                {"method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": "native-turn-1"}}}
+            )
+            self.on_turn_id("native-turn-1")
+            return SimpleNamespace(thread_id=thread_id, turn_id="native-turn-1", response={})
+
+        def supervise_until_completed(self, *, thread_id, turn_id, deadline, on_poll=None, poll_interval_seconds=0.05):
+            calls.append(("supervise", thread_id, turn_id))
+            completed = {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": thread_id,
+                    "turn": {
+                        "id": turn_id,
+                        "status": "completed",
+                        "items": [
+                            {
+                                "type": "agentMessage",
+                                "id": "agent-final",
+                                "phase": "final_answer",
+                                "text": json.dumps(_specialist_payload()),
+                            }
+                        ],
+                    },
+                },
+            }
+            self.on_protocol_item(completed)
+            return completed
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.codex_app_server.session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+
+    def append_outcome(db, *, turn_id, outcome_kind, payload_json):
+        outcomes.append((outcome_kind, payload_json))
+        if outcome_kind == "accepted":
+            fake_db.accepted_outcomes += 1
+
+    monkeypatch.setattr(persistent_codex, "_append_turn_outcome", append_outcome)
+    monkeypatch.setattr(
+        persistent_codex,
+        "prepare_persistent_specialist_step",
+        lambda settings, prepared, prompt_state: persistent,
+    )
+    monkeypatch.setattr(persistent_codex, "CodexAppServerClient", FakeAppServerClient)
+
+    result = persistent_codex.execute_persistent_specialist_step(
+        settings,
+        prepared=prepared,
+        prompt_state=SimpleNamespace(),
+    )
+
+    assert result.output_payload["summary_internal"] == "Requester needs access guidance."
+    assert session.thread_id == "thread-new"
+    assert session.lease_owner_run_id is None
+    assert turn.native_turn_id == "native-turn-1"
+    assert turn.transport_kind == "app_server"
+    assert turn.effective_input_hash == effective_input_hash
+    assert [item.dedupe_key for item in fake_db.inputs] == ["ticket-state:1", "ticket-message:1"]
+    assert len(fake_db.inputs) == 2
+    assert [item.item_kind for item in fake_db.items] == ["turn/started", "turn/completed"]
+    assert [call[0] for call in calls] == ["initialize", "thread/start", "turn/start", "supervise"]
+    assert "turn/steer" not in [call[0] for call in calls]
+    assert [outcome[0] for outcome in outcomes].count("accepted") == 1
+    assert outcomes[-1][0] == "completed"
+
+
+def test_active_turn_steering_accepts_internal_note_clears_matching_escrow(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    event = _steering_event()
+    ticket.requeue_source_message_id = event.source_id
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    class SteeringClient:
+        def __init__(self):
+            self.calls = []
+
+        def steer_turn(self, *, thread_id, expected_turn_id, input_payload, timeout_seconds=None):
+            self.calls.append((thread_id, expected_turn_id, input_payload))
+            return SimpleNamespace(rpc_request_id="rpc-steer-1")
+
+    client = SteeringClient()
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (event,),
+    )
+
+    sent = persistent_codex._attempt_active_steering_once(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        client=client,
+        thread_id="thread-1",
+        native_turn_id="turn-1",
+        deadline=time.monotonic() + 30,
+    )
+
+    assert sent == 1
+    assert len(client.calls) == 1
+    assert [receipt.status for receipt in db.receipts] == ["accepted"]
+    assert db.receipts[0].rpc_request_id == "rpc-steer-1"
+    assert [item.dedupe_key for item in db.inputs] == [event.dedupe_key]
+    assert ticket.requeue_requested is False
+    assert ticket.requeue_trigger is None
+    assert any(outcome.outcome_kind == "accepted" and outcome.payload_json["event_type"] == "turn/steer" for outcome in db.outcomes)
+
+
+def test_active_turn_steering_accepts_text_plus_image_bundle(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    ticket_dir = settings.uploads_dir / "ticket-steer-1"
+    ticket_dir.mkdir(parents=True, exist_ok=True)
+    image_path = ticket_dir / "screenshot.png"
+    image_path.write_bytes(b"png-data")
+    document_path = ticket_dir / "notes.pdf"
+    document_path.write_bytes(b"pdf-data")
+
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    event = _steering_event(
+        "Bundle with evidence.",
+        attachments=(
+            _steering_attachment(image_path, is_image=True),
+            _steering_attachment(document_path, is_image=False, mime_type="application/pdf"),
+        ),
+        visibility="public",
+        source="requester_reply",
+    )
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    class SteeringClient:
+        def __init__(self):
+            self.calls = []
+
+        def steer_turn(self, *, thread_id, expected_turn_id, input_payload, timeout_seconds=None):
+            self.calls.append(input_payload)
+            return SimpleNamespace(rpc_request_id="rpc-steer-bundle")
+
+    client = SteeringClient()
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (event,),
+    )
+
+    sent = persistent_codex._attempt_active_steering_once(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        client=client,
+        thread_id="thread-1",
+        native_turn_id="turn-1",
+        deadline=time.monotonic() + 30,
+    )
+
+    assert sent == 1
+    assert [receipt.status for receipt in db.receipts] == ["accepted"]
+    assert [item.dedupe_key for item in db.inputs] == [event.dedupe_key]
+    assert [item["type"] for item in client.calls[0]] == ["text", "localImage"]
+    assert client.calls[0][1]["path"] == str(image_path.resolve())
+    payload = json.loads(client.calls[0][0]["text"])
+    assert payload["events"][0]["attachments"][0]["safe_input"]["stored_path"] == str(image_path)
+    assert payload["events"][0]["attachments"][1]["safe_input"]["stored_path"] == str(document_path)
+
+
+def test_active_turn_steering_accepts_non_image_document_bundle_without_local_image(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    ticket_dir = settings.uploads_dir / "ticket-steer-2"
+    ticket_dir.mkdir(parents=True, exist_ok=True)
+    document_path = ticket_dir / "notes.pdf"
+    document_path.write_bytes(b"pdf-data")
+
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    event = _steering_event(
+        "Document only.",
+        attachments=(_steering_attachment(document_path, is_image=False, mime_type="application/pdf"),),
+        visibility="public",
+        source="requester_reply",
+    )
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    class SteeringClient:
+        def __init__(self):
+            self.calls = []
+
+        def steer_turn(self, *, thread_id, expected_turn_id, input_payload, timeout_seconds=None):
+            self.calls.append(input_payload)
+            return SimpleNamespace(rpc_request_id="rpc-steer-doc")
+
+    client = SteeringClient()
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (event,),
+    )
+
+    sent = persistent_codex._attempt_active_steering_once(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        client=client,
+        thread_id="thread-1",
+        native_turn_id="turn-1",
+        deadline=time.monotonic() + 30,
+    )
+
+    assert sent == 1
+    assert [receipt.status for receipt in db.receipts] == ["accepted"]
+    assert [item["type"] for item in client.calls[0]] == ["text"]
+    payload = json.loads(client.calls[0][0]["text"])
+    assert payload["events"][0]["attachments"][0]["safe_input"]["stored_path"] == str(document_path)
+
+
+def test_active_turn_accepted_steering_finalizes_without_successor_run(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_conversations_enabled": True,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    run.input_hash = "initial-input-hash"
+    run.pipeline_version = None
+    run.final_step_id = None
+    run.final_agent_spec_id = None
+    run.final_output_contract = None
+    run.final_output_json = None
+    run.model_name = None
+    run.ended_at = None
+    run.error_text = None
+    turn.transport_kind = "app_server"
+    event = _steering_event()
+    ticket.requeue_source_message_id = event.source_id
+    ticket.reference = "T-STEER"
+    ticket.title = "Steered finalization"
+    ticket.urgent = False
+    ticket.requester_language = None
+    ticket.last_processed_hash = None
+    ticket.last_ai_action = None
+    ticket.clarification_rounds = 0
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+    observed: list[str] = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    class SteeringClient:
+        def steer_turn(self, *, thread_id, expected_turn_id, input_payload, timeout_seconds=None):
+            return SimpleNamespace(rpc_request_id="rpc-steer-finalize")
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (event,),
+    )
+
+    sent = persistent_codex._attempt_active_steering_once(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        client=SteeringClient(),
+        thread_id="thread-1",
+        native_turn_id="turn-1",
+        deadline=time.monotonic() + 30,
+    )
+
+    assert sent == 1
+    assert [receipt.status for receipt in db.receipts] == ["accepted"]
+    assert [item.dedupe_key for item in db.inputs] == [event.dedupe_key]
+    assert ticket.requeue_requested is False
+    turn.status = "completed"
+    turn.steering_closed_at = datetime.now(timezone.utc)
+
+    context = _make_context(ticket=ticket, internal_body="Need this in the active turn.")
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr(
+        "worker.triage._freeze_run_input",
+        lambda db, settings, context, run: (turn.effective_input_hash, SimpleNamespace(conversation_id=persistent.conversation_id, input_hash=turn.effective_input_hash)),
+    )
+    monkeypatch.setattr(
+        "worker.triage.build_prompt_conversation_state",
+        lambda *args, **kwargs: SimpleNamespace(conversation_id=persistent.conversation_id, input_hash=turn.effective_input_hash),
+    )
+    monkeypatch.setattr("worker.triage.load_strictly_unseen_input_events", lambda *args, **kwargs: ())
+    monkeypatch.setattr("worker.triage._mark_superseded_due_to_stale_input", lambda *args, **kwargs: pytest.fail("accepted steer created a successor run"))
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: observed.append("internal"))
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: observed.append(f"public:{kwargs['last_ai_action']}"),
+    )
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: observed.append("draft"))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: observed.append("route"))
+    monkeypatch.setattr(
+        "worker.triage.process_deferred_requeue",
+        lambda db, ticket: observed.append("requeue-check") if not ticket.requeue_requested else pytest.fail("successor run requested"),
+    )
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
+        specialist_payload=_specialist_payload(),
+    )
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
+
+    assert observed == ["internal", "public:auto_public_reply", "requeue-check"]
+    assert run.status == "succeeded"
+    assert ticket.last_processed_hash == turn.effective_input_hash
+
+
+def test_active_turn_accepted_requester_steering_finalizes_without_successor_run(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_conversations_enabled": True,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    run.input_hash = "initial-input-hash"
+    run.pipeline_version = None
+    run.final_step_id = None
+    run.final_agent_spec_id = None
+    run.final_output_contract = None
+    run.final_output_json = None
+    run.model_name = None
+    run.ended_at = None
+    run.error_text = None
+    turn.transport_kind = "app_server"
+    requester_id = uuid.uuid4()
+    event = _steering_event(
+        "Please include this requester follow-up.",
+        visibility="public",
+        source="requester_reply",
+        author_type="requester",
+    )
+    ticket.requeue_source_message_id = event.source_id
+    ticket.requeue_requested_by_user_id = requester_id
+    ticket.reference = "T-STEER-REQ"
+    ticket.title = "Requester steering finalization"
+    ticket.urgent = False
+    ticket.requester_language = None
+    ticket.last_processed_hash = None
+    ticket.last_ai_action = None
+    ticket.clarification_rounds = 0
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+    observed: list[str] = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    class SteeringClient:
+        def steer_turn(self, *, thread_id, expected_turn_id, input_payload, timeout_seconds=None):
+            return SimpleNamespace(rpc_request_id="rpc-steer-requester")
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (event,),
+    )
+
+    sent = persistent_codex._attempt_active_steering_once(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        client=SteeringClient(),
+        thread_id="thread-1",
+        native_turn_id="turn-1",
+        deadline=time.monotonic() + 30,
+    )
+
+    assert sent == 1
+    assert [receipt.status for receipt in db.receipts] == ["accepted"]
+    assert [item.dedupe_key for item in db.inputs] == [event.dedupe_key]
+    assert ticket.requeue_requested is False
+    turn.status = "completed"
+    turn.steering_closed_at = datetime.now(timezone.utc)
+
+    context = _make_context(ticket=ticket, public_body="Please include this requester follow-up.")
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr(
+        "worker.triage._freeze_run_input",
+        lambda db, settings, context, run: (turn.effective_input_hash, SimpleNamespace(conversation_id=persistent.conversation_id, input_hash=turn.effective_input_hash)),
+    )
+    monkeypatch.setattr(
+        "worker.triage.build_prompt_conversation_state",
+        lambda *args, **kwargs: SimpleNamespace(conversation_id=persistent.conversation_id, input_hash=turn.effective_input_hash),
+    )
+    monkeypatch.setattr("worker.triage.load_strictly_unseen_input_events", lambda *args, **kwargs: ())
+    monkeypatch.setattr("worker.triage._mark_superseded_due_to_stale_input", lambda *args, **kwargs: pytest.fail("accepted requester steer created a successor run"))
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: observed.append("internal"))
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: observed.append(f"public:{kwargs['last_ai_action']}"),
+    )
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: observed.append("draft"))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: observed.append("route"))
+    monkeypatch.setattr(
+        "worker.triage.process_deferred_requeue",
+        lambda db, ticket: observed.append("requeue-check") if not ticket.requeue_requested else pytest.fail("successor run requested"),
+    )
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
+        specialist_payload=_specialist_payload(),
+    )
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
+
+    assert observed == ["internal", "public:auto_public_reply", "requeue-check"]
+    assert run.status == "succeeded"
+    assert ticket.last_processed_hash == turn.effective_input_hash
+
+
+def test_active_turn_steering_sends_multiple_bundles_sequentially(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    first = _steering_event("First")
+    second = _steering_event("Second")
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    class SteeringClient:
+        def __init__(self):
+            self.calls = []
+
+        def steer_turn(self, *, thread_id, expected_turn_id, input_payload, timeout_seconds=None):
+            self.calls.append(input_payload)
+            return SimpleNamespace(rpc_request_id=f"rpc-{len(self.calls)}")
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (first, second),
+    )
+
+    sent = persistent_codex._attempt_active_steering_once(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        client=SteeringClient(),
+        thread_id="thread-1",
+        native_turn_id="turn-1",
+        deadline=time.monotonic() + 30,
+    )
+
+    assert sent == 2
+    assert [receipt.status for receipt in db.receipts] == ["accepted", "accepted"]
+    assert [item.input_index for item in db.inputs] == [1, 2]
+    assert [item.dedupe_key for item in db.inputs] == [first.dedupe_key, second.dedupe_key]
+
+
+def test_active_turn_steering_rejects_unsupported_bundle_without_consuming(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    event = _steering_event(supported=False)
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (event,),
+    )
+
+    sent = persistent_codex._attempt_active_steering_once(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        client=SimpleNamespace(steer_turn=lambda **kwargs: pytest.fail("unsupported bundle was sent")),
+        thread_id="thread-1",
+        native_turn_id="turn-1",
+        deadline=time.monotonic() + 30,
+    )
+
+    assert sent == 0
+    assert [receipt.status for receipt in db.receipts] == ["rejected"]
+    assert db.receipts[0].error_code == "unsupported_bundle"
+    assert db.inputs == []
+    assert ticket.requeue_requested is True
+
+
+def test_active_turn_steering_rejects_mixed_invalid_bundle_before_receipt(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    ticket_dir = settings.uploads_dir / "ticket-steer-3"
+    ticket_dir.mkdir(parents=True, exist_ok=True)
+    good_image = ticket_dir / "good.png"
+    good_image.write_bytes(b"good-image")
+    missing_document = ticket_dir / "missing.pdf"
+
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    event = _steering_event(
+        "Bundle should fail closed.",
+        attachments=(
+            _steering_attachment(good_image, is_image=True),
+            _steering_attachment(missing_document, is_image=False, size_bytes=7, mime_type="application/pdf"),
+        ),
+        visibility="public",
+        source="requester_reply",
+    )
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (event,),
+    )
+
+    sent = persistent_codex._attempt_active_steering_once(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        client=SimpleNamespace(steer_turn=lambda **kwargs: pytest.fail("invalid mixed bundle was sent")),
+        thread_id="thread-1",
+        native_turn_id="turn-1",
+        deadline=time.monotonic() + 30,
+    )
+
+    assert sent == 0
+    assert [receipt.status for receipt in db.receipts] == ["rejected"]
+    assert db.receipts[0].error_code == "unsupported_bundle"
+    assert db.inputs == []
+    assert ticket.requeue_requested is True
+
+
+def test_active_turn_steering_preserves_escrow_when_other_authorized_content_remains(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    retained = _steering_event("Retained unsupported content", supported=False)
+    accepted = _steering_event("Accepted later content")
+    ticket.requeue_source_message_id = accepted.source_id
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    class SteeringClient:
+        def steer_turn(self, *, thread_id, expected_turn_id, input_payload, timeout_seconds=None):
+            return SimpleNamespace(rpc_request_id="rpc-accepted")
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (retained, accepted),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_has_unconsumed_authorized_ticket_content",
+        lambda *args, **kwargs: True,
+    )
+
+    sent = persistent_codex._attempt_active_steering_once(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        client=SteeringClient(),
+        thread_id="thread-1",
+        native_turn_id="turn-1",
+        deadline=time.monotonic() + 30,
+    )
+
+    assert sent == 1
+    assert [receipt.status for receipt in db.receipts] == ["rejected", "accepted"]
+    assert [item.dedupe_key for item in db.inputs] == [accepted.dedupe_key]
+    assert ticket.requeue_requested is True
+    assert ticket.requeue_trigger == "ticket_content"
+    assert ticket.requeue_source_message_id == accepted.source_id
+
+
+def test_active_turn_steering_status_change_retains_content_without_receipt(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    persistent, run, session, turn, step, ticket = _steering_runtime(
+        persistent_codex,
+        prepared,
+        ticket_status="waiting_on_user",
+    )
+    event = _steering_event()
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (event,),
+    )
+
+    sent = persistent_codex._attempt_active_steering_once(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        client=SimpleNamespace(steer_turn=lambda **kwargs: pytest.fail("waiting-state content was sent")),
+        thread_id="thread-1",
+        native_turn_id="turn-1",
+        deadline=time.monotonic() + 30,
+    )
+
+    assert sent == 0
+    assert db.receipts == []
+    assert db.inputs == []
+    assert ticket.requeue_requested is True
+
+
+def test_active_turn_steering_no_active_turn_retains_content_without_receipt(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    event = _steering_event()
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, None, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (event,),
+    )
+
+    sent = persistent_codex._attempt_active_steering_once(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        client=SimpleNamespace(steer_turn=lambda **kwargs: pytest.fail("missing active turn was sent")),
+        thread_id="thread-1",
+        native_turn_id="turn-1",
+        deadline=time.monotonic() + 30,
+    )
+
+    assert sent == 0
+    assert db.receipts == []
+    assert db.inputs == []
+    assert ticket.requeue_requested is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    [
+        (lambda turn: setattr(turn, "native_turn_id", "other-turn"), "expected_turn_mismatch"),
+        (lambda turn: setattr(turn, "steering_closed_at", datetime.now(timezone.utc)), "steering_closed"),
+        (lambda turn: setattr(turn, "status", "completed"), "steering_closed"),
+    ],
+)
+def test_active_turn_steering_revalidation_retains_content_without_publication(
+    monkeypatch,
+    tmp_path,
+    mutation,
+    expected_error,
+):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    mutation(turn)
+    event = _steering_event()
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (event,),
+    )
+
+    sent = persistent_codex._attempt_active_steering_once(
+        settings,
+        prepared=prepared,
+        persistent=persistent,
+        client=SimpleNamespace(steer_turn=lambda **kwargs: pytest.fail("invalid active turn was sent")),
+        thread_id="thread-1",
+        native_turn_id="turn-1",
+        deadline=time.monotonic() + 30,
+    )
+
+    assert sent == 0
+    assert db.receipts == []
+    assert db.inputs == []
+    assert ticket.requeue_requested is True
+    assert expected_error in {"expected_turn_mismatch", "steering_closed"}
+
+
+def test_active_turn_steering_ambiguous_send_keeps_content_unconsumed(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+    from worker.codex_app_server import CodexAppServerAmbiguousError
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    event = _steering_event()
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    class AmbiguousClient:
+        def steer_turn(self, **kwargs):
+            raise CodexAppServerAmbiguousError("process exited after possible send", error_code="process_exited")
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (event,),
+    )
+
+    with pytest.raises(CodexAppServerAmbiguousError):
+        persistent_codex._attempt_active_steering_once(
+            settings,
+            prepared=prepared,
+            persistent=persistent,
+            client=AmbiguousClient(),
+            thread_id="thread-1",
+            native_turn_id="turn-1",
+            deadline=time.monotonic() + 30,
+        )
+
+    assert [receipt.status for receipt in db.receipts] == ["ambiguous"]
+    assert db.receipts[0].error_code == "process_exited"
+    assert db.receipts[0].acknowledged_at is None
+    assert db.inputs == []
+    assert ticket.requeue_requested is True
+
+
+def test_active_turn_steering_lease_loss_before_ack_commit_is_ambiguous(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+    from worker.run_ownership import RunOwnershipLost
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    event = _steering_event()
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    class AckClient:
+        def steer_turn(self, **kwargs):
+            return SimpleNamespace(rpc_request_id="rpc-before-lease-loss")
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_candidates",
+        lambda *args, **kwargs: (event,),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "_accept_steering_receipt",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RunOwnershipLost("lease lost")),
+    )
+
+    with pytest.raises(RunOwnershipLost):
+        persistent_codex._attempt_active_steering_once(
+            settings,
+            prepared=prepared,
+            persistent=persistent,
+            client=AckClient(),
+            thread_id="thread-1",
+            native_turn_id="turn-1",
+            deadline=time.monotonic() + 30,
+        )
+
+    assert [receipt.status for receipt in db.receipts] == ["ambiguous"]
+    assert db.receipts[0].error_code == "lease_lost_before_ack_commit"
+    assert db.inputs == []
+    assert ticket.requeue_requested is True
+
+
+def test_active_turn_steering_completion_marks_unresolved_receipts_ambiguous(tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from shared.models import CodexTurnSteer
+    from worker import persistent_codex
+
+    symbols, _settings, prepared = _prepare_persistent_test_step(tmp_path)
+    persistent, run, session, turn, step, ticket = _steering_runtime(persistent_codex, prepared)
+    db = _SteeringDb(run=run, session=session, turn=turn, step=step, ticket=ticket)
+    receipt = CodexTurnSteer(
+        id=uuid.uuid4(),
+        turn_id=turn.id,
+        event_kind="ticket_message",
+        source_kind="ticket_message",
+        source_id=uuid.uuid4(),
+        dedupe_key="ticket-message:ambiguous",
+        expected_native_turn_id="turn-1",
+        payload_json={"input": []},
+        payload_hash="hash",
+        status="sending",
+    )
+    db.receipts.append(receipt)
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield db
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    try:
+        count = persistent_codex._mark_unresolved_steering_receipts_ambiguous(
+            _settings,
+            turn_id=turn.id,
+            reason="turn_completed_with_unresolved_steer",
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert count == 1
+    assert receipt.status == "ambiguous"
+    assert receipt.error_code == "turn_completed_with_unresolved_steer"
+    assert db.inputs == []
+
+
+def test_persist_accepted_initial_inputs_is_idempotent_and_hash_bound(tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+    from worker.codex_inputs import hash_input_events
+
+    turn = SimpleNamespace(id=uuid.uuid4(), effective_input_hash=None)
+    events = (
+        SimpleNamespace(
+            event_kind="ticket_state_snapshot",
+            source_kind="ticket",
+            source_id=uuid.uuid4(),
+            dedupe_key="ticket-state:1",
+            payload_json={"status": "ai_triage"},
+        ),
+        SimpleNamespace(
+            event_kind="ticket_message",
+            source_kind="ticket_message",
+            source_id=uuid.uuid4(),
+            dedupe_key="ticket-message:1",
+            payload_json={"body_text": "Please continue."},
+        ),
+    )
+    effective_input_hash = hash_input_events(events)
+
+    class Db:
+        def __init__(self):
+            self.inputs = []
+
+        def add(self, item):
+            self.inputs.append(item)
+
+        def execute(self, statement):
+            descriptions = statement.column_descriptions
+            if descriptions[0]["name"] == "dedupe_key":
+                return _FakeWorkerStateResult([(item.dedupe_key,) for item in self.inputs])
+            raise AssertionError(f"unexpected execute call: {descriptions}")
+
+    db = Db()
+    persistent_codex._persist_accepted_initial_inputs(
+        db,
+        turn=turn,
+        events=events,
+        effective_input_hash=effective_input_hash,
+    )
+
+    assert [item.input_index for item in db.inputs] == [1, 2]
+    assert [item.dedupe_key for item in db.inputs] == ["ticket-state:1", "ticket-message:1"]
+    assert turn.effective_input_hash == effective_input_hash
+
+    persistent_codex._persist_accepted_initial_inputs(
+        db,
+        turn=turn,
+        events=events,
+        effective_input_hash=effective_input_hash,
+    )
+
+    assert len(db.inputs) == 2
+    with pytest.raises(persistent_codex.StepRunError, match="different effective input hash"):
+        persistent_codex._persist_accepted_initial_inputs(
+            db,
+            turn=turn,
+            events=events,
+            effective_input_hash="different-input-hash",
+        )
+
+
+def test_app_server_initial_effective_hash_uses_full_snapshot_not_resumed_turn_delta():
+    from worker import persistent_codex
+    from worker.codex_inputs import hash_input_events
+
+    pending_event = SimpleNamespace(
+        event_kind="ticket_message",
+        source_kind="ticket_message",
+        source_id=uuid.uuid4(),
+        dedupe_key="ticket-message:new",
+        payload_json={"body_text": "Only the resumed-turn delta."},
+    )
+    full_snapshot_hash = "full-current-ticket-snapshot-hash"
+    prompt_state = SimpleNamespace(
+        input_hash=full_snapshot_hash,
+        pending_events=(pending_event,),
+    )
+
+    assert hash_input_events(prompt_state.pending_events) != full_snapshot_hash
+    assert persistent_codex._initial_effective_input_hash(prompt_state) == full_snapshot_hash
+
+
+def test_app_server_steering_refreshes_effective_hash_from_full_ticket_snapshot(monkeypatch):
+    from sqlalchemy.orm import Session as SASession
+
+    from worker import persistent_codex
+
+    db = SASession()
+    run = SimpleNamespace(id=uuid.uuid4())
+    turn = SimpleNamespace(id=uuid.uuid4())
+    ticket_id = uuid.uuid4()
+    context = SimpleNamespace(ticket=SimpleNamespace(id=ticket_id))
+    observed = {}
+
+    monkeypatch.setattr(persistent_codex, "load_ticket_context", lambda actual_db, actual_ticket_id: context)
+
+    def fake_build_prompt_state(actual_db, *, context, run, feature_enabled):
+        observed.update(
+            db=actual_db,
+            context=context,
+            run=run,
+            feature_enabled=feature_enabled,
+        )
+        return SimpleNamespace(input_hash="full-snapshot-after-steer")
+
+    monkeypatch.setattr(persistent_codex, "build_prompt_conversation_state", fake_build_prompt_state)
+    settings = SimpleNamespace(codex_conversations_enabled=True)
+    try:
+        result = persistent_codex._current_effective_input_hash(
+            db,
+            settings=settings,
+            run=run,
+            turn=turn,
+            ticket_id=ticket_id,
+        )
+    finally:
+        db.close()
+
+    assert result == "full-snapshot-after-steer"
+    assert observed == {
+        "db": db,
+        "context": context,
+        "run": run,
+        "feature_enabled": True,
+    }
+
+
+def test_app_server_accepted_steering_advances_frontier_hash_only_when_frontier_is_complete(monkeypatch):
+    from sqlalchemy.orm import Session as SASession
+
+    from worker import persistent_codex
+
+    db = SASession()
+    run = SimpleNamespace(id=uuid.uuid4())
+    turn = SimpleNamespace(id=uuid.uuid4(), effective_input_hash="accepted-frontier-hash")
+    ticket_id = uuid.uuid4()
+    conversation_id = uuid.uuid4()
+    context = SimpleNamespace(ticket=SimpleNamespace(id=ticket_id))
+
+    monkeypatch.setattr(persistent_codex, "load_ticket_context", lambda actual_db, actual_ticket_id: context)
+    monkeypatch.setattr(persistent_codex, "load_strictly_unseen_input_events", lambda *args, **kwargs: ())
+    monkeypatch.setattr(
+        persistent_codex,
+        "build_prompt_conversation_state",
+        lambda *args, **kwargs: SimpleNamespace(input_hash="frontier-after-steer"),
+    )
+    settings = SimpleNamespace(codex_conversations_enabled=True, max_image_bytes=1_000_000)
+    try:
+        advanced = persistent_codex._advance_effective_input_hash_if_frontier_complete(
+            db,
+            settings=settings,
+            run=run,
+            turn=turn,
+            conversation_id=conversation_id,
+            ticket_id=ticket_id,
+        )
+    finally:
+        db.close()
+
+    assert advanced is True
+    assert turn.effective_input_hash == "frontier-after-steer"
+
+
+def test_app_server_accepted_steering_preserves_prior_frontier_hash_when_relevant_unseen_state_remains(monkeypatch):
+    from sqlalchemy.orm import Session as SASession
+
+    from worker import persistent_codex
+
+    db = SASession()
+    run = SimpleNamespace(id=uuid.uuid4())
+    turn = SimpleNamespace(id=uuid.uuid4(), effective_input_hash="accepted-frontier-hash")
+    ticket_id = uuid.uuid4()
+    conversation_id = uuid.uuid4()
+    context = SimpleNamespace(ticket=SimpleNamespace(id=ticket_id))
+
+    monkeypatch.setattr(persistent_codex, "load_ticket_context", lambda actual_db, actual_ticket_id: context)
+    monkeypatch.setattr(
+        persistent_codex,
+        "load_strictly_unseen_input_events",
+        lambda *args, **kwargs: (SimpleNamespace(source_kind="ticket_status_history", dedupe_key="ticket-status:late"),),
+    )
+    monkeypatch.setattr(
+        persistent_codex,
+        "build_prompt_conversation_state",
+        lambda *args, **kwargs: pytest.fail("frontier hash should not advance while relevant unseen state remains"),
+    )
+    settings = SimpleNamespace(codex_conversations_enabled=True, max_image_bytes=1_000_000)
+    try:
+        advanced = persistent_codex._advance_effective_input_hash_if_frontier_complete(
+            db,
+            settings=settings,
+            run=run,
+            turn=turn,
+            conversation_id=conversation_id,
+            ticket_id=ticket_id,
+        )
+    finally:
+        db.close()
+
+    assert advanced is False
+    assert turn.effective_input_hash == "accepted-frontier-hash"
+
+
+def test_active_steering_change_token_loader_reads_only_polling_signal(monkeypatch, tmp_path):
+    from worker import persistent_codex
+
+    settings = _make_settings(tmp_path)
+    ticket_id = uuid.uuid4()
+    source_message_id = uuid.uuid4()
+    updated_at = datetime.now(timezone.utc)
+    executed = []
+
+    class Result:
+        def one_or_none(self):
+            return (updated_at, "ai_triage", True, "ticket_content", source_message_id)
+
+    class Db:
+        def execute(self, statement):
+            executed.append(statement)
+            return Result()
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield Db()
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+
+    token = persistent_codex._load_active_steering_change_token(settings, ticket_id=ticket_id)
+
+    assert token == persistent_codex.ActiveSteeringChangeToken(
+        updated_at=updated_at,
+        status="ai_triage",
+        requeue_requested=True,
+        requeue_trigger="ticket_content",
+        requeue_source_message_id=source_message_id,
+    )
+    assert len(executed) == 1
+    assert [description["name"] for description in executed[0].column_descriptions] == [
+        "updated_at",
+        "status",
+        "requeue_requested",
+        "requeue_trigger",
+        "requeue_source_message_id",
+    ]
+
+
+def test_active_steering_poll_scans_first_change_and_concurrent_change_but_skips_unchanged(monkeypatch):
+    from worker import persistent_codex
+
+    first_token = persistent_codex.ActiveSteeringChangeToken(
+        updated_at=datetime(2026, 8, 28, 10, tzinfo=timezone.utc),
+        status="ai_triage",
+        requeue_requested=False,
+        requeue_trigger=None,
+        requeue_source_message_id=None,
+    )
+    changed_token = replace(
+        first_token,
+        updated_at=datetime(2026, 8, 28, 10, 0, 1, tzinfo=timezone.utc),
+        requeue_requested=True,
+        requeue_trigger="ticket_content",
+        requeue_source_message_id=uuid.uuid4(),
+    )
+    current_token = {"value": first_token}
+    scan_tokens = []
+
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_active_steering_change_token",
+        lambda *args, **kwargs: current_token["value"],
+    )
+
+    def fake_attempt(*args, **kwargs):
+        scan_tokens.append(current_token["value"])
+        if len(scan_tokens) == 1:
+            # Simulate content committing while the expensive scan is active.
+            current_token["value"] = changed_token
+        return 1
+
+    monkeypatch.setattr(persistent_codex, "_attempt_active_steering_once", fake_attempt)
+    state = persistent_codex.ActiveSteeringPollState()
+    common = {
+        "settings": SimpleNamespace(),
+        "prepared": SimpleNamespace(ticket_id=uuid.uuid4()),
+        "persistent": SimpleNamespace(),
+        "client": SimpleNamespace(),
+        "thread_id": "thread-1",
+        "native_turn_id": "turn-1",
+        "deadline": time.monotonic() + 60,
+        "state": state,
+    }
+
+    assert persistent_codex._poll_active_steering_if_changed(**common) == 1
+    assert state.change_token == first_token
+    assert persistent_codex._poll_active_steering_if_changed(**common) == 1
+    assert state.change_token == changed_token
+    assert persistent_codex._poll_active_steering_if_changed(**common) == 0
+    assert scan_tokens == [first_token, changed_token]
+
+
+def test_app_server_persistent_specialist_resumes_stored_thread(monkeypatch, tmp_path):
+    pytest.importorskip("sqlalchemy")
+
+    from worker import persistent_codex
+
+    symbols, base_settings, prepared = _prepare_persistent_test_step(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_app_server_specialist_transport_enabled": True,
+        }
+    )
+    persistent = _persistent_step_for_test(persistent_codex, tmp_path, resumed=True)
+    persistent = replace(
+        persistent,
+        transport_kind="app_server",
+        stored_thread_id="thread-existing",
+        command_spec=replace(persistent.command_spec, command=["codex", "app-server", "--stdio"]),
+    )
+    run = SimpleNamespace(id=prepared.run_id, last_heartbeat_at=None)
+    session = SimpleNamespace(
+        id=persistent.session_id,
+        lease_owner_run_id=prepared.run_id,
+        lease_worker_instance_id=prepared.worker_instance_id,
+        thread_id="thread-existing",
+        status="active",
+        started_at=datetime.now(timezone.utc),
+        lease_heartbeat_at=None,
+        lease_expires_at=None,
+    )
+    turn = SimpleNamespace(
+        id=persistent.turn_id,
+        accepted_at=None,
+        native_turn_id=None,
+        effective_input_hash=None,
+        transport_kind="app_server",
+        steering_closed_at=None,
+        status="running",
+        ended_at=None,
+    )
+    step = SimpleNamespace(id=persistent.step_id, ended_at=None, status="running", output_json=None, error_text=None)
+    resumed_with = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        class Db:
+            def add(self, _item):
+                return None
+
+            def execute(self, statement):
+                descriptions = statement.column_descriptions
+                first_name = descriptions[0]["name"]
+                entity = descriptions[0].get("entity")
+                entity_name = getattr(entity, "__name__", "")
+                if first_name == "dedupe_key":
+                    return _FakeWorkerStateResult([])
+                if first_name == "event_kind":
+                    return _FakeWorkerStateResult([])
+                if first_name == "count" or "count" in first_name:
+                    return _FakePersistentScalarResult(0)
+                if entity_name == "Ticket":
+                    return _FakeWorkerStateResult([SimpleNamespace(id=prepared.ticket_id, status="ai_triage")])
+                if entity_name == "CodexTurnSteer":
+                    return _FakeWorkerStateResult([])
+                return _FakeWorkerStateResult([])
+
+            def get(self, model, key):
+                return SimpleNamespace(id=persistent.conversation_id, status="active")
+
+        yield Db()
+
+    class ResumeClient:
+        stderr_text = ""
+        process = SimpleNamespace(poll=lambda: 0)
+
+        def __init__(self, *args, on_thread_id=None, on_turn_id=None, on_protocol_item=None, **kwargs):
+            self.on_thread_id = on_thread_id
+            self.on_turn_id = on_turn_id
+            self.on_protocol_item = on_protocol_item
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def initialize(self, *, timeout_seconds=None):
+            return {}
+
+        def start_or_resume_thread(self, *, stored_thread_id, prepared, timeout_seconds=None):
+            resumed_with.append(stored_thread_id)
+            self.on_thread_id(stored_thread_id)
+            return SimpleNamespace(thread_id=stored_thread_id, resumed=True)
+
+        def start_turn(self, *, thread_id, input_payload, prepared, timeout_seconds=None):
+            self.on_turn_id("native-turn-resume")
+            return SimpleNamespace(thread_id=thread_id, turn_id="native-turn-resume", response={})
+
+        def supervise_until_completed(self, *, thread_id, turn_id, deadline, on_poll=None, poll_interval_seconds=0.05):
+            return {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": thread_id,
+                    "turn": {
+                        "id": turn_id,
+                        "status": "completed",
+                        "items": [
+                            {
+                                "type": "agentMessage",
+                                "id": "agent-final",
+                                "phase": "final_answer",
+                                "text": json.dumps(_specialist_payload(summary_internal="Resumed.")),
+                            }
+                        ],
+                    },
+                },
+            }
+
+    monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.codex_app_server.session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        persistent_codex,
+        "_load_locked_owned_runtime_records",
+        lambda db, *, prepared, persistent: (run, session, turn, step),
+    )
+    monkeypatch.setattr(persistent_codex, "_append_turn_outcome", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        persistent_codex,
+        "prepare_persistent_specialist_step",
+        lambda settings, prepared, prompt_state: persistent,
+    )
+    monkeypatch.setattr(persistent_codex, "CodexAppServerClient", ResumeClient)
+
+    result = persistent_codex.execute_persistent_specialist_step(
+        settings,
+        prepared=prepared,
+        prompt_state=SimpleNamespace(),
+    )
+
+    assert resumed_with == ["thread-existing"]
+    assert turn.native_turn_id == "native-turn-resume"
+    assert result.output_payload["summary_internal"] == "Resumed."
 
 
 def test_prepare_persistent_specialist_step_rejects_unexpired_conversation_overlap(monkeypatch, tmp_path):
@@ -1634,18 +3542,7 @@ def test_execute_persistent_specialist_step_marks_timeout_after_acceptance_as_am
         router_result=router_result,
         target_route_target_id="support",
     )
-    persistent = persistent_codex.PreparedPersistentSpecialistStep(
-        step_id=uuid.uuid4(),
-        turn_id=uuid.uuid4(),
-        conversation_id=uuid.uuid4(),
-        session_id=uuid.uuid4(),
-        command_spec=persistent_codex.PersistentCommandSpec(
-            command=["codex", "exec"],
-            env={},
-            runtime_codex_home=tmp_path / ".codex" / "ticket-prod",
-            resumed=False,
-        ),
-    )
+    persistent = _persistent_step_for_test(persistent_codex, tmp_path)
     finalized = {}
 
     monkeypatch.setattr(
@@ -1740,18 +3637,7 @@ def test_persistent_success_gate_rejects_valid_final_when_transport_is_not_termi
         target_route_target_id="support",
     )
     prepared.paths.final_output_path.write_text(json.dumps(_specialist_payload()), encoding="utf-8")
-    persistent = persistent_codex.PreparedPersistentSpecialistStep(
-        step_id=uuid.uuid4(),
-        turn_id=uuid.uuid4(),
-        conversation_id=uuid.uuid4(),
-        session_id=uuid.uuid4(),
-        command_spec=persistent_codex.PersistentCommandSpec(
-            command=["codex", "exec"],
-            env={},
-            runtime_codex_home=settings.resolved_codex_home,
-            resumed=False,
-        ),
-    )
+    persistent = _persistent_step_for_test(persistent_codex, tmp_path)
     finalized = {}
 
     monkeypatch.setattr(
@@ -2100,6 +3986,84 @@ def test_execute_triage_pipeline_supports_registry_modes(
     assert (result.specialist_step is not None) is expected_specialist
     assert getattr(result.selected_specialist, "id", None) == expected_selected_id
     assert len(observed["manifest_updates"]) == len(observed["prepared"])
+
+
+def test_app_server_rollout_keeps_router_and_selector_on_execute_step(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = Settings(
+        **{
+            **_make_settings(tmp_path).__dict__,
+            "codex_conversations_enabled": True,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": False,
+        }
+    )
+    context = _make_context()
+    route_target = _build_route_target(
+        route_target_id="manual_review",
+        kind="human_assist",
+        mode="auto",
+        candidate_specialist_ids=("bug", "feature"),
+        human_queue_status="waiting_on_dev_ti",
+    )
+    registry = _build_registry(route_target)
+    execute_step_kinds = []
+    persistent_step_kinds = []
+
+    def fake_prepare_step_run(*args, **kwargs):
+        return SimpleNamespace(
+            run_id=kwargs["run_id"],
+            ticket_id=kwargs["ticket_id"],
+            step_index=kwargs["step_index"],
+            step_kind=kwargs["step_kind"],
+            spec=kwargs["spec"],
+            model_name=None,
+            candidate_specialist_ids=kwargs.get("candidate_specialist_ids"),
+            route_target_id=kwargs.get("target_route_target_id"),
+            selected_specialist_id=kwargs.get("selected_specialist_id"),
+            requester_role=context.requester_role,
+            paths=SimpleNamespace(run_dir=tmp_path / "run", as_payload=lambda: {}),
+        )
+
+    def fake_execute_step(_settings, *, prepared):
+        execute_step_kinds.append(prepared.step_kind)
+        payload = (
+            _route_payload(route_target_id="manual_review")
+            if prepared.step_kind == "router"
+            else _selector_payload(specialist_id="feature")
+        )
+        return SimpleNamespace(step_id=uuid.uuid4(), prepared=prepared, output_payload=payload)
+
+    def fake_execute_persistent_specialist_step(_settings, *, prepared, prompt_state):
+        persistent_step_kinds.append(prepared.step_kind)
+        return SimpleNamespace(
+            step_id=uuid.uuid4(),
+            prepared=prepared,
+            output_payload=_specialist_payload(summary_internal="Specialist used persistent transport."),
+        )
+
+    monkeypatch.setattr("worker.pipeline.load_routing_registry", lambda: registry)
+    monkeypatch.setattr("worker.pipeline.prepare_step_run", fake_prepare_step_run)
+    monkeypatch.setattr("worker.pipeline.execute_step", fake_execute_step)
+    monkeypatch.setattr(
+        "worker.pipeline.execute_persistent_specialist_step",
+        fake_execute_persistent_specialist_step,
+    )
+    monkeypatch.setattr("worker.pipeline.write_run_manifest_snapshot", lambda settings, run_id: None)
+
+    result = symbols["execute_triage_pipeline"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        context=context,
+        prompt_state=SimpleNamespace(prompt_context=context, prompt_appendix=""),
+    )
+
+    assert execute_step_kinds == ["router", "selector"]
+    assert persistent_step_kinds == ["specialist"]
+    assert result.selector_result.specialist_id == "feature"
+    assert result.specialist_result.summary_internal == "Specialist used persistent transport."
 
 
 def test_execute_triage_pipeline_supports_forced_specialist_reruns(monkeypatch, tmp_path):
@@ -3455,6 +5419,737 @@ def test_apply_success_result_supersedes_stale_run_without_publication(monkeypat
     assert observed == {"internal": 0, "public": 0, "requeue": 1}
 
 
+def test_apply_success_result_app_server_uses_effective_input_hash_after_accepted_steering(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    base_settings = _make_settings(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_conversations_enabled": True,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000008A",
+        title="Steered content",
+        status="ai_triage",
+        urgent=False,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash="initial-input-hash",
+        ended_at=None,
+        error_text=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        model_name=None,
+    )
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        ai_run_id=run.id,
+        conversation_id=uuid.uuid4(),
+        transport_kind="app_server",
+        status="completed",
+        steering_closed_at=datetime.now(timezone.utc),
+        effective_input_hash="effective-after-steer",
+    )
+
+    class Db(_FakeDb):
+        def execute(self, statement):
+            entity = statement.column_descriptions[0].get("entity") if getattr(statement, "column_descriptions", None) else None
+            if getattr(entity, "__name__", "") == "CodexTurn":
+                return _FakeWorkerStateResult([turn])
+            if getattr(entity, "__name__", "") == "CodexTurnSteer":
+                return _FakeWorkerStateResult([])
+            return super().execute(statement)
+
+    fake_db = Db(run=run)
+    events: list[str] = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr(
+        "worker.triage._freeze_run_input",
+        lambda db, settings, context, run: ("effective-after-steer", SimpleNamespace(conversation_id=uuid.uuid4(), input_hash="effective-after-steer")),
+    )
+    monkeypatch.setattr(
+        "worker.triage.build_prompt_conversation_state",
+        lambda *args, **kwargs: SimpleNamespace(conversation_id=uuid.uuid4(), input_hash="effective-after-steer"),
+    )
+    monkeypatch.setattr("worker.triage.load_strictly_unseen_input_events", lambda *args, **kwargs: ())
+    monkeypatch.setattr("worker.triage._mark_superseded_due_to_stale_input", lambda *args, **kwargs: pytest.fail("accepted steering was treated as stale"))
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: events.append("internal"))
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: events.append(f"public:{kwargs['last_ai_action']}"),
+    )
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: events.append("draft"))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: events.append("route"))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: events.append("requeue"))
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
+        specialist_payload=_specialist_payload(),
+    )
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
+
+    assert events == ["internal", "public:auto_public_reply", "requeue"]
+    assert run.status == "succeeded"
+    assert ticket.last_processed_hash == "effective-after-steer"
+
+
+def test_apply_success_result_uses_durable_app_server_frontier_even_if_transport_flag_is_now_disabled(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    base_settings = _make_settings(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_conversations_enabled": True,
+            "codex_app_server_specialist_transport_enabled": False,
+            "codex_active_turn_steering_enabled": False,
+        }
+    )
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000008AA",
+        title="Durable app-server frontier",
+        status="ai_triage",
+        urgent=False,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash="stale-original-hash",
+        ended_at=None,
+        error_text=None,
+        pipeline_version=None,
+        final_step_id=None,
+        final_agent_spec_id=None,
+        final_output_contract=None,
+        final_output_json=None,
+        model_name=None,
+    )
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        ai_run_id=run.id,
+        conversation_id=uuid.uuid4(),
+        transport_kind="app_server",
+        status="completed",
+        steering_closed_at=datetime.now(timezone.utc),
+        effective_input_hash="accepted-frontier-hash",
+    )
+
+    class Db(_FakeDb):
+        def execute(self, statement):
+            entity = statement.column_descriptions[0].get("entity") if getattr(statement, "column_descriptions", None) else None
+            if getattr(entity, "__name__", "") == "CodexTurn":
+                return _FakeWorkerStateResult([turn])
+            if getattr(entity, "__name__", "") == "CodexTurnSteer":
+                return _FakeWorkerStateResult([])
+            return super().execute(statement)
+
+    fake_db = Db(run=run)
+    events: list[str] = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr(
+        "worker.triage._freeze_run_input",
+        lambda db, settings, context, run: ("accepted-frontier-hash", SimpleNamespace(conversation_id=uuid.uuid4(), input_hash="accepted-frontier-hash")),
+    )
+    monkeypatch.setattr(
+        "worker.triage.build_prompt_conversation_state",
+        lambda *args, **kwargs: SimpleNamespace(conversation_id=uuid.uuid4(), input_hash="accepted-frontier-hash"),
+    )
+    monkeypatch.setattr("worker.triage.load_strictly_unseen_input_events", lambda *args, **kwargs: ())
+    monkeypatch.setattr("worker.triage._mark_superseded_due_to_stale_input", lambda *args, **kwargs: pytest.fail("durable app-server frontier was ignored"))
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: events.append("internal"))
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: events.append(f"public:{kwargs['last_ai_action']}"),
+    )
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: events.append("draft"))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: events.append("route"))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: events.append("requeue"))
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
+        specialist_payload=_specialist_payload(),
+    )
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
+
+    assert events == ["internal", "public:auto_public_reply", "requeue"]
+    assert run.status == "succeeded"
+    assert ticket.last_processed_hash == "accepted-frontier-hash"
+
+
+def test_apply_success_result_stale_without_authorized_requeue_does_not_synthesize_requester_reply(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000008B",
+        title="Dormant stale input",
+        status="ai_triage",
+        urgent=False,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash="old-hash",
+        ended_at=None,
+        error_text=None,
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {"requeue": 0}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: observed.__setitem__("requeue", observed["requeue"] + 1))
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
+        specialist_payload=_specialist_payload(),
+    )
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
+
+    assert run.status == "superseded"
+    assert observed["requeue"] == 0
+    assert ticket.requeue_requested is False
+    assert ticket.requeue_trigger is None
+
+
+def test_apply_success_result_app_server_blocks_publication_when_completion_fence_incomplete(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    base_settings = _make_settings(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_conversations_enabled": True,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000008C",
+        title="Early output",
+        status="ai_triage",
+        urgent=False,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash="effective-input",
+        ended_at=None,
+        error_text=None,
+    )
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        ai_run_id=run.id,
+        conversation_id=uuid.uuid4(),
+        transport_kind="app_server",
+        status="running",
+        steering_closed_at=None,
+        effective_input_hash="effective-input",
+    )
+
+    class Db(_FakeDb):
+        def __init__(self, *, run):
+            super().__init__(run=run)
+            self.added = []
+
+        def add(self, item):
+            self.added.append(item)
+
+        def execute(self, statement):
+            descriptions = statement.column_descriptions if getattr(statement, "column_descriptions", None) else []
+            first_name = descriptions[0].get("name") if descriptions else None
+            entity = descriptions[0].get("entity") if descriptions else None
+            entity_name = getattr(entity, "__name__", "")
+            if first_name == "coalesce":
+                return _FakePersistentScalarResult(0)
+            if entity_name == "CodexTurn":
+                return _FakeWorkerStateResult([turn])
+            if entity_name == "CodexTurnSteer":
+                return _FakeWorkerStateResult([])
+            return super().execute(statement)
+
+    fake_db = Db(run=run)
+    observed = {"published": 0, "draft": 0, "route": 0, "requeue": 0}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage._freeze_run_input", lambda *args, **kwargs: ("effective-input", SimpleNamespace(input_hash="effective-input")))
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: pytest.fail("should not publish internal note"))
+    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: observed.__setitem__("published", observed["published"] + 1))
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: observed.__setitem__("draft", observed["draft"] + 1))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: observed.__setitem__("route", observed["route"] + 1))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: observed.__setitem__("requeue", observed["requeue"] + 1))
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    pipeline_result = _pipeline_result(
+        route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
+        specialist_payload=_specialist_payload(),
+    )
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=pipeline_result,
+    )
+
+    assert run.status == "superseded"
+    assert observed == {"published": 0, "draft": 0, "route": 0, "requeue": 0}
+    outcomes = [item for item in fake_db.added if item.__class__.__name__ == "CodexTurnOutcome"]
+    assert outcomes[0].payload_json["reason"] == "completion_fence_incomplete"
+
+
+def test_apply_success_result_app_server_blocks_receipts_unseen_content_and_status_override(monkeypatch, tmp_path):
+    from shared.models import CodexTurnSteer
+
+    symbols = _load_worker_symbols()
+    base_settings = _make_settings(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_conversations_enabled": True,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    cases = [
+        ("blocking_steering_receipts", "ai_triage", True, None),
+        ("workflow_status_changed", "waiting_on_user", False, None),
+        ("unseen_authorized_content", "ai_triage", False, "ticket_message"),
+        ("unseen_authorized_content", "ai_triage", False, "ticket_status_history"),
+    ]
+    for expected_reason, ticket_status, has_receipt, unseen_source_kind in cases:
+        ticket = SimpleNamespace(
+            id=uuid.uuid4(),
+            reference="T-000008D",
+            title=expected_reason,
+            status=ticket_status,
+            urgent=False,
+            requester_language=None,
+            last_processed_hash=None,
+            last_ai_action=None,
+            clarification_rounds=0,
+            requeue_requested=False,
+            requeue_trigger=None,
+        )
+        context = _make_context(ticket=ticket)
+        run = SimpleNamespace(id=uuid.uuid4(), ticket_id=ticket.id, status="running", input_hash="effective-input", ended_at=None, error_text=None)
+        turn = SimpleNamespace(
+            id=uuid.uuid4(),
+            ai_run_id=run.id,
+            conversation_id=uuid.uuid4(),
+            transport_kind="app_server",
+            status="completed",
+            steering_closed_at=datetime.now(timezone.utc),
+            effective_input_hash="effective-input",
+        )
+        receipt = CodexTurnSteer(
+            id=uuid.uuid4(),
+            turn_id=turn.id,
+            event_kind="ticket_message",
+            source_kind="ticket_message",
+            source_id=uuid.uuid4(),
+            dedupe_key="ticket-message:blocking",
+            expected_native_turn_id="turn-1",
+            payload_json={},
+            payload_hash="payload-hash",
+            status="ambiguous",
+        )
+
+        class Db(_FakeDb):
+            def __init__(self, *, run):
+                super().__init__(run=run)
+                self.added = []
+
+            def add(self, item):
+                self.added.append(item)
+
+            def execute(self, statement):
+                descriptions = statement.column_descriptions if getattr(statement, "column_descriptions", None) else []
+                first_name = descriptions[0].get("name") if descriptions else None
+                entity = descriptions[0].get("entity") if descriptions else None
+                entity_name = getattr(entity, "__name__", "")
+                if first_name == "coalesce":
+                    return _FakePersistentScalarResult(0)
+                if entity_name == "CodexTurn":
+                    return _FakeWorkerStateResult([turn])
+                if entity_name == "CodexTurnSteer":
+                    return _FakeWorkerStateResult([receipt] if has_receipt else [])
+                return super().execute(statement)
+
+        fake_db = Db(run=run)
+        observed = {"visible": 0, "requeue": 0}
+
+        @contextmanager
+        def fake_session_scope(_settings):
+            yield fake_db
+
+        unseen_event = SimpleNamespace(source_kind=unseen_source_kind) if unseen_source_kind is not None else None
+        monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+        monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id, context=context: context)
+        monkeypatch.setattr("worker.triage._freeze_run_input", lambda *args, **kwargs: ("effective-input", SimpleNamespace(input_hash="effective-input")))
+        monkeypatch.setattr("worker.triage.load_strictly_unseen_input_events", lambda *args, **kwargs: (unseen_event,) if unseen_event else ())
+        monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: pytest.fail("should not publish internal note"))
+        monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: observed.__setitem__("visible", observed["visible"] + 1))
+        monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: observed.__setitem__("visible", observed["visible"] + 1))
+        monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: observed.__setitem__("visible", observed["visible"] + 1))
+        monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: observed.__setitem__("requeue", observed["requeue"] + 1))
+        monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+        symbols["_apply_success_result"](
+            settings,
+            run_id=run.id,
+            worker_instance_id="worker-test",
+            pipeline_result=_pipeline_result(
+                route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
+                specialist_payload=_specialist_payload(),
+            ),
+        )
+
+        assert run.status == "superseded"
+        assert observed == {"visible": 0, "requeue": 0}
+        outcomes = [item for item in fake_db.added if item.__class__.__name__ == "CodexTurnOutcome"]
+        assert outcomes[0].payload_json["reason"] == expected_reason
+
+
+@pytest.mark.parametrize(
+    ("trigger", "forced_route_target_id", "forced_specialist_id"),
+    [
+        ("manual_rerun", None, None),
+        ("reopen", None, None),
+        ("requester_reply", "support", "support"),
+    ],
+)
+def test_apply_success_result_app_server_blocks_stronger_control_requests(
+    monkeypatch,
+    tmp_path,
+    trigger,
+    forced_route_target_id,
+    forced_specialist_id,
+):
+    symbols = _load_worker_symbols()
+    base_settings = _make_settings(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_conversations_enabled": True,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000008F",
+        title=f"Blocked {trigger}",
+        status="ai_triage",
+        urgent=False,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=True,
+        requeue_trigger=trigger,
+        requeue_requested_by_user_id=uuid.uuid4(),
+        requeue_source_message_id=uuid.uuid4(),
+        requeue_forced_route_target_id=forced_route_target_id,
+        requeue_forced_specialist_id=forced_specialist_id,
+    )
+    context = _make_context(ticket=ticket)
+    run = SimpleNamespace(id=uuid.uuid4(), ticket_id=ticket.id, status="running", input_hash="effective-input", ended_at=None, error_text=None)
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        ai_run_id=run.id,
+        conversation_id=uuid.uuid4(),
+        transport_kind="app_server",
+        status="completed",
+        steering_closed_at=datetime.now(timezone.utc),
+        effective_input_hash="effective-input",
+    )
+
+    class Db(_FakeDb):
+        def __init__(self, *, run):
+            super().__init__(run=run)
+            self.added = []
+
+        def add(self, item):
+            self.added.append(item)
+
+        def execute(self, statement):
+            descriptions = statement.column_descriptions if getattr(statement, "column_descriptions", None) else []
+            first_name = descriptions[0].get("name") if descriptions else None
+            entity = descriptions[0].get("entity") if descriptions else None
+            entity_name = getattr(entity, "__name__", "")
+            if first_name == "coalesce":
+                return _FakePersistentScalarResult(0)
+            if entity_name == "CodexTurn":
+                return _FakeWorkerStateResult([turn])
+            if entity_name == "CodexTurnSteer":
+                return _FakeWorkerStateResult([])
+            return super().execute(statement)
+
+    fake_db = Db(run=run)
+    observed = {"public": 0, "draft": 0, "route": 0, "requeue": 0}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage._freeze_run_input", lambda *args, **kwargs: ("effective-input", SimpleNamespace(input_hash="effective-input")))
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: pytest.fail("should not publish internal note"))
+    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: observed.__setitem__("public", observed["public"] + 1))
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: observed.__setitem__("draft", observed["draft"] + 1))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: observed.__setitem__("route", observed["route"] + 1))
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: observed.__setitem__("requeue", observed["requeue"] + 1))
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=_pipeline_result(
+            route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
+            specialist_payload=_specialist_payload(),
+        ),
+    )
+
+    assert run.status == "superseded"
+    assert observed == {"public": 0, "draft": 0, "route": 0, "requeue": 1}
+    outcomes = [item for item in fake_db.added if item.__class__.__name__ == "CodexTurnOutcome"]
+    assert outcomes[0].payload_json["reason"] == "stronger_control_request"
+
+
+def test_apply_success_result_stale_ticket_content_requeue_creates_successor(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000008E",
+        title="Stale content request",
+        status="ai_triage",
+        urgent=False,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=True,
+        requeue_trigger="ticket_content",
+        requeue_source_message_id=uuid.uuid4(),
+    )
+    context = _make_context(ticket=ticket)
+    run = SimpleNamespace(id=uuid.uuid4(), ticket_id=ticket.id, status="running", input_hash="old-hash", ended_at=None, error_text=None)
+    fake_db = _FakeDb(run=run)
+    observed = {"requeue": 0, "visible": 0}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage.process_deferred_requeue", lambda *args, **kwargs: observed.__setitem__("requeue", observed["requeue"] + 1))
+    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: observed.__setitem__("visible", observed["visible"] + 1))
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: observed.__setitem__("visible", observed["visible"] + 1))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: observed.__setitem__("visible", observed["visible"] + 1))
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=_pipeline_result(
+            route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
+            specialist_payload=_specialist_payload(),
+        ),
+    )
+
+    assert run.status == "superseded"
+    assert observed == {"requeue": 1, "visible": 0}
+
+
+@pytest.mark.parametrize("ticket_status", ["waiting_on_user", "waiting_on_dev_ti", "resolved"])
+def test_apply_success_result_retires_stale_ticket_content_outside_ai_triage_without_successor(
+    monkeypatch,
+    tmp_path,
+    ticket_status,
+):
+    symbols = _load_worker_symbols()
+    base_settings = _make_settings(tmp_path)
+    settings = Settings(
+        **{
+            **base_settings.__dict__,
+            "codex_conversations_enabled": True,
+            "codex_app_server_specialist_transport_enabled": True,
+            "codex_active_turn_steering_enabled": True,
+        }
+    )
+    source_message_id = uuid.uuid4()
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000008G",
+        title=f"Dormant stale content in {ticket_status}",
+        status=ticket_status,
+        urgent=False,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=True,
+        requeue_trigger="ticket_content",
+        requeue_requested_by_user_id=uuid.uuid4(),
+        requeue_source_message_id=source_message_id,
+        requeue_forced_route_target_id=None,
+        requeue_forced_specialist_id=None,
+    )
+    context = _make_context(ticket=ticket)
+    run = SimpleNamespace(id=uuid.uuid4(), ticket_id=ticket.id, status="running", input_hash="effective-input", ended_at=None, error_text=None)
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        ai_run_id=run.id,
+        conversation_id=uuid.uuid4(),
+        transport_kind="app_server",
+        status="completed",
+        steering_closed_at=datetime.now(timezone.utc),
+        effective_input_hash="effective-input",
+    )
+
+    class Db(_FakeDb):
+        def __init__(self, *, run):
+            super().__init__(run=run)
+            self.added = []
+
+        def add(self, item):
+            self.added.append(item)
+
+        def execute(self, statement):
+            descriptions = statement.column_descriptions if getattr(statement, "column_descriptions", None) else []
+            first_name = descriptions[0].get("name") if descriptions else None
+            entity = descriptions[0].get("entity") if descriptions else None
+            entity_name = getattr(entity, "__name__", "")
+            if first_name == "coalesce":
+                return _FakePersistentScalarResult(0)
+            if entity_name == "CodexTurn":
+                return _FakeWorkerStateResult([turn])
+            if entity_name == "CodexTurnSteer":
+                return _FakeWorkerStateResult([])
+            return super().execute(statement)
+
+    fake_db = Db(run=run)
+    observed = {"public": 0, "draft": 0, "route": 0}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr("worker.triage._freeze_run_input", lambda *args, **kwargs: ("effective-input", SimpleNamespace(input_hash="effective-input")))
+    monkeypatch.setattr("worker.triage.publish_ai_internal_note", lambda *args, **kwargs: pytest.fail("should not publish internal note"))
+    monkeypatch.setattr("worker.triage.publish_ai_public_reply", lambda *args, **kwargs: observed.__setitem__("public", observed["public"] + 1))
+    monkeypatch.setattr("worker.triage.create_ai_draft", lambda *args, **kwargs: observed.__setitem__("draft", observed["draft"] + 1))
+    monkeypatch.setattr("worker.triage.route_ticket_after_ai", lambda *args, **kwargs: observed.__setitem__("route", observed["route"] + 1))
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=_pipeline_result(
+            route_target=_build_route_target(route_target_id="support", kind="direct_ai", mode="fixed", specialist_id="support"),
+            specialist_payload=_specialist_payload(),
+        ),
+    )
+
+    assert run.status == "superseded"
+    assert observed == {"public": 0, "draft": 0, "route": 0}
+    assert ticket.status == ticket_status
+    assert ticket.requeue_requested is False
+    assert ticket.requeue_trigger is None
+    assert ticket.requeue_requested_by_user_id is None
+    assert ticket.requeue_source_message_id is None
+    outcomes = [item for item in fake_db.added if item.__class__.__name__ == "CodexTurnOutcome"]
+    assert outcomes[0].payload_json["reason"] == "workflow_status_changed"
+
+
 def test_apply_success_result_raises_when_run_is_no_longer_owned(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
@@ -3880,11 +6575,13 @@ def test_process_ai_run_nonquiescent_accepted_turn_recovers_as_ambiguous(monkeyp
     outcomes = [item for item in fake_db.added if item.__class__.__name__ == "CodexTurnOutcome"]
     assert len(outcomes) == 1
     assert outcomes[0].outcome_kind == "ambiguous"
-    assert outcomes[0].payload_json == {
-        "reason": "stale_run_recovery",
-        "stale_timeout_seconds": settings.ai_run_stale_timeout_seconds,
-        "accepted": True,
-    }
+    assert outcomes[0].payload_json["reason"] == "stale_run_recovery"
+    assert outcomes[0].payload_json["stale_timeout_seconds"] == settings.ai_run_stale_timeout_seconds
+    assert outcomes[0].payload_json["accepted"] is True
+    assert outcomes[0].payload_json["ambiguous_steering_receipts"] == 0
+    assert outcomes[0].payload_json["accepted_inputs_remain_consumed"] is True
+    assert outcomes[0].payload_json["rejected_and_dormant_inputs_remain_discoverable"] is True
+    assert outcomes[0].payload_json["late_retired_session_output_publishable"] is False
     assert session.status == "replaced"
     assert session.ended_at is not None
     assert session.lease_owner_run_id is None
@@ -5185,6 +7882,268 @@ def test_handle_stale_persistent_run_retires_unaccepted_session_for_recovery():
     assert len(outcomes) == 1
     assert outcomes[0].outcome_kind == "interrupted"
     assert outcomes[0].payload_json["accepted"] is False
+
+
+def test_handle_stale_persistent_run_marks_sending_steer_receipt_ambiguous_without_input():
+    pytest.importorskip("sqlalchemy")
+
+    from shared.models import CodexTurnSteer
+    from worker import persistent_codex
+
+    run = SimpleNamespace(id=uuid.uuid4())
+    conversation = SimpleNamespace(id=uuid.uuid4(), status="active")
+    session = SimpleNamespace(
+        id=uuid.uuid4(),
+        conversation_id=conversation.id,
+        thread_id="thread-1",
+        status="active",
+        ended_at=None,
+        lease_owner_run_id=run.id,
+        lease_worker_instance_id="worker-test",
+        lease_acquired_at=datetime.now(timezone.utc),
+        lease_heartbeat_at=datetime.now(timezone.utc),
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        ai_run_id=run.id,
+        conversation_id=conversation.id,
+        session_id=session.id,
+        accepted_at=datetime.now(timezone.utc),
+        status="running",
+        ended_at=None,
+    )
+    receipt = CodexTurnSteer(
+        id=uuid.uuid4(),
+        turn_id=turn.id,
+        event_kind="ticket_message",
+        source_kind="ticket_message",
+        source_id=uuid.uuid4(),
+        dedupe_key="ticket-message:after-send",
+        expected_native_turn_id="turn-1",
+        rpc_request_id="rpc-1",
+        payload_json={"body_text": "after possible send"},
+        payload_hash="payload-hash",
+        status="sending",
+    )
+
+    class StalePersistentDb:
+        def __init__(self):
+            self.added = []
+            self.inputs = []
+
+        def execute(self, statement):
+            descriptions = statement.column_descriptions
+            first_name = descriptions[0]["name"]
+            entity = descriptions[0].get("entity")
+            entity_name = getattr(entity, "__name__", "")
+            if first_name == "coalesce":
+                return _FakePersistentScalarResult(0)
+            if entity_name == "CodexTurn":
+                return _FakeWorkerStateResult([turn])
+            if entity_name == "CodexSession":
+                return _FakeWorkerStateResult([session])
+            if entity_name == "CodexTurnSteer":
+                return _FakeWorkerStateResult([receipt])
+            return _FakeWorkerStateResult([])
+
+        def add(self, item):
+            self.added.append(item)
+            if item.__class__.__name__ == "CodexTurnInput":
+                self.inputs.append(item)
+
+        def get(self, model, key):
+            if getattr(model, "__name__", "") == "CodexConversation" and key == conversation.id:
+                return conversation
+            return None
+
+    fake_db = StalePersistentDb()
+
+    handled = persistent_codex.handle_stale_persistent_run(
+        fake_db,
+        run=run,
+        stale_timeout_seconds=600,
+    )
+
+    assert handled is True
+    assert turn.status == "ambiguous"
+    assert session.status == "replaced"
+    assert conversation.status == "recovery_required"
+    assert receipt.status == "ambiguous"
+    assert receipt.resolved_at is not None
+    assert receipt.error_code == "stale_run_recovery"
+    assert fake_db.inputs == []
+    outcomes = [item for item in fake_db.added if item.__class__.__name__ == "CodexTurnOutcome"]
+    assert [item.outcome_kind for item in outcomes] == ["ambiguous", "ambiguous"]
+    assert outcomes[0].payload_json["event_type"] == "turn/steer"
+    assert outcomes[1].payload_json["ambiguous_steering_receipts"] == 1
+
+
+def test_app_server_completion_fence_closes_steering_reconciles_receipts_without_advancing_frontier_hash(tmp_path):
+    from shared.models import CodexTurnSteer
+    from worker import persistent_codex
+
+    settings = _make_settings(tmp_path)
+    run = SimpleNamespace(id=uuid.uuid4(), ticket_id=uuid.uuid4(), status="running", last_heartbeat_at=None)
+    session = SimpleNamespace(
+        id=uuid.uuid4(),
+        thread_id="thread-1",
+        lease_owner_run_id=run.id,
+        lease_worker_instance_id="worker-test",
+        lease_heartbeat_at=None,
+        lease_expires_at=None,
+    )
+    turn = SimpleNamespace(
+        id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        session_id=session.id,
+        ai_run_id=run.id,
+        transport_kind="app_server",
+        native_turn_id="turn-1",
+        steering_closed_at=None,
+        effective_input_hash="accepted-frontier-hash",
+    )
+    step = SimpleNamespace(id=uuid.uuid4(), ended_at="not-none")
+    ticket = SimpleNamespace(id=run.ticket_id, status="ai_triage")
+    source_id = uuid.uuid4()
+    accepted_input = SimpleNamespace(
+        event_kind="ticket_message",
+        source_kind="ticket_message",
+        source_id=source_id,
+        dedupe_key=f"ticket-message:{source_id}",
+        payload_json={"message_id": str(source_id), "body_text": "accepted"},
+        input_index=1,
+    )
+    receipt = CodexTurnSteer(
+        id=uuid.uuid4(),
+        turn_id=turn.id,
+        event_kind="ticket_message",
+        source_kind="ticket_message",
+        source_id=uuid.uuid4(),
+        dedupe_key="ticket-message:possibly-sent",
+        expected_native_turn_id="turn-1",
+        payload_json={"body_text": "possibly sent"},
+        payload_hash="payload-hash",
+        status="sending",
+    )
+
+    class FenceDb:
+        def __init__(self):
+            self.added = []
+
+        def add(self, item):
+            self.added.append(item)
+
+        def execute(self, statement):
+            descriptions = statement.column_descriptions if getattr(statement, "column_descriptions", None) else []
+            first_name = descriptions[0].get("name") if descriptions else None
+            entity = descriptions[0].get("entity") if descriptions else None
+            entity_name = getattr(entity, "__name__", "")
+            if first_name == "coalesce":
+                return _FakePersistentScalarResult(0)
+            if first_name == "event_kind":
+                return _SteeringResult(
+                    [
+                        (
+                            accepted_input.event_kind,
+                            accepted_input.source_kind,
+                            accepted_input.source_id,
+                            accepted_input.dedupe_key,
+                            accepted_input.payload_json,
+                        )
+                    ]
+                )
+            if entity_name == "AIRun":
+                return _SteeringResult([run])
+            if entity_name == "CodexSession":
+                return _SteeringResult([session])
+            if entity_name == "CodexTurn":
+                return _SteeringResult([turn])
+            if entity_name == "Ticket":
+                return _SteeringResult([ticket])
+            if entity_name == "CodexTurnSteer":
+                return _SteeringResult([receipt] if receipt.status in {"prepared", "sending"} else [])
+            return _SteeringResult([])
+
+        def get(self, model, key):
+            if getattr(model, "__name__", "") == "CodexTurn" and key == turn.id:
+                return turn
+            if getattr(model, "__name__", "") == "AIRunStep" and key == step.id:
+                return step
+            return None
+
+    fake_db = FenceDb()
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    prepared = SimpleNamespace(run_id=run.id, ticket_id=ticket.id, worker_instance_id="worker-test")
+    persistent = SimpleNamespace(turn_id=turn.id, session_id=session.id, conversation_id=turn.conversation_id, step_id=step.id)
+    completed_message = {
+        "method": "turn/completed",
+        "params": {"threadId": "thread-1", "turn": {"id": "turn-1", "items": [], "status": "completed"}},
+    }
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr("worker.persistent_codex.session_scope", fake_session_scope)
+        ambiguous_receipts = persistent_codex._commit_app_server_completion_fence(
+            settings,
+            prepared=prepared,
+            persistent=persistent,
+            completed_message=completed_message,
+            expected_thread_id="thread-1",
+            expected_native_turn_id="turn-1",
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert ambiguous_receipts == 1
+    assert turn.steering_closed_at is not None
+    assert receipt.status == "ambiguous"
+    assert receipt.error_code == "turn_completed_with_unresolved_steer"
+    assert turn.effective_input_hash == "accepted-frontier-hash"
+    assert step.ended_at is None
+    outcomes = [item for item in fake_db.added if item.__class__.__name__ == "CodexTurnOutcome"]
+    assert [item.outcome_kind for item in outcomes] == ["ambiguous", "completed"]
+    assert outcomes[-1].payload_json["event_type"] == "completion_fence"
+    assert outcomes[-1].payload_json["ambiguous_steering_receipts"] == 1
+
+
+def test_completed_turn_payload_uses_only_final_answer_agent_message():
+    from worker import persistent_codex
+
+    early_payload = json.dumps(_specialist_payload(public_reply_markdown="Too early"))
+    final_payload = json.dumps(_specialist_payload(public_reply_markdown="After completion"))
+    completed_message = {
+        "method": "turn/completed",
+        "params": {
+            "threadId": "thread-1",
+            "turn": {
+                "id": "turn-1",
+                "status": "completed",
+                "items": [
+                    {"type": "agentMessage", "text": early_payload},
+                    {"type": "agentMessage", "phase": "final_answer", "text": final_payload},
+                ],
+            },
+        },
+    }
+    assert persistent_codex._extract_completed_turn_payload(completed_message)["public_reply_markdown"] == "After completion"
+
+    early_only_message = {
+        "method": "turn/completed",
+        "params": {
+            "threadId": "thread-1",
+            "turn": {
+                "id": "turn-1",
+                "status": "completed",
+                "items": [{"type": "agentMessage", "text": early_payload}],
+            },
+        },
+    }
+    assert persistent_codex._extract_completed_turn_payload(early_only_message) is None
 
 
 def test_recover_stale_runs_routes_ticket_when_retry_budget_is_exhausted(monkeypatch, tmp_path):

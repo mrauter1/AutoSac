@@ -32,7 +32,7 @@ Dependencies use bounded major-version ranges in `requirements.txt`, but there i
 ### Optional environment groups
 
 - Workspace: `TRIAGE_WORKSPACE_DIR`, `UPLOADS_DIR`, `REPO_MOUNT_DIR`, `MANUALS_MOUNT_DIR`.
-- Codex/worker: `CODEX_API_KEY`, `CODEX_MODEL`, timeouts, polling, heartbeat and recovery budget.
+- Codex/worker: `CODEX_API_KEY`, `CODEX_MODEL`, timeouts, polling, heartbeat and recovery budget. Persistent conversations, app-server specialist transport, and active-turn steering use `CODEX_CONVERSATIONS_ENABLED`, `CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED`, and `CODEX_ACTIVE_TURN_STEERING_ENABLED`; each defaults to `false`. `CODEX_HOME` defaults to `~/autosac/codex` and is shared by AutoSac Codex ticket sessions.
 - Publication: two legacy-looking numeric threshold settings are loaded (`AUTO_SUPPORT_REPLY_MIN_CONFIDENCE`, `AUTO_CONFIRM_INTENT_MIN_CONFIDENCE`), while the current registry pipeline uses categorical per-route publication policy. They remain part of `Settings` but are not the current publication decision source.
 - Uploads: count and byte limits; names still use `MAX_IMAGES_*` though arbitrary files are accepted.
 - Sessions: default hours and remember days.
@@ -197,4 +197,3 @@ External boundaries—Codex subprocess, Slack HTTP and many DB interactions—ar
 | Change AI artifacts | `worker.artifacts`, `step_runner`, DB path fields/migration, run-history/backfill/readiness, ops UI/tests |
 | Change deployment topology | Startup scripts, shared disk/DB assumptions, heartbeat/worker concurrency, docs/Render/systemd config |
 | Change Superloop workflow | `superloop.py`, templates, loop-control protocol, phase/task file contracts, Superloop tests; no AutoSac runtime impact |
-

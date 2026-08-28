@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,11 +14,12 @@ from shared.config import Settings
 
 def _load_ticketing_symbols():
     pytest.importorskip("sqlalchemy")
-    from shared.models import AIRun, SessionRecord, Ticket, TicketAttachment, TicketMessage, TicketStatusHistory, TicketView, User
+    from shared.models import AIRun, CodexTurn, SessionRecord, Ticket, TicketAttachment, TicketMessage, TicketStatusHistory, TicketView, User
     from shared.ticketing import add_requester_reply, create_requester_ticket, resolve_ticket_for_requester
 
     return {
         "AIRun": AIRun,
+        "CodexTurn": CodexTurn,
         "SessionRecord": SessionRecord,
         "Ticket": Ticket,
         "TicketAttachment": TicketAttachment,
@@ -63,6 +64,61 @@ class _FakeSession:
 
     def execute(self, statement):
         return _FakeScalarResult(self.next_reference_num)
+
+
+def _make_active_turn_session(symbols):
+    from sqlalchemy.orm import Session
+
+    class _ActiveTurnSession(Session):
+        def __init__(self):
+            self.added = []
+            self.existing = {}
+            self.operations = []
+            self.ai_runs = []
+            self.turns = []
+
+        def add(self, item):
+            self.added.append(item)
+            self.operations.append(("add", item))
+            if isinstance(item, symbols["AIRun"]):
+                self.ai_runs.append(item)
+            elif isinstance(item, symbols["CodexTurn"]):
+                self.turns.append(item)
+            key = getattr(item, "user_id", None), getattr(item, "ticket_id", None)
+            if key != (None, None):
+                self.existing[(type(item), key)] = item
+
+        def flush(self):
+            self.operations.append(("flush", None))
+
+        def get(self, model, key):
+            return self.existing.get((model, key))
+
+        def execute(self, statement, *args, **kwargs):
+            compiled = statement.compile()
+            sql = " ".join(str(compiled).split())
+            params = compiled.params
+            if "FROM ai_runs JOIN codex_turns" in sql:
+                count = 0
+                for run in self.ai_runs:
+                    if run.ticket_id != params["ticket_id_1"] or run.status not in params["status_1"]:
+                        continue
+                    if run.forced_route_target_id is not None or run.forced_specialist_id is not None:
+                        continue
+                    for turn in self.turns:
+                        if turn.ai_run_id != run.id:
+                            continue
+                        if turn.status not in params["status_2"]:
+                            continue
+                        if turn.steering_closed_at is not None:
+                            continue
+                        if turn.transport_kind != params["transport_kind_1"]:
+                            continue
+                        count += 1
+                return _FakeScalarResult(count)
+            raise AssertionError(f"Unexpected execute: {sql}")
+
+    return _ActiveTurnSession()
 
 
 @dataclass
@@ -383,6 +439,106 @@ def test_add_requester_reply_accepts_mixed_attachments(monkeypatch, tmp_path):
     _assert_flush_before_attachments(fake_db, attachments)
     assert all(attachment.message_id == message.id for attachment in attachments)
     assert all(Path(attachment.stored_path).resolve().is_relative_to(settings.uploads_dir.resolve()) for attachment in attachments)
+
+
+@pytest.mark.parametrize(
+    ("ticket_status", "steering_enabled", "app_server_transport_enabled", "transport_kind", "expected_requeue"),
+    [
+        ("ai_triage", True, True, "app_server", "ticket_content"),
+        ("ai_triage", False, True, "app_server", "requester_reply"),
+        ("ai_triage", True, False, "app_server", "requester_reply"),
+        ("ai_triage", True, True, "exec", "requester_reply"),
+        ("waiting_on_user", True, True, "app_server", "requester_reply"),
+        ("resolved", True, True, "app_server", "reopen"),
+    ],
+)
+def test_add_requester_reply_real_compatibility_matrix(
+    monkeypatch,
+    tmp_path,
+    ticket_status,
+    steering_enabled,
+    app_server_transport_enabled,
+    transport_kind,
+    expected_requeue,
+):
+    symbols = _load_ticketing_symbols()
+    from shared.security import utc_now
+
+    db = _make_active_turn_session(symbols)
+    monkeypatch.setattr("shared.ticketing.record_ticket_public_message_added_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("shared.ticketing.record_ticket_status_changed_event", lambda *args, **kwargs: None)
+    settings = replace(
+        _make_settings(tmp_path),
+        codex_conversations_enabled=True,
+        codex_app_server_specialist_transport_enabled=app_server_transport_enabled,
+        codex_active_turn_steering_enabled=steering_enabled,
+    )
+    requester = symbols["User"](
+        id=uuid.uuid4(),
+        email="requester@example.com",
+        display_name="Requester",
+        password_hash="hash",
+        role="requester",
+        is_active=True,
+    )
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=2,
+        reference="T-000002",
+        title="Requester compatibility matrix",
+        created_by_user_id=requester.id,
+        status=ticket_status,
+        urgent=False,
+        resolved_at=utc_now() if ticket_status == "resolved" else None,
+    )
+    active_run = symbols["AIRun"](
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        triggered_by="requester_reply",
+        forced_route_target_id=None,
+        forced_specialist_id=None,
+    )
+    active_turn = symbols["CodexTurn"](
+        id=uuid.uuid4(),
+        conversation_id=uuid.uuid4(),
+        ai_run_id=active_run.id,
+        turn_index=1,
+        status="running",
+        transport_kind=transport_kind,
+        specialist_id="support",
+        agent_spec_version="v1",
+        output_contract="specialist_result",
+        steering_closed_at=None,
+    )
+    db.add(active_run)
+    db.add(active_turn)
+    def fake_create_pending_ai_run(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("shared.ticketing.create_pending_ai_run", fake_create_pending_ai_run)
+
+    message, attachments, run = symbols["add_requester_reply"](
+        db,
+        settings=settings,
+        slack_runtime=_make_slack_runtime(settings),
+        ticket=ticket,
+        requester=requester,
+        body_markdown="Please include this follow-up.",
+        attachments=[],
+    )
+
+    assert message.source == "requester_reply"
+    assert attachments == []
+    assert ticket.status == "ai_triage"
+    if expected_requeue == "ticket_content":
+        assert run is None
+        assert ticket.requeue_trigger == expected_requeue
+        assert ticket.requeue_source_message_id == message.id
+    else:
+        assert run is None
+        assert ticket.requeue_trigger == expected_requeue
+        assert ticket.requeue_source_message_id is None
 
 
 def test_resolve_ticket_for_requester_updates_status_and_view():

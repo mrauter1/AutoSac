@@ -4,12 +4,28 @@ from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 import uuid
 
 from sqlalchemy import select
 
-from shared.models import AIDraft, AIRun, CodexConversation, CodexSession, CodexTurn, CodexTurnInput, CodexTurnOutcome, TicketMessage, TicketStatusHistory
+from shared.codex_knowledge import (
+    KnownConversationInputs,
+    causal_message_is_known_to_conversation,
+    load_conversation_known_inputs as _load_conversation_known_inputs,
+)
+from shared.models import (
+    AIDraft,
+    AIRun,
+    CodexConversation,
+    CodexSession,
+    CodexTurn,
+    CodexTurnOutcome,
+    TicketAttachment,
+    TicketMessage,
+    TicketStatusHistory,
+)
 from worker.ticket_loader import LoadedTicketContext
 
 
@@ -34,6 +50,10 @@ class PromptConversationState:
     recovery_required: bool
     pending_events: tuple[OrderedInputEvent, ...]
     current_events: tuple[OrderedInputEvent, ...]
+
+
+class UnsupportedInputBundleError(ValueError):
+    """Raised when an ordered input event cannot be sent without losing content."""
 
 
 def _isoformat(value: datetime | None) -> str | None:
@@ -110,31 +130,158 @@ def _build_run_trigger_event(run: AIRun) -> OrderedInputEvent | None:
 
 def _synthetic_message_id(message: TicketMessage, *, visibility: str) -> str:
     payload = {
+        "ticket_id": str(getattr(message, "ticket_id", None)) if getattr(message, "ticket_id", None) else None,
         "author_type": getattr(message, "author_type", None),
+        "author_user_id": str(getattr(message, "author_user_id", None)) if getattr(message, "author_user_id", None) else None,
         "visibility": visibility,
         "source": getattr(message, "source", None),
         "created_at": _isoformat(getattr(message, "created_at", None)),
         "body_text": getattr(message, "body_text", None),
+        "body_markdown": getattr(message, "body_markdown", None),
     }
     return hashlib.sha256(_serialize_payload(payload).encode("utf-8")).hexdigest()
 
 
-def _build_message_event(message: TicketMessage, *, visibility: str) -> OrderedInputEvent:
+def _is_image_attachment(attachment: TicketAttachment) -> bool:
+    return getattr(attachment, "width", None) is not None and getattr(attachment, "height", None) is not None
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        return path.resolve(strict=False).is_relative_to(root.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _attachment_safe_payload(
+    attachment: TicketAttachment,
+    *,
+    max_attachment_bytes: int | None = None,
+) -> dict[str, Any]:
+    attachment_id = str(getattr(attachment, "id", ""))
+    stored_path = str(getattr(attachment, "stored_path", "") or "")
+    size_bytes = getattr(attachment, "size_bytes", None)
+    representation_errors: list[str] = []
+    if not attachment_id:
+        representation_errors.append("missing_attachment_id")
+    if not stored_path.strip():
+        representation_errors.append("missing_stored_path")
+    if size_bytes is None:
+        representation_errors.append("missing_size_bytes")
+    elif max_attachment_bytes is not None and int(size_bytes) > max_attachment_bytes:
+        representation_errors.append("attachment_too_large")
+    safe_input = None
+    if not representation_errors:
+        safe_input = {
+            "kind": "file_path",
+            "stored_path": stored_path,
+            "is_image": _is_image_attachment(attachment),
+        }
+    return {
+        "attachment_id": attachment_id,
+        "message_id": str(getattr(attachment, "message_id", "")),
+        "visibility": getattr(attachment, "visibility", None),
+        "original_filename": getattr(attachment, "original_filename", None),
+        "mime_type": getattr(attachment, "mime_type", None),
+        "sha256": getattr(attachment, "sha256", None),
+        "size_bytes": int(size_bytes) if size_bytes is not None else None,
+        "width": getattr(attachment, "width", None),
+        "height": getattr(attachment, "height", None),
+        "created_at": _isoformat(getattr(attachment, "created_at", None)),
+        "safe_input": safe_input,
+        "representation_status": "supported" if not representation_errors else "unsupported",
+        "representation_errors": tuple(representation_errors),
+    }
+
+
+def _message_bundle_payload(
+    message: TicketMessage,
+    *,
+    visibility: str,
+    message_id_text: str,
+    ticket_id: uuid.UUID | None = None,
+    attachments: tuple[TicketAttachment, ...] = (),
+    max_attachment_bytes: int | None = None,
+) -> dict[str, Any]:
+    attachment_payloads = tuple(
+        _attachment_safe_payload(attachment, max_attachment_bytes=max_attachment_bytes)
+        for attachment in sorted(
+            attachments,
+            key=lambda attachment: (
+                _isoformat(getattr(attachment, "created_at", None)) or "",
+                str(getattr(attachment, "id", "")),
+            ),
+        )
+    )
+    bundle_errors: list[str] = []
+    if any(payload.get("representation_status") != "supported" for payload in attachment_payloads):
+        bundle_errors.append("unsupported_attachment")
+    author_user_id = getattr(message, "author_user_id", None)
+    ai_run_id = getattr(message, "ai_run_id", None)
+    codex_turn_outcome_id = getattr(message, "codex_turn_outcome_id", None)
+    resolved_ticket_id = ticket_id or getattr(message, "ticket_id", None)
+    body_text = getattr(message, "body_text", None)
+    body_markdown = getattr(message, "body_markdown", None)
+    payload = {
+        "message_id": message_id_text,
+        "dedupe_key": f"ticket-message:{message_id_text}",
+        "ticket_id": str(resolved_ticket_id) if resolved_ticket_id else None,
+        "author": {
+            "user_id": str(author_user_id) if author_user_id else None,
+            "type": getattr(message, "author_type", None),
+        },
+        "author_user_id": str(author_user_id) if author_user_id else None,
+        "author_type": getattr(message, "author_type", None),
+        "visibility": visibility,
+        "source": getattr(message, "source", None),
+        "created_at": _isoformat(getattr(message, "created_at", None)),
+        "body": {
+            "text": body_text,
+            "markdown": body_markdown,
+        },
+        "body_text": body_text,
+        "body_markdown": body_markdown,
+        "attachments": attachment_payloads,
+        "bundle": {
+            "logical_input": "ticket_message_with_attachments",
+            "attachment_count": len(attachment_payloads),
+            "representation_status": "supported" if not bundle_errors else "unsupported",
+            "representation_errors": tuple(bundle_errors),
+        },
+        "causal": {
+            "ai_run_id": str(ai_run_id) if ai_run_id else None,
+            "codex_turn_outcome_id": str(codex_turn_outcome_id) if codex_turn_outcome_id else None,
+        },
+        "ai_run_id": str(ai_run_id) if ai_run_id else None,
+        "codex_turn_outcome_id": str(codex_turn_outcome_id) if codex_turn_outcome_id else None,
+    }
+    return payload
+
+
+def _build_message_event(
+    message: TicketMessage,
+    *,
+    visibility: str,
+    ticket_id: uuid.UUID | None = None,
+    attachments: tuple[TicketAttachment, ...] = (),
+    max_attachment_bytes: int | None = None,
+) -> OrderedInputEvent:
     message_id = getattr(message, "id", None)
     message_id_text = str(message_id) if message_id is not None else _synthetic_message_id(message, visibility=visibility)
+    payload = _message_bundle_payload(
+        message,
+        visibility=visibility,
+        message_id_text=message_id_text,
+        ticket_id=ticket_id,
+        attachments=attachments,
+        max_attachment_bytes=max_attachment_bytes,
+    )
     return OrderedInputEvent(
         event_kind="ticket_message",
         source_kind="ticket_message",
         source_id=message_id,
         dedupe_key=f"ticket-message:{message_id_text}",
-        payload_json={
-            "message_id": message_id_text,
-            "author_type": getattr(message, "author_type", None),
-            "visibility": visibility,
-            "source": getattr(message, "source", None),
-            "created_at": _isoformat(getattr(message, "created_at", None)),
-            "body_text": getattr(message, "body_text", None),
-        },
+        payload_json=payload,
         order_key=(2, _isoformat(getattr(message, "created_at", None)), message_id_text),
     )
 
@@ -249,17 +396,35 @@ def build_ordered_input_events(
     conversation_id: uuid.UUID | None,
     include_turn_summaries: bool = True,
     exclude_ai_run_id=None,
+    max_attachment_bytes: int | None = None,
 ) -> tuple[OrderedInputEvent, ...]:
     events: list[OrderedInputEvent] = [_build_ticket_state_event(context)]
     run_trigger_event = _build_run_trigger_event(run)
     if run_trigger_event is not None:
         events.append(run_trigger_event)
+    public_attachments_by_message: dict[uuid.UUID, list[TicketAttachment]] = {}
+    for attachment in context.public_attachments:
+        public_attachments_by_message.setdefault(attachment.message_id, []).append(attachment)
     for message in context.public_messages:
-        events.append(_build_message_event(message, visibility="public"))
+        message_id = getattr(message, "id", None)
+        events.append(
+            _build_message_event(
+                message,
+                visibility="public",
+                ticket_id=context.ticket.id,
+                attachments=tuple(public_attachments_by_message.get(message_id, ())) if message_id is not None else (),
+                max_attachment_bytes=max_attachment_bytes,
+            )
+        )
     for message in context.internal_messages:
-        if message.source != "human_internal_note":
-            continue
-        events.append(_build_message_event(message, visibility="internal"))
+        events.append(
+            _build_message_event(
+                message,
+                visibility="internal",
+                ticket_id=context.ticket.id,
+                max_attachment_bytes=max_attachment_bytes,
+            )
+        )
     status_history = list(
         db.execute(
             select(TicketStatusHistory)
@@ -311,21 +476,247 @@ def hash_input_events(events: tuple[OrderedInputEvent, ...] | list[OrderedInputE
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def _load_consumed_dedupe_keys(db, *, conversation_id: uuid.UUID, exclude_ai_run_id=None) -> set[str]:
-    inputs = list(
-        db.execute(
-            select(CodexTurnInput.dedupe_key, CodexTurn.ai_run_id)
-            .join(CodexTurn, CodexTurn.id == CodexTurnInput.turn_id)
-            .where(CodexTurn.conversation_id == conversation_id)
-            .order_by(CodexTurn.turn_index.asc(), CodexTurnInput.input_index.asc())
-        ).all()
+def _event_body_candidates(event: OrderedInputEvent) -> tuple[str, ...]:
+    body = event.payload_json.get("body") if isinstance(event.payload_json.get("body"), dict) else {}
+    values = (
+        event.payload_json.get("body_markdown"),
+        event.payload_json.get("body_text"),
+        body.get("markdown"),
+        body.get("text"),
     )
-    consumed: set[str] = set()
-    for dedupe_key, ai_run_id in inputs:
-        if exclude_ai_run_id is not None and ai_run_id == exclude_ai_run_id:
+    return tuple(str(value) for value in values if value is not None)
+
+
+def event_is_known_to_conversation(
+    db,
+    *,
+    event: OrderedInputEvent,
+    conversation_id: uuid.UUID,
+    known_inputs: KnownConversationInputs | None = None,
+    exclude_ai_run_id=None,
+) -> bool:
+    known = known_inputs or _load_conversation_known_inputs(
+        db,
+        conversation_id=conversation_id,
+        exclude_ai_run_id=exclude_ai_run_id,
+    )
+    if event.dedupe_key in known.dedupe_keys:
+        return True
+    if event.source_kind != "ticket_message":
+        return False
+    causal = event.payload_json.get("causal") or {}
+    return causal_message_is_known_to_conversation(
+        known_inputs=known,
+        author_type=event.payload_json.get("author_type"),
+        source=event.payload_json.get("source"),
+        body_candidates=_event_body_candidates(event),
+        ai_run_id=causal.get("ai_run_id") or event.payload_json.get("ai_run_id"),
+        outcome_id=causal.get("codex_turn_outcome_id") or event.payload_json.get("codex_turn_outcome_id"),
+        exclude_ai_run_id=exclude_ai_run_id,
+    )
+
+
+def _filter_strictly_unseen_input_events(
+    db,
+    *,
+    events: tuple[OrderedInputEvent, ...],
+    conversation_id: uuid.UUID,
+    known_inputs: KnownConversationInputs,
+    exclude_ai_run_id=None,
+) -> tuple[OrderedInputEvent, ...]:
+    return tuple(
+        event
+        for event in events
+        if not event_is_known_to_conversation(
+            db,
+            event=event,
+            conversation_id=conversation_id,
+            known_inputs=known_inputs,
+            exclude_ai_run_id=exclude_ai_run_id,
+        )
+    )
+
+
+def load_strictly_unseen_input_events(
+    db,
+    *,
+    context: LoadedTicketContext,
+    run: AIRun,
+    conversation_id: uuid.UUID | None = None,
+    include_turn_summaries: bool = True,
+    max_attachment_bytes: int | None = None,
+) -> tuple[OrderedInputEvent, ...]:
+    if conversation_id is None:
+        conversation = db.execute(
+            select(CodexConversation)
+            .where(CodexConversation.ticket_id == context.ticket.id)
+            .limit(1)
+        ).scalar_one_or_none()
+        conversation_id = conversation.id if conversation is not None else None
+    if conversation_id is None:
+        return ()
+    current_events = build_ordered_input_events(
+        db,
+        context=context,
+        run=run,
+        conversation_id=conversation_id,
+        include_turn_summaries=include_turn_summaries,
+        exclude_ai_run_id=run.id,
+        max_attachment_bytes=max_attachment_bytes,
+    )
+    known_inputs = _load_conversation_known_inputs(db, conversation_id=conversation_id, exclude_ai_run_id=run.id)
+    return _filter_strictly_unseen_input_events(
+        db,
+        events=current_events,
+        conversation_id=conversation_id,
+        known_inputs=known_inputs,
+        exclude_ai_run_id=run.id,
+    )
+
+def _validated_bundle_attachments(
+    event: OrderedInputEvent,
+    *,
+    trusted_attachment_root: Path | None = None,
+    max_attachment_bytes: int | None = None,
+) -> tuple[tuple[dict[str, Any], ...], tuple[str, ...]]:
+    attachments = tuple(event.payload_json.get("attachments") or ())
+    unsupported_attachments = [
+        attachment
+        for attachment in attachments
+        if attachment.get("representation_status") != "supported" or attachment.get("safe_input") is None
+    ]
+    if unsupported_attachments:
+        raise UnsupportedInputBundleError("Ticket message bundle has unsupported attachments")
+    if not attachments:
+        return (), ()
+
+    local_image_paths: list[str] = []
+    if trusted_attachment_root is None:
+        return attachments, ()
+
+    if not trusted_attachment_root.exists():
+        raise UnsupportedInputBundleError("Trusted attachment root is unavailable")
+    if not trusted_attachment_root.is_dir():
+        raise UnsupportedInputBundleError("Trusted attachment root is not a directory")
+
+    validated_attachments: list[dict[str, Any]] = []
+    for attachment in attachments:
+        safe_input = attachment.get("safe_input") or {}
+        stored_path = safe_input.get("stored_path")
+        if not isinstance(stored_path, str) or not stored_path.strip():
+            raise UnsupportedInputBundleError("Ticket message attachment is missing a stored path")
+        attachment_path = Path(stored_path)
+        if not _path_is_within(attachment_path, trusted_attachment_root):
+            raise UnsupportedInputBundleError("Ticket message attachment escaped the trusted upload boundary")
+        try:
+            resolved_path = attachment_path.resolve(strict=True)
+            stat_result = resolved_path.stat()
+            if not resolved_path.is_file():
+                raise UnsupportedInputBundleError("Ticket message attachment is not a readable file")
+            with resolved_path.open("rb") as handle:
+                handle.read(1)
+        except UnsupportedInputBundleError:
+            raise
+        except (FileNotFoundError, OSError) as exc:
+            raise UnsupportedInputBundleError(
+                f"Ticket message attachment is unavailable: {stored_path}"
+            ) from exc
+        actual_size = stat_result.st_size
+        size_bytes = attachment.get("size_bytes")
+        if size_bytes is None:
+            raise UnsupportedInputBundleError("Ticket message attachment is missing size metadata")
+        try:
+            expected_size = int(size_bytes)
+        except (TypeError, ValueError) as exc:
+            raise UnsupportedInputBundleError("Ticket message attachment has invalid size metadata") from exc
+        if actual_size != expected_size:
+            raise UnsupportedInputBundleError("Ticket message attachment size no longer matches stored metadata")
+        if max_attachment_bytes is not None and actual_size > max_attachment_bytes:
+            raise UnsupportedInputBundleError("Ticket message attachment exceeds the active-turn size limit")
+        if safe_input.get("is_image") is True:
+            local_image_paths.append(str(resolved_path))
+        validated_attachments.append(attachment)
+    return tuple(validated_attachments), tuple(local_image_paths)
+
+
+def render_ticket_message_bundle(
+    event: OrderedInputEvent,
+    *,
+    trusted_attachment_root: Path | None = None,
+    max_attachment_bytes: int | None = None,
+) -> dict[str, Any]:
+    if event.source_kind != "ticket_message":
+        raise UnsupportedInputBundleError(f"Event is not a ticket message bundle: {event.source_kind}")
+    bundle = event.payload_json.get("bundle") or {}
+    if bundle.get("representation_status") != "supported":
+        errors = bundle.get("representation_errors") or ("unsupported_bundle",)
+        raise UnsupportedInputBundleError(f"Ticket message bundle cannot be represented: {', '.join(map(str, errors))}")
+    attachments, _local_image_paths = _validated_bundle_attachments(
+        event,
+        trusted_attachment_root=trusted_attachment_root,
+        max_attachment_bytes=max_attachment_bytes,
+    )
+    return {
+        "kind": "ticket_message",
+        "dedupe_key": event.dedupe_key,
+        "message": event.payload_json,
+        "body_text": event.payload_json.get("body_text") or "",
+        "attachments": tuple(attachments),
+    }
+
+
+def render_ordered_input_event_for_codex(
+    event: OrderedInputEvent,
+    *,
+    trusted_attachment_root: Path | None = None,
+    max_attachment_bytes: int | None = None,
+) -> dict[str, Any]:
+    if event.source_kind == "ticket_message":
+        return render_ticket_message_bundle(
+            event,
+            trusted_attachment_root=trusted_attachment_root,
+            max_attachment_bytes=max_attachment_bytes,
+        )
+    return {
+        "kind": event.event_kind,
+        "dedupe_key": event.dedupe_key,
+        "payload": event.payload_json,
+    }
+
+
+def render_ordered_input_events_for_codex(
+    events: tuple[OrderedInputEvent, ...],
+    *,
+    trusted_attachment_root: Path | None = None,
+    max_attachment_bytes: int | None = None,
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        render_ordered_input_event_for_codex(
+            event,
+            trusted_attachment_root=trusted_attachment_root,
+            max_attachment_bytes=max_attachment_bytes,
+        )
+        for event in events
+    )
+
+
+def local_image_input_items_for_events(
+    events: tuple[OrderedInputEvent, ...],
+    *,
+    trusted_attachment_root: Path | None,
+    max_attachment_bytes: int | None = None,
+) -> tuple[dict[str, Any], ...]:
+    image_paths: list[str] = []
+    for event in events:
+        if event.source_kind != "ticket_message":
             continue
-        consumed.add(str(dedupe_key))
-    return consumed
+        _attachments, event_image_paths = _validated_bundle_attachments(
+            event,
+            trusted_attachment_root=trusted_attachment_root,
+            max_attachment_bytes=max_attachment_bytes,
+        )
+        image_paths.extend(event_image_paths)
+    return tuple({"type": "localImage", "path": path} for path in image_paths)
 
 
 def _prompt_context_from_pending_events(
@@ -599,20 +990,26 @@ def build_prompt_conversation_state(
             pending_events=current_events,
             current_events=current_events,
         )
-    consumed_keys = _load_consumed_dedupe_keys(db, conversation_id=conversation.id, exclude_ai_run_id=run.id)
-    pending_events = tuple(event for event in current_events if event.dedupe_key not in consumed_keys)
+    known_inputs = _load_conversation_known_inputs(db, conversation_id=conversation.id, exclude_ai_run_id=run.id)
+    pending_events = _filter_strictly_unseen_input_events(
+        db,
+        events=current_events,
+        conversation_id=conversation.id,
+        known_inputs=known_inputs,
+        exclude_ai_run_id=run.id,
+    )
     recovery_required = (
         conversation.status == "recovery_required"
         or active_session is None
         or not (active_session.thread_id or "").strip()
     )
-    if not pending_events:
-        pending_events = current_events
     prompt_mode = "resume_delta"
     if recovery_required:
         prompt_mode = "recovery_replay"
     elif not feature_enabled:
         prompt_mode = "fallback_replay"
+    if not pending_events and prompt_mode in {"recovery_replay", "fallback_replay"}:
+        pending_events = current_events
     prompt_context = context if prompt_mode == "initial_full" else _prompt_context_from_pending_events(context, pending_events=pending_events)
     prompt_appendix = ""
     if prompt_mode != "initial_full":

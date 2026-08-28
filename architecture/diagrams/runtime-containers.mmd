@@ -9,19 +9,27 @@ flowchart TB
     subgraph WORKER[Worker process]
       POLL[AI queue poller]
       PIPE[AI pipeline]
+      EXEC[Codex exec step runner]
+      PERSIST[Persistent specialist adapter]
+      APP_SERVER[App-server stdio client]
       HEART[Heartbeat thread]
       SYNC[Slack sync thread]
       DELIVERY[Slack delivery thread]
       POLL --> PIPE
+      PIPE --> EXEC
+      PIPE --> PERSIST
+      PERSIST --> APP_SERVER
     end
     DB[(PostgreSQL)]
     FS[(Triage workspace)]
-    CODEX[Codex CLI]
+    CODEX[Codex CLI / model service]
     SLACK[Slack Web API]
     WEB <--> DB
     WEB <--> FS
     WORKER <--> DB
     WORKER <--> FS
-    PIPE --> CODEX
+    EXEC --> CODEX
+    PERSIST --> CODEX
+    APP_SERVER --> CODEX
     SYNC --> SLACK
     DELIVERY --> SLACK

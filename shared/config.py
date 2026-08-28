@@ -182,6 +182,8 @@ class Settings:
     ai_run_max_recovery_attempts: int = 3
     default_ui_locale: str = "en"
     codex_conversations_enabled: bool = False
+    codex_app_server_specialist_transport_enabled: bool = False
+    codex_active_turn_steering_enabled: bool = False
     codex_home: Path | None = None
     slack: SlackSettings = field(default_factory=SlackSettings)
 
@@ -209,6 +211,12 @@ class Settings:
         return (self.codex_home or DEFAULT_AUTOSAC_CODEX_HOME).expanduser()
 
     def validate_persistent_codex_contracts(self, *, require_writable_home: bool) -> None:
+        if self.codex_app_server_specialist_transport_enabled and not self.codex_conversations_enabled:
+            raise SettingsError("CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED requires CODEX_CONVERSATIONS_ENABLED")
+        if self.codex_active_turn_steering_enabled and not self.codex_app_server_specialist_transport_enabled:
+            raise SettingsError(
+                "CODEX_ACTIVE_TURN_STEERING_ENABLED requires CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED"
+            )
         if not self.codex_conversations_enabled:
             return
         codex_home = self.resolved_codex_home
@@ -284,6 +292,11 @@ def get_settings() -> Settings:
         ai_run_max_recovery_attempts=_env_int("AI_RUN_MAX_RECOVERY_ATTEMPTS", 3),
         default_ui_locale=get_default_ui_locale(),
         codex_conversations_enabled=_env_bool("CODEX_CONVERSATIONS_ENABLED", False),
+        codex_app_server_specialist_transport_enabled=_env_bool(
+            "CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED",
+            False,
+        ),
+        codex_active_turn_steering_enabled=_env_bool("CODEX_ACTIVE_TURN_STEERING_ENABLED", False),
         codex_home=Path(codex_home).expanduser() if codex_home and codex_home.strip() else DEFAULT_AUTOSAC_CODEX_HOME,
         slack=SlackSettings(),
     )

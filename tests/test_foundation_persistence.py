@@ -345,6 +345,70 @@ def test_persistent_codex_model_indexes_encode_cardinality_constraints():
     assert message_indexes["uq_ticket_messages_codex_turn_outcome_id"].unique is True
 
 
+def test_active_turn_steering_models_expose_triggers_receipts_and_transport_metadata():
+    pytest.importorskip("sqlalchemy")
+    from sqlalchemy import CheckConstraint
+
+    from shared.models import (
+        AI_RUN_TRIGGERS,
+        CODEX_TURN_OUTCOME_KINDS,
+        CODEX_TURN_STEER_STATUSES,
+        CODEX_TURN_TRANSPORT_KINDS,
+        REQUEUE_TRIGGERS,
+        AIRun,
+        CodexTurn,
+        CodexTurnSteer,
+        Ticket,
+    )
+
+    assert "ticket_content" in AI_RUN_TRIGGERS
+    assert "ticket_content" in REQUEUE_TRIGGERS
+    assert CODEX_TURN_TRANSPORT_KINDS == ("exec", "app_server")
+    assert CODEX_TURN_STEER_STATUSES == ("prepared", "sending", "accepted", "rejected", "ambiguous")
+    assert "internal_note_published" in CODEX_TURN_OUTCOME_KINDS
+
+    assert "requeue_source_message_id" in Ticket.__table__.c
+    assert "ix_tickets_requeue_source_message_id" in {index.name for index in Ticket.__table__.indexes}
+    assert "transport_kind" in CodexTurn.__table__.c
+    assert "native_turn_id" in CodexTurn.__table__.c
+    assert "steering_closed_at" in CodexTurn.__table__.c
+    assert "effective_input_hash" in CodexTurn.__table__.c
+    assert "codex_turn_steers" in CodexTurnSteer.metadata.tables
+
+    ticket_constraints = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in Ticket.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    ai_run_constraints = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in AIRun.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    turn_constraints = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in CodexTurn.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    steer_constraints = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in CodexTurnSteer.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    turn_indexes = {index.name: index for index in CodexTurn.__table__.indexes}
+    steer_indexes = {index.name: index for index in CodexTurnSteer.__table__.indexes}
+
+    assert "ticket_content" in ticket_constraints["ck_tickets_tickets_requeue_trigger"]
+    assert "ticket_content" in ai_run_constraints["ck_ai_runs_ai_runs_triggered_by"]
+    assert "app_server" in turn_constraints["ck_codex_turns_codex_turns_transport_kind"]
+    assert "ambiguous" in steer_constraints["ck_codex_turn_steers_codex_turn_steers_status"]
+    assert turn_indexes["uq_codex_turns_session_native_turn_id"].unique is True
+    assert str(turn_indexes["uq_codex_turns_session_native_turn_id"].dialect_options["postgresql"]["where"]) == (
+        "session_id IS NOT NULL AND native_turn_id IS NOT NULL"
+    )
+    assert steer_indexes["uq_codex_turn_steers_turn_id_dedupe_key"].unique is True
+
+
 def test_persistent_codex_turn_presenter_summarizes_latest_outcome():
     from shared.codex_conversations import present_codex_turn_state
 
@@ -388,6 +452,43 @@ def test_persistent_codex_transport_fencing_migration_adds_lease_fields():
     assert 'op.create_index("ix_codex_sessions_lease_expires_at"' in migration_source
     assert 'codex_sessions_lease_owner_matches_worker_instance' in migration_source
     assert "lease_worker_pid" not in migration_source
+
+
+def test_active_turn_steering_schema_migration_is_additive_and_extends_trigger_checks():
+    migration_source = Path(
+        "shared/migrations/versions/20260825_0015_active_turn_steering_schema.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'down_revision = "20260824_0014"' in migration_source
+    assert 'op.add_column(\n        "codex_turns"' in migration_source
+    assert 'sa.Column("transport_kind"' in migration_source
+    assert 'sa.Column("native_turn_id"' in migration_source
+    assert 'sa.Column("steering_closed_at"' in migration_source
+    assert 'sa.Column("effective_input_hash"' in migration_source
+    assert "CREATE UNIQUE INDEX uq_codex_turns_session_native_turn_id" in migration_source
+    assert 'op.create_table(\n        "codex_turn_steers"' in migration_source
+    assert "status IN ('prepared', 'sending', 'accepted', 'rejected', 'ambiguous')" in migration_source
+    assert '"uq_codex_turn_steers_turn_id_dedupe_key"' in migration_source
+    assert 'op.add_column("tickets", sa.Column("requeue_source_message_id"' in migration_source
+    assert "fk_tickets_requeue_source_message_id_ticket_messages" in migration_source
+    assert "requeue_trigger IS NULL OR requeue_trigger IN ('requester_reply', 'manual_rerun', 'reopen', 'ticket_content')" in migration_source
+    assert "triggered_by IN ('new_ticket', 'requester_reply', 'manual_rerun', 'reopen', 'ticket_content')" in migration_source
+    assert 'op.drop_table("codex_turn_steers")' in migration_source
+    assert 'op.drop_column("tickets", "requeue_source_message_id")' in migration_source
+    assert 'op.drop_column("codex_turns", "transport_kind")' in migration_source
+    assert "thread/fork" not in migration_source
+
+
+def test_internal_note_outcome_migration_extends_and_restores_outcome_check():
+    migration_source = Path(
+        "shared/migrations/versions/20260827_0016_internal_note_outcome.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'down_revision = "20260825_0015"' in migration_source
+    assert '"internal_note_published"' in migration_source
+    assert "ck_codex_turn_outcomes_codex_turn_outcomes_outcome_kind" in migration_source
+    assert "UPDATE ticket_messages SET codex_turn_outcome_id = NULL" in migration_source
+    assert "DELETE FROM codex_turn_outcomes WHERE outcome_kind = 'internal_note_published'" in migration_source
 
 
 def test_route_target_compatibility_migration_adds_backfill_and_selector_step_kind():

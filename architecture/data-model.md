@@ -37,6 +37,15 @@ erDiagram
     AI_RUN ||--o{ TICKET_MESSAGE : produces
     TICKET_MESSAGE ||--o| AI_DRAFT : publishes
 
+    TICKET ||--o| CODEX_CONVERSATION : owns
+    CODEX_CONVERSATION ||--o{ CODEX_SESSION : contains
+    CODEX_CONVERSATION ||--o{ CODEX_TURN : records
+    CODEX_SESSION ||--o{ CODEX_TURN : executes
+    CODEX_TURN ||--o{ CODEX_TURN_INPUT : accepts
+    CODEX_TURN ||--o{ CODEX_TURN_ITEM : observes
+    CODEX_TURN ||--o{ CODEX_TURN_OUTCOME : summarizes
+    CODEX_TURN ||--o{ CODEX_TURN_STEER : receipts
+
     INTEGRATION_EVENT ||--o{ INTEGRATION_EVENT_LINK : links
     INTEGRATION_EVENT ||--o{ INTEGRATION_EVENT_TARGET : delivers_to
 ```
@@ -57,6 +66,13 @@ erDiagram
 | `TicketView` / `ticket_views` | Last-viewed timestamp | Composite PK `(user_id, ticket_id)` supports unread calculations |
 | `AIRun` / `ai_runs` | Queue status/trigger, input hash, model/pipeline, forced routing, final structured output, artifact paths, worker ownership/heartbeat/recovery | FK to ticket/requesting user; partial unique active-run index; final step ID is stored but not declared as an FK |
 | `AIRunStep` / `ai_run_steps` | Ordered router/selector/specialist execution, spec/version/contract/model, paths, output JSON, error and timing | FK to AI run; unique `(ai_run_id, step_index)` |
+| `CodexConversation` / `codex_conversations` | One logical persistent Codex conversation per ticket, including active/recovery/unavailable/closed state | FK to ticket; at most one row per ticket |
+| `CodexSession` / `codex_sessions` | Native Codex thread segment, stored `thread_id`, status, lease owner/worker/expiry, start/end timestamps | FK to conversation; one active session is leased by at most one run |
+| `CodexTurn` / `codex_turns` | Persistent specialist turn metadata, transport kind (`exec` or `app_server`), native turn ID, output contract, artifact paths, acceptance/completion/fence times, effective input hash | FK to conversation/session/run; unique run, monotonic conversation turn index, one active turn per conversation, unique native turn per session when present |
+| `CodexTurnInput` / `codex_turn_inputs` | Ordered input events accepted into a persistent turn, including event/source identity, dedupe key and canonical payload | FK to turn; unique turn/input index and turn/dedupe key; rows are written only after native turn acceptance |
+| `CodexTurnItem` / `codex_turn_items` | Ops-internal native protocol/JSONL items observed during persistent execution, including bounded app-server protocol artifacts and late retired-session output marked non-publishable | FK to turn; ordered by item index |
+| `CodexTurnOutcome` / `codex_turn_outcomes` | Append-only attempted/accepted/completed/publication/failure outcomes for a persistent turn, including transport lifecycle, recovery, completion-race, supersession, and steering disposition payloads | FK to turn; ordered by outcome index |
+| `CodexTurnSteer` / `codex_turn_steers` | Delivery receipts for active-turn steering attempts, including source/dedupe identity, expected native turn, RPC correlation, payload hash, delivery status and errors | FK to turn; unique turn/dedupe key |
 | `AIDraft` / `ai_drafts` | Pending requester-facing response and review/publish state | FK to ticket/run/reviewer/published message; only one current pending draft is maintained by superseding older drafts |
 | `IntegrationEvent` / `integration_events` | Immutable event snapshot, unique dedupe key, aggregate, routing/suppression result | Parent of event links and delivery targets |
 | `IntegrationEventLink` / `integration_event_links` | Polymorphic link to ticket/message/status-history entity | Unique event/entity/relation combination |
@@ -118,6 +134,7 @@ Important invariants:
 - Every material step/finalization update locks the run and checks its `worker_instance_id`.
 - Heartbeats permit stale-run recovery. A replacement records its predecessor and increments `recovery_attempt_count`.
 - Exhausted recovery adds an internal system note and routes the ticket to `waiting_on_dev_ti`.
+- Persistent specialist turns also hold a Codex session lease for the run duration. Accepted initial content is recorded in `CodexTurnInput` only after the native turn is accepted. `CodexTurn.effective_input_hash` tracks the full accepted ticket snapshot (while `CodexTurnInput` retains the exact delta delivered by that turn), so completion and publication compare the same hash domain on both initial and resumed conversations. Active-turn steering adds `CodexTurnSteer` custody records: accepted receipts are consumed input, rejected receipts remain future context, and ambiguous receipts force recovery and block publication.
 
 ## 6. AI output and draft state
 
@@ -217,4 +234,3 @@ Current source code uses this conceptual layout:
 ```
 
 `decisions.txt` is a task-scoped append-oriented ledger with runtime-created headers. `events.jsonl` is the machine-readable run lifecycle and is used to reconstruct resume checkpoints. Plan state is task-global; implementation/test artifacts and persistent Codex sessions are phase-local. Git commits provide additional checkpoints when Git mode is enabled.
-

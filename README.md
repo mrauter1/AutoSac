@@ -51,6 +51,7 @@ Unauthenticated browser navigation to protected HTML pages redirects to `/login`
 
    Optional:
    - `CODEX_API_KEY` if this runtime is not already authenticated via Codex CLI login.
+   - `CODEX_CONVERSATIONS_ENABLED`, `CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED`, and `CODEX_ACTIVE_TURN_STEERING_ENABLED` are rollout flags and default to `false`; `CODEX_HOME` defaults to `~/autosac/codex`.
    - Slack DM settings are DB-backed. Configure them later from `/ops/integrations/slack`; there are no authoritative `SLACK_*` runtime env vars in `.env`.
 
    Runtime scripts load `.env` automatically from the repository root.
@@ -192,6 +193,7 @@ The original webhook PRD remains the payload-snapshot reference in `tasks/slack_
 - `APP_BASE_URL=https://...` automatically enables secure cookies.
 - `UI_DEFAULT_LOCALE=pt-BR` makes Portuguese the server-side fallback when there is no saved language cookie and no matching browser language.
 - Leave `CODEX_API_KEY` empty to rely on existing Codex CLI login in local environments.
+- Persistent Codex conversations, app-server specialist transport, and active-turn steering are disabled by default. When enabled, all AutoSac ticket sessions share `CODEX_HOME`, defaulting to `~/autosac/codex`.
 - Slack DM delivery is DB-backed and disabled by default until an admin stores a bot token and enables it at `/ops/integrations/slack`.
 - Deploy the web request path and worker together as the same DM-capable build before enabling Slack; mixed-version Slack delivery compatibility is not supported for this pre-launch rollout.
 - Slack rollback is config-first: disable delivery or disconnect the bot token from `/ops/integrations/slack` while preserving the stored integration rows for later inspection or re-enable.

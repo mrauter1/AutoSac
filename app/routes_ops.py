@@ -39,6 +39,11 @@ from app.uploads import (
     validate_attachment_upload,
 )
 from shared.config import Settings, get_settings
+from shared.codex_knowledge import (
+    KnownConversationInputs,
+    causal_message_is_known_to_conversation,
+    load_conversation_known_inputs,
+)
 from shared.db import db_session_dependency
 from shared.integrations import build_slack_runtime_context
 from shared.models import (
@@ -48,8 +53,10 @@ from shared.models import (
     CodexConversation,
     CodexSession,
     CodexTurn,
+    CodexTurnInput,
     CodexTurnItem,
     CodexTurnOutcome,
+    CodexTurnSteer,
     Ticket,
     TicketAttachment,
     TicketMessage,
@@ -350,6 +357,72 @@ def _load_latest_published_messages_by_ai_run_id(db: Session, *, ai_run_ids: lis
     return messages
 
 
+def _delivery_event_for_ticket_message(message: TicketMessage, *, delivery_state: str) -> dict[str, object]:
+    return {
+        "event_kind": "ticket_message",
+        "source_kind": "ticket_message",
+        "source_id": message.id,
+        "dedupe_key": f"ticket-message:{message.id}",
+        "delivery_state": delivery_state,
+        "payload_excerpt": message.body_text or message.body_markdown,
+    }
+
+
+def _load_delivery_events_for_turn_detail(
+    db: Session,
+    *,
+    ticket: Ticket,
+    turn: CodexTurn,
+    inputs: list[CodexTurnInput],
+    receipts: list[CodexTurnSteer],
+    known_inputs: KnownConversationInputs,
+) -> list[dict[str, object]]:
+    represented_message_ids = {
+        source_id
+        for source_id in (
+            [input_event.source_id for input_event in inputs if input_event.source_kind == "ticket_message"]
+            + [receipt.source_id for receipt in receipts if receipt.source_kind == "ticket_message"]
+        )
+        if source_id is not None
+    }
+    events: list[dict[str, object]] = []
+    queued_message_id = (
+        ticket.requeue_source_message_id
+        if ticket.requeue_requested and ticket.requeue_trigger == "ticket_content"
+        else None
+    )
+    if queued_message_id is not None and queued_message_id not in represented_message_ids:
+        message = db.get(TicketMessage, queued_message_id)
+        if message is not None and message.ticket_id == ticket.id:
+            represented_message_ids.add(message.id)
+            events.append(_delivery_event_for_ticket_message(message, delivery_state="queued_another_run"))
+    dormant_messages = list(
+        db.execute(
+            select(TicketMessage)
+            .where(TicketMessage.ticket_id == ticket.id)
+            .order_by(TicketMessage.created_at.asc(), TicketMessage.id.asc())
+        ).scalars()
+    )
+    for message in dormant_messages:
+        if message.id in represented_message_ids:
+            continue
+        if message.id in known_inputs.ticket_message_ids:
+            continue
+        if causal_message_is_known_to_conversation(
+            known_inputs=known_inputs,
+            author_type=getattr(message, "author_type", None),
+            source=getattr(message, "source", None),
+            body_candidates=(getattr(message, "body_markdown", None), getattr(message, "body_text", None)),
+            ai_run_id=getattr(message, "ai_run_id", None),
+            outcome_id=getattr(message, "codex_turn_outcome_id", None),
+        ):
+            continue
+        if message.ai_run_id == turn.ai_run_id:
+            continue
+        events.append(_delivery_event_for_ticket_message(message, delivery_state="waiting_future_context"))
+    return events
+
+
 def _load_persistent_conversation_projection(
     db: Session,
     *,
@@ -392,6 +465,17 @@ def _load_persistent_conversation_projection(
             .group_by(CodexTurnItem.turn_id)
         ).all():
             raw_item_counts[turn_id] = int(count)
+    receipt_counts: dict[uuid.UUID, int] = {}
+    ambiguous_receipt_counts: dict[uuid.UUID, int] = {}
+    if turn_ids:
+        for turn_id, status_value, count in db.execute(
+            select(CodexTurnSteer.turn_id, CodexTurnSteer.status, func.count(CodexTurnSteer.id))
+            .where(CodexTurnSteer.turn_id.in_(turn_ids))
+            .group_by(CodexTurnSteer.turn_id, CodexTurnSteer.status)
+        ).all():
+            receipt_counts[turn_id] = receipt_counts.get(turn_id, 0) + int(count)
+            if status_value in {"prepared", "sending", "ambiguous"}:
+                ambiguous_receipt_counts[turn_id] = ambiguous_receipt_counts.get(turn_id, 0) + int(count)
     runs = {
         run.id: run
         for run in db.execute(select(AIRun).where(AIRun.id.in_(ai_run_ids))).scalars()
@@ -411,6 +495,8 @@ def _load_persistent_conversation_projection(
             raw_item_count=raw_item_counts.get(turn.id, 0),
             conversation_status=conversation.status,
         )
+        presented["steering_receipt_count"] = receipt_counts.get(turn.id, 0)
+        presented["ambiguous_blocker_count"] = ambiguous_receipt_counts.get(turn.id, 0)
         presented["detail_path"] = f"/ops/tickets/{ticket.reference}/persistent-turns/{turn.id}"
         turn_cards.append(presented)
     return {
@@ -459,6 +545,20 @@ def _load_ops_persistent_turn_detail_or_404(
             .order_by(CodexTurnOutcome.outcome_index.asc(), CodexTurnOutcome.created_at.asc(), CodexTurnOutcome.id.asc())
         ).scalars()
     )
+    inputs = list(
+        db.execute(
+            select(CodexTurnInput)
+            .where(CodexTurnInput.turn_id == turn.id)
+            .order_by(CodexTurnInput.input_index.asc(), CodexTurnInput.created_at.asc(), CodexTurnInput.id.asc())
+        ).scalars()
+    )
+    receipts = list(
+        db.execute(
+            select(CodexTurnSteer)
+            .where(CodexTurnSteer.turn_id == turn.id)
+            .order_by(CodexTurnSteer.attempted_at.asc(), CodexTurnSteer.created_at.asc(), CodexTurnSteer.id.asc())
+        ).scalars()
+    )
     items = list(
         db.execute(
             select(CodexTurnItem)
@@ -469,6 +569,20 @@ def _load_ops_persistent_turn_detail_or_404(
     run = db.get(AIRun, turn.ai_run_id)
     drafts_by_ai_run_id = _load_latest_drafts_by_ai_run_id(db, ai_run_ids=[turn.ai_run_id])
     published_messages_by_ai_run_id = _load_latest_published_messages_by_ai_run_id(db, ai_run_ids=[turn.ai_run_id])
+    known_inputs = load_conversation_known_inputs(db, conversation_id=conversation.id)
+    delivery_events = _load_delivery_events_for_turn_detail(
+        db,
+        ticket=ticket,
+        turn=turn,
+        inputs=inputs,
+        receipts=receipts,
+        known_inputs=known_inputs,
+    )
+    queued_source_id = (
+        ticket.requeue_source_message_id
+        if ticket.requeue_requested and ticket.requeue_trigger == "ticket_content"
+        else None
+    )
     return {
         "conversation": present_codex_conversation_overview(
             conversation,
@@ -485,6 +599,10 @@ def _load_ops_persistent_turn_detail_or_404(
             draft=drafts_by_ai_run_id.get(turn.ai_run_id),
             published_message=published_messages_by_ai_run_id.get(turn.ai_run_id),
             conversation_status=conversation.status,
+            receipts=receipts,
+            inputs=inputs,
+            delivery_events=delivery_events,
+            queued_source_id=queued_source_id,
         ),
     }
 
@@ -1414,6 +1532,7 @@ def ops_note_internal(
     reference: str,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
     csrf_token: str = Form(...),
     body: str = Form(...),
     db: Session = Depends(db_session_dependency),
@@ -1422,7 +1541,13 @@ def ops_note_internal(
     ticket = _load_ops_ticket_or_404(db, reference=reference)
     if not body.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Internal note text is required")
-    add_ops_internal_note(db, ticket=ticket, actor=current_user, body_markdown=body.strip())
+    add_ops_internal_note(
+        db,
+        settings=settings,
+        ticket=ticket,
+        actor=current_user,
+        body_markdown=body.strip(),
+    )
     db.commit()
     return RedirectResponse(f"/ops/tickets/{ticket.reference}", status_code=status.HTTP_303_SEE_OTHER)
 

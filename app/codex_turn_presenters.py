@@ -28,6 +28,100 @@ def _pretty_json(payload: object) -> str:
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True, default=str)
 
 
+def _delivery_state_for_receipt(receipt: object, *, queued_source_id: object | None = None) -> str:
+    status = getattr(receipt, "status", None)
+    if status == "accepted":
+        return "included_active_turn"
+    if status in {"prepared", "sending", "ambiguous"}:
+        return "delivery_uncertain"
+    if status == "rejected" and queued_source_id is not None and getattr(receipt, "source_id", None) == queued_source_id:
+        return "queued_another_run"
+    return "waiting_future_context"
+
+
+def _delivery_label_key(state: str) -> str:
+    return f"ops.detail.delivery_state.{state}"
+
+
+def _payload_excerpt(payload: object) -> str:
+    if isinstance(payload, dict):
+        event = payload.get("event")
+        if isinstance(event, dict):
+            for key in ("body_text", "body_markdown", "text"):
+                value = event.get(key)
+                if isinstance(value, str) and value.strip():
+                    return _excerpt(value)
+        for key in ("body_text", "body_markdown", "text", "error", "error_text"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return _excerpt(value)
+    return _excerpt(_pretty_json(payload), max_chars=180) if payload else ""
+
+
+def _present_steering_receipt(receipt: object, *, queued_source_id: object | None = None) -> dict[str, Any]:
+    delivery_state = _delivery_state_for_receipt(receipt, queued_source_id=queued_source_id)
+    attempted_at = getattr(receipt, "attempted_at", None)
+    acknowledged_at = getattr(receipt, "acknowledged_at", None)
+    commit_to_ack_latency_ms = None
+    if attempted_at is not None and acknowledged_at is not None:
+        try:
+            commit_to_ack_latency_ms = int((acknowledged_at - attempted_at).total_seconds() * 1000)
+        except (AttributeError, TypeError):
+            commit_to_ack_latency_ms = None
+    return {
+        "id": getattr(receipt, "id", None),
+        "event_kind": getattr(receipt, "event_kind", None),
+        "source_kind": getattr(receipt, "source_kind", None),
+        "source_id": getattr(receipt, "source_id", None),
+        "dedupe_key": getattr(receipt, "dedupe_key", None),
+        "expected_native_turn_id": getattr(receipt, "expected_native_turn_id", None),
+        "rpc_request_id": getattr(receipt, "rpc_request_id", None),
+        "payload_hash": getattr(receipt, "payload_hash", None),
+        "status": getattr(receipt, "status", None),
+        "attempted_at": attempted_at,
+        "acknowledged_at": acknowledged_at,
+        "resolved_at": getattr(receipt, "resolved_at", None),
+        "commit_to_ack_latency_ms": commit_to_ack_latency_ms,
+        "error_code": getattr(receipt, "error_code", None),
+        "error_text": getattr(receipt, "error_text", None),
+        "payload_excerpt": _payload_excerpt(getattr(receipt, "payload_json", None)),
+        "payload_json_pretty": _pretty_json(getattr(receipt, "payload_json", None)),
+        "delivery_state": delivery_state,
+        "delivery_state_label_key": _delivery_label_key(delivery_state),
+    }
+
+
+def _present_delivery_event(event: object) -> dict[str, Any]:
+    if isinstance(event, dict):
+        delivery_state = str(event.get("delivery_state") or "waiting_future_context")
+        payload = event.get("payload_json")
+        return {
+            **event,
+            "delivery_state": delivery_state,
+            "delivery_state_label_key": _delivery_label_key(delivery_state),
+            "payload_excerpt": event.get("payload_excerpt") or _payload_excerpt(payload),
+        }
+    delivery_state = str(getattr(event, "delivery_state", None) or "waiting_future_context")
+    payload = getattr(event, "payload_json", None)
+    return {
+        "event_kind": getattr(event, "event_kind", None),
+        "source_kind": getattr(event, "source_kind", None),
+        "source_id": getattr(event, "source_id", None),
+        "dedupe_key": getattr(event, "dedupe_key", None),
+        "delivery_state": delivery_state,
+        "delivery_state_label_key": _delivery_label_key(delivery_state),
+        "payload_excerpt": _payload_excerpt(payload),
+    }
+
+
+def _count_delivery_states(items: Iterable[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        state = str(item.get("delivery_state") or "waiting_future_context")
+        counts[state] = counts.get(state, 0) + 1
+    return counts
+
+
 def _specialist_display_name(specialist_id: str | None) -> str:
     normalized = _normalize_text(specialist_id)
     if not normalized:
@@ -108,8 +202,14 @@ def present_codex_turn_summary(
     published_message: object | None,
     raw_item_count: int = 0,
     conversation_status: str | None = None,
+    receipts: Iterable[object] = (),
+    delivery_events: Iterable[object] = (),
+    queued_source_id: object | None = None,
 ) -> dict[str, Any]:
     ordered_outcomes = list(outcomes)
+    ordered_receipts = [_present_steering_receipt(receipt, queued_source_id=queued_source_id) for receipt in receipts]
+    presented_delivery_events = [_present_delivery_event(event) for event in delivery_events]
+    delivery_state_counts = _count_delivery_states([*ordered_receipts, *presented_delivery_events])
     presented_turn = present_codex_turn_state(turn, outcomes=ordered_outcomes)
     output_source = run
     if output_source is None:
@@ -152,6 +252,10 @@ def present_codex_turn_summary(
         "published_message_created_at": getattr(published_message, "created_at", None),
         "session_status": getattr(session, "status", None),
         "session_thread_id": getattr(session, "thread_id", None),
+        "transport_kind": getattr(turn, "transport_kind", None),
+        "native_turn_id": getattr(turn, "native_turn_id", None),
+        "steering_closed_at": getattr(turn, "steering_closed_at", None),
+        "effective_input_hash": getattr(turn, "effective_input_hash", None),
         "session_segment_index": session_segment_index,
         "lease_owner_run_id": getattr(session, "lease_owner_run_id", None),
         "lease_worker_instance_id": getattr(session, "lease_worker_instance_id", None),
@@ -170,6 +274,10 @@ def present_codex_turn_summary(
         "recovery_marker_keys": recovery_marker_keys,
         "recovery_boundary": bool(recovery_marker_keys),
         "outcome_count": len(ordered_outcomes),
+        "steering_receipt_count": len(ordered_receipts),
+        "ambiguous_blocker_count": delivery_state_counts.get("delivery_uncertain", 0),
+        "delivery_state_counts": delivery_state_counts,
+        "delivery_events": presented_delivery_events,
         "raw_item_count": raw_item_count,
     }
 
@@ -185,9 +293,27 @@ def present_codex_turn_detail(
     draft: object | None,
     published_message: object | None,
     conversation_status: str | None,
+    receipts: Iterable[object] = (),
+    inputs: Iterable[object] = (),
+    delivery_events: Iterable[object] = (),
+    queued_source_id: object | None = None,
 ) -> dict[str, Any]:
     ordered_outcomes = list(outcomes)
     ordered_items = list(items)
+    ordered_receipts = list(receipts)
+    receipt_dedupe_keys = {getattr(receipt, "dedupe_key", None) for receipt in ordered_receipts}
+    included_events = [
+        {
+            "event_kind": getattr(input_event, "event_kind", None),
+            "source_kind": getattr(input_event, "source_kind", None),
+            "source_id": getattr(input_event, "source_id", None),
+            "dedupe_key": getattr(input_event, "dedupe_key", None),
+            "delivery_state": "included_active_turn",
+            "payload_json": getattr(input_event, "payload_json", None),
+        }
+        for input_event in inputs
+        if getattr(input_event, "dedupe_key", None) not in receipt_dedupe_keys
+    ]
     presented = present_codex_turn_summary(
         turn,
         run=run,
@@ -198,7 +324,14 @@ def present_codex_turn_detail(
         published_message=published_message,
         raw_item_count=len(ordered_items),
         conversation_status=conversation_status,
+        receipts=ordered_receipts,
+        delivery_events=[*included_events, *delivery_events],
+        queued_source_id=queued_source_id,
     )
+    presented["steering_receipts"] = [
+        _present_steering_receipt(receipt, queued_source_id=queued_source_id)
+        for receipt in ordered_receipts
+    ]
     presented["outcomes"] = [
         {
             "id": getattr(outcome, "id", None),

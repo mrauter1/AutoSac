@@ -57,8 +57,9 @@ or Codex turn, or publish output based on input whose delivery is uncertain.
 
 ### 3.2 Operator internal notes
 
-- If a compatible AI Triage specialist turn is active, create a durable
-  `ticket_content` requeue request as escrow and attempt steering.
+- If active-turn steering is enabled and a compatible AI Triage app-server
+  specialist turn is active, create a durable `ticket_content` requeue request
+  as escrow and attempt steering.
 - If no compatible turn is active, preserve current behavior: persist the note
   as dormant future context without starting a run.
 - If steering succeeds, clear only the matching content-driven escrow.
@@ -67,8 +68,11 @@ or Codex turn, or publish output based on input whose delivery is uncertain.
 
 ### 3.3 Other existing triggers
 
-Preserve current behavior for new tickets, requester replies, manual reruns,
-and reopens. Manual reruns with forced route or specialist overrides are
+Preserve current behavior for new tickets, manual reruns, and reopens.
+Requester replies may steer only when a compatible AI Triage app-server turn
+was already active. Replies that reopen a resolved ticket or move Waiting on
+User or Waiting on Dev/TI back to AI Triage retain the existing successor-run
+semantics. Manual reruns with forced route or specialist overrides are
 workflow controls and cannot be satisfied by steering into the old specialist
 turn.
 
@@ -125,6 +129,13 @@ steering must never resend the complete ticket history.
 
 ## 5. Canonical content projection
 
+Project all ticket messages into ordered canonical events before any causal
+filtering, including public requester/operator content, internal notes,
+system-authored messages, and prior AI-authored messages. Centralized
+causal-known logic decides whether an exact AI-origin duplicate is already
+represented by the conversation; human edits and other non-identical messages
+remain new context.
+
 Represent every ticket message through one canonical envelope containing:
 
 - Stable message ID and dedupe key
@@ -139,9 +150,11 @@ Represent every ticket message through one canonical envelope containing:
 
 Attachments created with a message form one logical input bundle. Do not mark
 the text accepted while silently omitting an attachment. Reuse the current
-safe attachment projection for initial input and steering. If the active-turn
-protocol cannot represent the complete bundle, leave the bundle unaccepted
-for a later turn.
+safe attachment projection for initial input and steering. When the bundle is
+representable, send the canonical text envelope plus native `localImage` input
+items for supported images and safe path metadata for non-image documents. If
+the active-turn protocol cannot represent the complete bundle, leave the bundle
+unaccepted for a later turn.
 
 ## 6. Causal exclusion
 
@@ -267,8 +280,10 @@ accepted.
 
 While the specialist turn is running:
 
-1. Poll PostgreSQL at a short bounded interval.
-2. Load strict unseen ordered content.
+1. Poll a lightweight ticket change token at a short bounded interval.
+2. Load strict unseen ordered content on the first poll and whenever that token
+   changes. Retain the token read before the scan so a concurrent update forces
+   another scan on the next poll.
 3. Exclude known conversation content, current-turn causal output, and events
    with prepared, sending, or accepted receipts.
 4. Revalidate the ticket, `AIRun`, lease, native thread, native turn,
@@ -277,8 +292,8 @@ While the specialist turn is running:
 
 A compatible turn requires the same ticket conversation, current worker lease
 ownership, the exact active native turn, an open steering fence, AI Triage
-status, no forced route or specialist replacement, and a representable complete
-content bundle.
+status, no forced route or specialist replacement, active-turn steering
+enabled, app-server transport, and a representable complete content bundle.
 
 Use one logical message bundle per steer in V1. Multiple messages may be sent
 sequentially while the native turn remains active.
@@ -294,9 +309,11 @@ For each content bundle:
    `expectedTurnId`.
 5. Require success with the expected native turn ID.
 6. In one database transaction, revalidate ownership, mark the receipt
-   accepted, insert `CodexTurnInput`, recalculate `effective_input_hash`, append
-   an accepted outcome, and clear only a matching content-driven escrow when no
-   unconsumed authorized content or stronger control request remains.
+   accepted, insert `CodexTurnInput`, advance `effective_input_hash` only when
+   the latest durably accepted frontier now matches the full accepted ticket
+   snapshot, append an accepted outcome, and clear only a matching
+   source-provenanced content-driven escrow when no older or newer unconsumed
+   authorized content and no stronger control request remain.
 
 JSON-RPC IDs are correlation identifiers, not idempotency guarantees. A stable
 event marker may be embedded in the rendered input envelope for audit and

@@ -947,6 +947,10 @@ small {
   border-color: var(--ops-detail-border);
 }
 
+.page--ops-ticket-detail .ops-ticket-detail__delivery-card {
+  gap: 0.7rem;
+}
+
 .page--ops-ticket-detail .ops-ticket-detail__turn-footer {
   display: flex;
   justify-content: space-between;
