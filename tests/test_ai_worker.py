@@ -1547,11 +1547,15 @@ def test_app_server_persistent_specialist_starts_accepts_inputs_once_and_complet
 
     monkeypatch.setattr(persistent_codex, "session_scope", fake_session_scope)
     monkeypatch.setattr("worker.codex_app_server.session_scope", fake_session_scope)
-    monkeypatch.setattr(
-        persistent_codex,
-        "_load_locked_owned_runtime_records",
-        lambda db, *, prepared, persistent: (run, session, turn, step),
-    )
+    observed_runtime_identities = []
+
+    def load_runtime(db, *, prepared, persistent):
+        observed_runtime_identities.append(
+            (persistent.step_id, persistent.turn_id, persistent.session_id, persistent.conversation_id)
+        )
+        return run, session, turn, step
+
+    monkeypatch.setattr(persistent_codex, "_load_locked_owned_runtime_records", load_runtime)
 
     def append_outcome(db, *, turn_id, outcome_kind, payload_json):
         outcomes.append((outcome_kind, payload_json))
@@ -1583,6 +1587,10 @@ def test_app_server_persistent_specialist_starts_accepts_inputs_once_and_complet
     assert [item.item_kind for item in fake_db.items] == ["turn/started", "turn/completed"]
     assert [call[0] for call in calls] == ["initialize", "thread/start", "turn/start", "supervise"]
     assert "turn/steer" not in [call[0] for call in calls]
+    assert observed_runtime_identities
+    assert set(observed_runtime_identities) == {
+        (persistent.step_id, persistent.turn_id, persistent.session_id, persistent.conversation_id)
+    }
     assert [outcome[0] for outcome in outcomes].count("accepted") == 1
     assert outcomes[-1][0] == "completed"
 

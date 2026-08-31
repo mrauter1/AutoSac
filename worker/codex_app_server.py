@@ -858,6 +858,7 @@ class CodexAppServerClient:
 class CodexAppServerTurnPersistence:
     settings: Settings
     prepared: PreparedStepRun
+    step_id: uuid.UUID
     turn_id: uuid.UUID
     session_id: uuid.UUID
     conversation_id: uuid.UUID
@@ -875,20 +876,11 @@ class CodexAppServerTurnPersistence:
             from worker.persistent_codex import _load_locked_owned_runtime_records
             from worker.run_ownership import RunOwnershipLost
 
-            runtime = type(
-                "_PersistentRuntimeRef",
-                (),
-                {
-                    "turn_id": self.turn_id,
-                    "session_id": self.session_id,
-                    "conversation_id": self.conversation_id,
-                },
-            )()
             try:
                 run, session, turn, step = _load_locked_owned_runtime_records(
                     db,
                     prepared=self.prepared,
-                    persistent=runtime,
+                    persistent=self,
                 )
             except RunOwnershipLost:
                 self._persist_retired_protocol_item(
@@ -967,19 +959,10 @@ class CodexAppServerTurnPersistence:
         with session_scope(self.settings) as db:
             from worker.persistent_codex import _load_locked_owned_runtime_records
 
-            runtime = type(
-                "_PersistentRuntimeRef",
-                (),
-                {
-                    "turn_id": self.turn_id,
-                    "session_id": self.session_id,
-                    "conversation_id": self.conversation_id,
-                },
-            )()
             _run, session, turn, _step = _load_locked_owned_runtime_records(
                 db,
                 prepared=self.prepared,
-                persistent=runtime,
+                persistent=self,
             )
             _persist_thread_id(db, session=session, turn=turn, conversation_id=self.conversation_id, thread_id=thread_id)
 
@@ -987,19 +970,10 @@ class CodexAppServerTurnPersistence:
         with session_scope(self.settings) as db:
             from worker.persistent_codex import _load_locked_owned_runtime_records
 
-            runtime = type(
-                "_PersistentRuntimeRef",
-                (),
-                {
-                    "turn_id": self.turn_id,
-                    "session_id": self.session_id,
-                    "conversation_id": self.conversation_id,
-                },
-            )()
             _run, _session, turn, _step = _load_locked_owned_runtime_records(
                 db,
                 prepared=self.prepared,
-                persistent=runtime,
+                persistent=self,
             )
             turn.native_turn_id = native_turn_id
             turn.accepted_at = turn.accepted_at or utc_now()

@@ -10,6 +10,7 @@ import signal
 import subprocess
 import threading
 import time
+from typing import Protocol
 import uuid
 
 from sqlalchemy import func, select
@@ -76,6 +77,15 @@ class PersistentCommandSpec:
     env: dict[str, str]
     runtime_codex_home: Path
     resumed: bool
+
+
+class PersistentRuntimeIdentity(Protocol):
+    """Database identities required to fence and update a persistent turn."""
+
+    step_id: uuid.UUID
+    turn_id: uuid.UUID
+    conversation_id: uuid.UUID
+    session_id: uuid.UUID
 
 
 @dataclass(frozen=True)
@@ -976,7 +986,7 @@ def _load_locked_active_session(db, *, conversation_id) -> CodexSession | None:
     return db.execute(statement).scalar_one_or_none()
 
 
-def _load_locked_owned_runtime_records(db, *, prepared: PreparedStepRun, persistent: PreparedPersistentSpecialistStep):
+def _load_locked_owned_runtime_records(db, *, prepared: PreparedStepRun, persistent: PersistentRuntimeIdentity):
     run = load_owned_running_run(
         db,
         run_id=prepared.run_id,
@@ -2072,6 +2082,7 @@ def _execute_app_server_persistent_specialist_step(
     persistence = CodexAppServerTurnPersistence(
         settings=settings,
         prepared=prepared,
+        step_id=persistent.step_id,
         turn_id=persistent.turn_id,
         session_id=persistent.session_id,
         conversation_id=persistent.conversation_id,

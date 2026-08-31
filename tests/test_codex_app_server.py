@@ -628,7 +628,7 @@ def test_app_server_turn_persistence_stores_items_and_updates_thread_and_turn(mo
         transport_kind="exec",
         steering_closed_at=None,
     )
-    step = SimpleNamespace(ended_at=None)
+    step = SimpleNamespace(id=uuid.uuid4(), ended_at=None)
     conversation = SimpleNamespace(id=uuid.uuid4(), status="active")
 
     class Db:
@@ -646,15 +646,20 @@ def test_app_server_turn_persistence_stores_items_and_updates_thread_and_turn(mo
 
     import worker.persistent_codex as persistent_codex
 
-    monkeypatch.setattr(
-        persistent_codex,
-        "_load_locked_owned_runtime_records",
-        lambda db, prepared, persistent: (run, session, turn, step),
-    )
+    observed_runtime_identities = []
+
+    def load_runtime(db, prepared, persistent):
+        observed_runtime_identities.append(
+            (persistent.step_id, persistent.turn_id, persistent.session_id, persistent.conversation_id)
+        )
+        return run, session, turn, step
+
+    monkeypatch.setattr(persistent_codex, "_load_locked_owned_runtime_records", load_runtime)
 
     persistence = CodexAppServerTurnPersistence(
         settings=_make_settings(tmp_path),
         prepared=SimpleNamespace(run_id=run.id, worker_instance_id="worker-1"),
+        step_id=step.id,
         turn_id=turn.id,
         session_id=session.id,
         conversation_id=conversation.id,
@@ -668,8 +673,13 @@ def test_app_server_turn_persistence_stores_items_and_updates_thread_and_turn(mo
     persistence.persist_protocol_item(
         {"method": "turn/completed", "params": {"threadId": "thread-1", "turn": {"id": "turn-1"}}}
     )
+    persistence.persist_thread_id("thread-1")
+    persistence.persist_turn_id("turn-1")
 
     assert [item.item_kind for item in added] == ["thread/started", "turn/started", "turn/completed"]
+    assert observed_runtime_identities == [
+        (step.id, turn.id, session.id, conversation.id),
+    ] * 5
     assert session.thread_id == "thread-1"
     assert turn.native_turn_id == "turn-1"
     assert turn.accepted_at is not None
@@ -721,6 +731,7 @@ def test_app_server_turn_persistence_retains_late_retired_session_output(monkeyp
     persistence = CodexAppServerTurnPersistence(
         settings=_make_settings(tmp_path),
         prepared=SimpleNamespace(run_id=run_id, worker_instance_id="worker-1"),
+        step_id=uuid.uuid4(),
         turn_id=turn.id,
         session_id=session.id,
         conversation_id=uuid.uuid4(),
