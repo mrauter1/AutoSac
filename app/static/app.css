@@ -947,6 +947,33 @@ small {
   border-color: var(--ops-detail-border);
 }
 
+.page--ops-ticket-detail .analysis-disclosure--persistent .ops-ticket-detail__turn-card {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid var(--ops-detail-border);
+  border-radius: 14px;
+  box-shadow: 0 8px 24px rgba(58, 47, 34, 0.05);
+}
+
+.page--ops-ticket-detail .ops-ticket-detail__turn-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.page--ops-ticket-detail .analysis-disclosure--persistent .ops-ticket-detail__turn-footer {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.page--ops-ticket-detail .analysis-disclosure--persistent .ops-ticket-detail__turn-footer .button {
+  width: 100%;
+}
+
 .page--ops-ticket-detail .ops-ticket-detail__delivery-card {
   gap: 0.7rem;
 }

@@ -364,6 +364,7 @@ The first UI requirement is only minimal operations visibility plus requester-sa
 ### Phase 5: UI safe projection
 
 - add minimal ops-only lifecycle visibility;
+- keep persistent turn history out of the ticket activity ledger and expose it as a closed-by-default disclosure below **More analysis** in the ops ticket-detail AI Analysis panel;
 - expose ops-only steering receipt history, delivery states, native thread/turn IDs, effective input hashes, completion fences, ambiguous blockers, and recovery markers;
 - keep requester routes limited to published `TicketMessage` content and optional generic run-state indicators.
 

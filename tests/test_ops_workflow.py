@@ -4163,6 +4163,9 @@ def test_ops_detail_route_renders_persistent_turn_history_when_enabled(monkeypat
         status="waiting_on_dev_ti",
         urgent=False,
         updated_at=datetime.now(timezone.utc),
+        requester_language="pt-BR",
+        last_ai_action=None,
+        requeue_requested=False,
     )
 
     monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
@@ -4258,7 +4261,14 @@ def test_ops_detail_route_renders_persistent_turn_history_when_enabled(monkeypat
         response = client.get(f"/ops/tickets/{ticket.reference}")
 
     assert response.status_code == 200
-    assert translate(locale, "ops.detail.persistent_turn_history") in response.text
+    persistent_history_label = translate(locale, "ops.detail.persistent_turn_history")
+    disclosure_marker = 'class="analysis-disclosure analysis-disclosure--persistent" data-persistent-turn-history'
+    disclosure_marker_index = response.text.index(disclosure_marker)
+    disclosure_start = response.text.rindex("<details", 0, disclosure_marker_index)
+    disclosure_tag_end = response.text.index(">", disclosure_start)
+    assert response.text.count(persistent_history_label) == 1
+    assert response.text.index(translate(locale, "ops.detail.more_analysis")) < disclosure_start
+    assert " open" not in response.text[disclosure_start:disclosure_tag_end]
     assert translate(locale, "button.inspect_turn") in response.text
     assert "Support Specialist" in response.text
     assert "/tmp/persistent/final.json" in response.text
@@ -4762,6 +4772,7 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     base_template = Path("app/templates/base.html").read_text(encoding="utf-8")
     filters_template = Path("app/templates/ops_filters.html").read_text(encoding="utf-8")
     detail_template = Path("app/templates/ops_ticket_detail.html").read_text(encoding="utf-8")
+    persistent_history_template = Path("app/templates/ops_persistent_turn_history.html").read_text(encoding="utf-8")
     board_template = Path("app/templates/ops_board_columns.html").read_text(encoding="utf-8")
     list_template = Path("app/templates/ops_ticket_list.html").read_text(encoding="utf-8")
     rows_template = Path("app/templates/ops_ticket_rows.html").read_text(encoding="utf-8")
@@ -4808,6 +4819,20 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert 't("ops.detail.internal_summary")' in detail_template
     assert '<details class="analysis-disclosure">' in detail_template
     assert 't("ops.detail.more_analysis")' in detail_template
+    persistent_include = '{% include "ops_persistent_turn_history.html" %}'
+    assert detail_template.count(persistent_include) == 1
+    assert (
+        detail_template.index("analysis-panel")
+        < detail_template.index('t("ops.detail.more_analysis")')
+        < detail_template.index(persistent_include)
+    )
+    assert 'class="analysis-disclosure analysis-disclosure--persistent" data-persistent-turn-history' in detail_template
+    persistent_marker_index = detail_template.index("data-persistent-turn-history")
+    persistent_tag_start = detail_template.rindex("<details", 0, persistent_marker_index)
+    persistent_tag_end = detail_template.index(">", persistent_tag_start)
+    assert " open" not in detail_template[persistent_tag_start:persistent_tag_end]
+    assert "message-card" not in persistent_history_template
+    assert "ops-ticket-detail__turn-card" in persistent_history_template
     assert 't("ops.detail.relevant_paths")' in detail_template
     assert 't("ops.detail.pending_ai_draft")' in detail_template
     assert 't("ops.list.heading")' in list_template
@@ -4816,5 +4841,6 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert '/static/htmx.min.js' in base_template
     assert 't("ops.board.pending_draft_approval")' in board_template
     assert ".analysis-disclosure" in app_css
+    assert ".analysis-disclosure--persistent .ops-ticket-detail__turn-card" in app_css
     assert ".page--ops-ticket-detail" in app_css
     assert ".ops-ticket-detail__layout" in app_css

@@ -171,11 +171,13 @@ superseded without synthesizing a requester-reply successor; dormant content
 remains available for the next authorized turn.
 
 Ops persistent-turn pages expose this custody state without changing requester
-visibility: accepted inputs and receipts show as included in the active AI
-turn, rejected or dormant ticket content remains waiting for future AI context,
-deferred `ticket_content` escrow is shown as queued for another AI run, and
-unresolved or ambiguous receipts are marked as delivery uncertain/recovery
-required.
+visibility. On the ticket detail page, persistent turn history stays outside the
+ticket activity ledger and appears in the AI Analysis sidebar as a
+closed-by-default disclosure below **More analysis**. Accepted inputs and
+receipts show as included in the active AI turn, rejected or dormant ticket
+content remains waiting for future AI context, deferred `ticket_content` escrow
+is shown as queued for another AI run, and unresolved or ambiguous receipts are
+marked as delivery uncertain/recovery required.
 
 ### Routing variants
 
