@@ -84,7 +84,8 @@ def _make_settings(tmp_path: Path) -> Settings:
         manuals_mount_dir=workspace_dir / "manuals",
         codex_bin="codex",
         codex_api_key="test-key",
-        codex_model="",
+        default_codex_model="gpt-test",
+        default_codex_effort="medium",
         codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,
@@ -322,6 +323,18 @@ def test_persistent_codex_foundation_migration_adds_schema_and_partial_indexes()
     )
     assert 'op.add_column("ticket_messages", sa.Column("codex_turn_outcome_id"' in migration_source
     assert 'op.add_column("ai_drafts", sa.Column("codex_turn_outcome_id"' in migration_source
+
+
+def test_codex_reasoning_effort_migration_is_additive_and_preserves_historical_nulls():
+    migration_source = Path(
+        "shared/migrations/versions/20260831_0017_codex_reasoning_effort.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260831_0017"' in migration_source
+    assert 'down_revision = "20260827_0016"' in migration_source
+    assert 'op.add_column("ai_runs", sa.Column("reasoning_effort", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("ai_run_steps", sa.Column("reasoning_effort", sa.Text(), nullable=True))' in migration_source
+    assert 'op.add_column("codex_turns", sa.Column("reasoning_effort", sa.Text(), nullable=True))' in migration_source
 
 
 def test_persistent_codex_model_indexes_encode_cardinality_constraints():
@@ -1342,7 +1355,8 @@ def test_preflight_setup_script_can_prepare_dirs_and_report_ready(monkeypatch, c
         manuals_mount_dir=tmp_path / "workspace" / "manuals",
         codex_bin="codex",
         codex_api_key=settings.codex_api_key,
-        codex_model=settings.codex_model,
+        default_codex_model=settings.default_codex_model,
+        default_codex_effort=settings.default_codex_effort,
         codex_timeout_seconds=settings.codex_timeout_seconds,
         worker_poll_seconds=settings.worker_poll_seconds,
         auto_support_reply_min_confidence=settings.auto_support_reply_min_confidence,
@@ -1382,7 +1396,8 @@ def test_preflight_setup_script_can_run_local_postgres_setup(monkeypatch, capsys
         manuals_mount_dir=tmp_path / "workspace" / "manuals",
         codex_bin="codex",
         codex_api_key="test-key",
-        codex_model="",
+        default_codex_model="gpt-test",
+        default_codex_effort="medium",
         codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,

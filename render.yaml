@@ -21,6 +21,10 @@ services:
           property: connectionString
       - key: CODEX_BIN
         value: codex
+      - key: DEFAULT_CODEX_MODEL
+        value: gpt-5.6-sol
+      - key: DEFAULT_CODEX_EFFORT
+        value: medium
       - key: CODEX_API_KEY
         sync: false
       - key: UPLOADS_DIR

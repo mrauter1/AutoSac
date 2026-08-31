@@ -188,6 +188,8 @@ def build_persistent_codex_command(
     )
     if prepared.model_name:
         command.extend(["--model", prepared.model_name])
+    if prepared.reasoning_effort:
+        command.extend(["-c", f'model_reasoning_effort={json.dumps(prepared.reasoning_effort)}'])
     for image_path in prepared.image_paths:
         command.extend(["--image", str(image_path)])
     if thread_id:
@@ -1242,6 +1244,7 @@ def prepare_persistent_specialist_step(
             agent_spec_version=prepared.spec.version,
             output_contract=prepared.spec.output_contract,
             model_name=prepared.model_name,
+            reasoning_effort=prepared.reasoning_effort,
             status="running",
             prompt_path=str(prepared.paths.prompt_path),
             schema_path=str(prepared.paths.schema_path),
@@ -1263,6 +1266,7 @@ def prepare_persistent_specialist_step(
             agent_spec_version=prepared.spec.version,
             output_contract=prepared.spec.output_contract,
             model_name=prepared.model_name,
+            reasoning_effort=prepared.reasoning_effort,
             route_target_id=prepared.route_target_id,
             prompt_path=str(prepared.paths.prompt_path),
             schema_path=str(prepared.paths.schema_path),
@@ -1282,6 +1286,8 @@ def prepare_persistent_specialist_step(
                 "runtime_codex_home": str(command_spec.runtime_codex_home),
                 "resumed": command_spec.resumed,
                 "transport_kind": transport_kind,
+                "model_name": prepared.model_name,
+                "reasoning_effort": prepared.reasoning_effort,
                 "route_target_id": prepared.route_target_id,
                 "selected_specialist_id": prepared.selected_specialist_id,
                 "prompt_mode": prompt_state.prompt_mode,
@@ -1313,6 +1319,7 @@ def prepare_persistent_specialist_step(
         spec=prepared.spec,
         status="running",
         model_name=prepared.model_name,
+        reasoning_effort=prepared.reasoning_effort,
         output_contract=prepared.spec.output_contract,
         metadata={
             **_step_manifest_metadata(prepared, output_payload=None),
@@ -1664,6 +1671,7 @@ def _finalize_persistent_step(
         spec=prepared.spec,
         status=step_status,
         model_name=prepared.model_name,
+        reasoning_effort=prepared.reasoning_effort,
         output_contract=prepared.spec.output_contract,
         error_text=error_text,
         metadata={

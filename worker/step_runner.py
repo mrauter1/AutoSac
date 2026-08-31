@@ -44,6 +44,7 @@ class PreparedStepRun:
     public_attachments: tuple[PromptAttachment, ...]
     image_paths: list[Path]
     model_name: str | None
+    reasoning_effort: str | None
     timeout_seconds: int
     requester_role: str
     route_target_id: str | None
@@ -173,7 +174,7 @@ def prepare_step_run(
     paths.prompt_path.write_text(prompt, encoding="utf-8")
     paths.schema_path.write_text(schema_json, encoding="utf-8")
     image_paths = [Path(attachment.absolute_path) for attachment in public_attachments if attachment.is_image]
-    model_name = spec.model_override or settings.codex_model or None
+    model_name = spec.model_override or settings.default_codex_model
     timeout_seconds = spec.timeout_seconds_override or settings.codex_timeout_seconds
     return PreparedStepRun(
         run_id=run_id,
@@ -189,6 +190,7 @@ def prepare_step_run(
         public_attachments=public_attachments,
         image_paths=image_paths,
         model_name=model_name,
+        reasoning_effort=settings.default_codex_effort,
         timeout_seconds=timeout_seconds,
         requester_role=context.requester_role,
         route_target_id=resolved_route_target_id,
@@ -227,6 +229,8 @@ def build_codex_command(settings: Settings, *, prepared: PreparedStepRun) -> tup
     ]
     if prepared.model_name:
         command.extend(["--model", prepared.model_name])
+    if prepared.reasoning_effort:
+        command.extend(["-c", f'model_reasoning_effort={json.dumps(prepared.reasoning_effort)}'])
     for image_path in prepared.image_paths:
         command.extend(["--image", str(image_path)])
     command.append("-")
@@ -290,6 +294,7 @@ def _create_running_step_row(settings: Settings, prepared: PreparedStepRun) -> u
             agent_spec_version=prepared.spec.version,
             output_contract=prepared.spec.output_contract,
             model_name=prepared.model_name,
+            reasoning_effort=prepared.reasoning_effort,
             status="running",
             prompt_path=str(prepared.paths.prompt_path),
             schema_path=str(prepared.paths.schema_path),
@@ -311,6 +316,7 @@ def _create_running_step_row(settings: Settings, prepared: PreparedStepRun) -> u
         spec=prepared.spec,
         status="running",
         model_name=prepared.model_name,
+        reasoning_effort=prepared.reasoning_effort,
         output_contract=prepared.spec.output_contract,
         metadata=_step_manifest_metadata(prepared, output_payload=None),
     )
@@ -424,6 +430,7 @@ def execute_step(settings: Settings, *, prepared: PreparedStepRun) -> StepRunRes
             spec=prepared.spec,
             status=status,
             model_name=prepared.model_name,
+            reasoning_effort=prepared.reasoning_effort,
             output_contract=prepared.spec.output_contract,
             error_text=error_text,
             metadata=_step_manifest_metadata(prepared, output_payload=None),
@@ -453,6 +460,7 @@ def execute_step(settings: Settings, *, prepared: PreparedStepRun) -> StepRunRes
             spec=prepared.spec,
             status=status,
             model_name=prepared.model_name,
+            reasoning_effort=prepared.reasoning_effort,
             output_contract=prepared.spec.output_contract,
             error_text=error_text,
             metadata=_step_manifest_metadata(prepared, output_payload=None),
@@ -489,6 +497,7 @@ def execute_step(settings: Settings, *, prepared: PreparedStepRun) -> StepRunRes
             spec=prepared.spec,
             status=status,
             model_name=prepared.model_name,
+            reasoning_effort=prepared.reasoning_effort,
             output_contract=prepared.spec.output_contract,
             error_text=error_text,
             metadata=_step_manifest_metadata(prepared, output_payload=None),
@@ -516,6 +525,7 @@ def execute_step(settings: Settings, *, prepared: PreparedStepRun) -> StepRunRes
         spec=prepared.spec,
         status=status,
         model_name=prepared.model_name,
+        reasoning_effort=prepared.reasoning_effort,
         output_contract=prepared.spec.output_contract,
         error_text=None,
         metadata=_step_manifest_metadata(prepared, output_payload=output_payload),
@@ -568,6 +578,7 @@ def record_synthetic_step_success(
         public_attachments=(),
         image_paths=[],
         model_name=None,
+        reasoning_effort=None,
         timeout_seconds=0,
         requester_role=requester_role or "requester",
         route_target_id=route_target_id,
@@ -596,6 +607,7 @@ def record_synthetic_step_success(
             agent_spec_version=spec.version,
             output_contract=spec.output_contract,
             model_name=None,
+            reasoning_effort=None,
             status="succeeded",
             prompt_path=str(paths.prompt_path),
             schema_path=str(paths.schema_path),
@@ -620,6 +632,7 @@ def record_synthetic_step_success(
         spec=spec,
         status="succeeded",
         model_name=None,
+        reasoning_effort=None,
         output_contract=spec.output_contract,
         error_text=None,
         metadata=_step_manifest_metadata(prepared, output_payload=output_payload),
@@ -637,6 +650,7 @@ def _step_payload_for_run_manifest(step: AIRunStep) -> dict[str, object]:
         "output_contract": step.output_contract,
         "status": step.status,
         "model_name": step.model_name,
+        "reasoning_effort": step.reasoning_effort,
         "paths": {
             "prompt_path": step.prompt_path,
             "schema_path": step.schema_path,

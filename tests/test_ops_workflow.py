@@ -13,6 +13,19 @@ import pytest
 from shared.config import Settings
 
 
+@pytest.fixture(autouse=True)
+def _configure_codex_deployment_defaults(monkeypatch):
+    """Keep route-level settings loads independent from a developer's local .env."""
+    from shared.config import get_settings
+
+    monkeypatch.delenv("CODEX_MODEL", raising=False)
+    monkeypatch.setenv("DEFAULT_CODEX_MODEL", "gpt-test")
+    monkeypatch.setenv("DEFAULT_CODEX_EFFORT", "medium")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 def _load_symbols():
     pytest.importorskip("sqlalchemy")
     from shared.models import AIRun, AIDraft, CodexTurn, Ticket, TicketAttachment, TicketMessage, TicketStatusHistory, TicketView, User
@@ -62,7 +75,8 @@ def _make_settings() -> Settings:
         manuals_mount_dir=workspace_dir / "manuals",
         codex_bin="codex",
         codex_api_key="key",
-        codex_model="",
+        default_codex_model="gpt-test",
+        default_codex_effort="medium",
         codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,
@@ -770,7 +784,8 @@ def test_active_turn_compatibility_requires_ai_triage_unforced_open_specialist_t
         manuals_mount_dir=Path("/tmp/autosac-ops-workflow/workspace/manuals"),
         codex_bin="codex",
         codex_api_key="key",
-        codex_model="",
+        default_codex_model="gpt-test",
+        default_codex_effort="medium",
         codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,

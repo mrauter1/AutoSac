@@ -63,6 +63,7 @@ def write_step_manifest(
     spec: AgentSpec,
     status: str,
     model_name: str | None,
+    reasoning_effort: str | None,
     output_contract: str,
     error_text: str | None = None,
     metadata: dict[str, Any] | None = None,
@@ -79,6 +80,7 @@ def write_step_manifest(
         "output_contract": output_contract,
         "status": status,
         "model_name": model_name,
+        "reasoning_effort": reasoning_effort,
         "error_text": error_text,
         "paths": paths.as_payload(),
     }

@@ -76,6 +76,7 @@ def _new_step_from_run(run: AIRun, *, output_json: dict[str, object] | None) -> 
         agent_spec_version=LEGACY_AGENT_SPEC_VERSION,
         output_contract=TRIAGE_OUTPUT_CONTRACT,
         model_name=run.model_name,
+        reasoning_effort=getattr(run, "reasoning_effort", None),
         status=run.status,
         prompt_path=run.prompt_path,
         schema_path=run.schema_path,
@@ -97,6 +98,7 @@ def _sync_step_from_run(step: AIRunStep, run: AIRun, *, output_json: dict[str, o
     step.agent_spec_version = LEGACY_AGENT_SPEC_VERSION
     step.output_contract = TRIAGE_OUTPUT_CONTRACT
     step.model_name = run.model_name
+    step.reasoning_effort = getattr(run, "reasoning_effort", None)
     step.status = run.status
     step.prompt_path = run.prompt_path
     step.schema_path = run.schema_path

@@ -1492,7 +1492,8 @@ Required environment variables:
 - `MANUALS_MOUNT_DIR`
 - `CODEX_BIN`
 - `CODEX_API_KEY`
-- `CODEX_MODEL`
+- `DEFAULT_CODEX_MODEL`
+- `DEFAULT_CODEX_EFFORT`
 - `CODEX_TIMEOUT_SECONDS`
 - `WORKER_POLL_SECONDS`
 - `AUTO_SUPPORT_REPLY_MIN_CONFIDENCE`
@@ -1861,7 +1862,7 @@ CODEX_API_KEY="${CODEX_API_KEY}" \
 ```
 
 Where:
-- `MODEL_ARG` is empty or `--model "${CODEX_MODEL}"`
+- every Codex step receives `--model "${DEFAULT_CODEX_MODEL}"` (unless its agent spec overrides the model) and `-c model_reasoning_effort="${DEFAULT_CODEX_EFFORT}"`
 - `IMAGE_ARGS` repeats `--image /absolute/path/to/file`
 - working directory is `/opt/triage/triage_workspace`
 - `${RUN_DIR}/final.json` is the canonical parsed result

@@ -418,6 +418,8 @@ class CodexAppServerClient:
         }
         if prepared.model_name:
             params["model"] = prepared.model_name
+        if prepared.reasoning_effort:
+            params["effort"] = prepared.reasoning_effort
         if prepared.schema_json:
             params["outputSchema"] = json.loads(prepared.schema_json)
         result = self.request("turn/start", params, timeout_seconds=timeout_seconds)

@@ -28,6 +28,7 @@ SLACK_DELIVERY_BATCH_SIZE_DEFAULT = 10
 SLACK_DELIVERY_MAX_ATTEMPTS_DEFAULT = 5
 SLACK_DELIVERY_STALE_LOCK_SECONDS_DEFAULT = 120
 DEFAULT_AUTOSAC_CODEX_HOME = Path.home() / "autosac" / "codex"
+CODEX_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 
 
 class SettingsError(RuntimeError):
@@ -168,7 +169,8 @@ class Settings:
     manuals_mount_dir: Path
     codex_bin: str
     codex_api_key: str | None
-    codex_model: str
+    default_codex_model: str
+    default_codex_effort: str
     codex_timeout_seconds: int
     worker_poll_seconds: int
     auto_support_reply_min_confidence: float
@@ -235,6 +237,11 @@ class Settings:
                 )
 
     def validate_contracts(self) -> None:
+        if not self.default_codex_model.strip():
+            raise SettingsError("DEFAULT_CODEX_MODEL must not be blank")
+        if self.default_codex_effort not in CODEX_REASONING_EFFORTS:
+            allowed = ", ".join(sorted(CODEX_REASONING_EFFORTS))
+            raise SettingsError(f"DEFAULT_CODEX_EFFORT must be one of: {allowed}")
         if self.max_images_per_message <= 0:
             raise SettingsError("MAX_IMAGES_PER_MESSAGE must be positive")
         if self.max_image_bytes <= 0:
@@ -265,6 +272,9 @@ class Settings:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    legacy_codex_model = os.environ.get("CODEX_MODEL", "").strip()
+    if legacy_codex_model:
+        raise SettingsError("CODEX_MODEL has been replaced by DEFAULT_CODEX_MODEL")
     codex_api_key = os.environ.get("CODEX_API_KEY", "").strip() or None
     triage_workspace_dir = _env_path("TRIAGE_WORKSPACE_DIR", DEFAULT_TRIAGE_WORKSPACE_DIR)
     codex_home = os.environ.get("CODEX_HOME")
@@ -278,7 +288,8 @@ def get_settings() -> Settings:
         manuals_mount_dir=_env_path("MANUALS_MOUNT_DIR", DEFAULT_MANUALS_MOUNT_DIR),
         codex_bin=_required_env("CODEX_BIN"),
         codex_api_key=codex_api_key,
-        codex_model=os.environ.get("CODEX_MODEL", "").strip(),
+        default_codex_model=_required_env("DEFAULT_CODEX_MODEL"),
+        default_codex_effort=_required_env("DEFAULT_CODEX_EFFORT"),
         codex_timeout_seconds=_env_int("CODEX_TIMEOUT_SECONDS", 3600),
         worker_poll_seconds=_env_int("WORKER_POLL_SECONDS", 10),
         auto_support_reply_min_confidence=_env_float("AUTO_SUPPORT_REPLY_MIN_CONFIDENCE", 0.85),

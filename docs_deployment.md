@@ -24,6 +24,7 @@ On platforms where shared disks across two services are hard, run both in one se
    - `APP_BASE_URL` (use your Render URL, e.g. `https://autosac.onrender.com`)
    - `UI_DEFAULT_LOCALE=pt-BR` if you want Portuguese as the server-side fallback UI language
    - `CODEX_API_KEY` if the deployment will not already have authenticated Codex CLI access. In most cloud runtimes, set it.
+   - `DEFAULT_CODEX_MODEL=gpt-5.6-sol` and `DEFAULT_CODEX_EFFORT=medium` are supplied by `render.yaml`; change them only when intentionally changing the deployment-wide Codex defaults.
    - Slack DM settings are DB-backed. After the first admin signs in, use `/ops/integrations/slack` to store the bot token and notify flags. Leave Slack disabled or disconnected there until the migration is live and both web and worker are on the same DM-capable release.
 5. Deploy.
 

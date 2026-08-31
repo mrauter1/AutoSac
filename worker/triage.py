@@ -138,7 +138,8 @@ def _prepare_run(settings: Settings, *, run_id, worker_instance_id: str) -> Prep
 
         if run.triggered_by != "manual_rerun" and current_fingerprint == context.ticket.last_processed_hash:
             run.input_hash = current_fingerprint
-            run.model_name = settings.codex_model or None
+            run.model_name = None
+            run.reasoning_effort = None
             run.pipeline_version = PIPELINE_VERSION
             run.final_step_id = None
             run.final_agent_spec_id = None
@@ -169,6 +170,7 @@ def _prepare_run(settings: Settings, *, run_id, worker_instance_id: str) -> Prep
         )
         run.input_hash = input_hash
         run.model_name = None
+        run.reasoning_effort = None
         run.pipeline_version = PIPELINE_VERSION
         run.final_step_id = None
         run.final_agent_spec_id = None
@@ -503,6 +505,7 @@ def _apply_success_result(
                 final_step_id = pipeline_result.final_step.step_id
                 final_agent_spec_id = None
                 final_model_name = pipeline_result.final_step.prepared.model_name
+                final_reasoning_effort = pipeline_result.final_step.prepared.reasoning_effort
                 requester_language = context.ticket.requester_language
             else:
                 specialist_result = pipeline_result.specialist_result
@@ -512,6 +515,7 @@ def _apply_success_result(
                 final_step_id = pipeline_result.specialist_step.step_id
                 final_agent_spec_id = pipeline_result.specialist_step.prepared.spec.id
                 final_model_name = pipeline_result.specialist_step.prepared.model_name
+                final_reasoning_effort = pipeline_result.specialist_step.prepared.reasoning_effort
                 requester_language = specialist_result.requester_language
 
             outcome, final_output_json = _override_internal_requester_publication(
@@ -533,6 +537,7 @@ def _apply_success_result(
             run.final_output_contract = final_output_contract
             run.final_output_json = final_output_json
             run.model_name = final_model_name
+            run.reasoning_effort = final_reasoning_effort
 
             if outcome.internal_note_markdown:
                 publish_ai_internal_note(

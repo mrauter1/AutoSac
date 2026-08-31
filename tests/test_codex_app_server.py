@@ -29,7 +29,8 @@ def _make_settings(tmp_path: Path, *, codex_bin: str = "codex") -> Settings:
         manuals_mount_dir=workspace_dir / "manuals",
         codex_bin=codex_bin,
         codex_api_key="test-key",
-        codex_model="",
+        default_codex_model="gpt-test",
+        default_codex_effort="medium",
         codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,
@@ -52,6 +53,7 @@ def _prepared(tmp_path: Path):
     }
     return SimpleNamespace(
         model_name="gpt-test",
+        reasoning_effort="medium",
         schema_json=json.dumps(schema),
     )
 
@@ -293,6 +295,11 @@ def test_app_server_client_initializes_starts_threads_turns_steers_correlates_an
         assert [entry.get("method") for entry in log[:3]] == ["initialize", "initialized", "thread/start"]
         thread_start = next(entry for entry in log if entry.get("method") == "thread/start")
         assert not ({"historyMode", "experimentalRawEvents", "excludeTurns"} & set(thread_start["params"]))
+        assert thread_start["params"]["model"] == "gpt-test"
+        turn_start = next(entry for entry in log if entry.get("method") == "turn/start")
+        assert turn_start["params"]["model"] == "gpt-test"
+        assert turn_start["params"]["effort"] == "medium"
+        assert turn_start["params"]["outputSchema"]["type"] == "object"
         steer_requests = [entry for entry in log if entry.get("method") == "turn/steer"]
         assert len(steer_requests) == 1
         assert set(steer_requests[0]["params"]) == {"expectedTurnId", "input", "threadId"}
@@ -456,6 +463,11 @@ def test_app_server_client_resumes_stored_thread(tmp_path):
             stored_thread_id="thread-existing",
             prepared=_prepared(tmp_path),
         )
+        client.start_turn(
+            thread_id=thread.thread_id,
+            input_payload="Resume with pinned settings",
+            prepared=_prepared(tmp_path),
+        )
         assert thread.thread_id == "thread-existing"
         assert thread.resumed is True
         log = _read_log(log_path)
@@ -464,6 +476,12 @@ def test_app_server_client_resumes_stored_thread(tmp_path):
         assert "thread/fork" not in methods
         thread_resume = next(entry for entry in log if entry.get("method") == "thread/resume")
         assert not ({"historyMode", "experimentalRawEvents", "excludeTurns"} & set(thread_resume["params"]))
+        assert thread_resume["params"]["threadId"] == "thread-existing"
+        assert thread_resume["params"]["model"] == "gpt-test"
+        turn_start = next(entry for entry in log if entry.get("method") == "turn/start")
+        assert turn_start["params"]["threadId"] == "thread-existing"
+        assert turn_start["params"]["model"] == "gpt-test"
+        assert turn_start["params"]["effort"] == "medium"
     finally:
         client.close()
 

@@ -28,7 +28,8 @@ def _make_settings(tmp_path: Path) -> Settings:
         manuals_mount_dir=workspace_dir / "manuals",
         codex_bin="codex",
         codex_api_key="test-key",
-        codex_model="",
+        default_codex_model="gpt-test",
+        default_codex_effort="medium",
         codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,
@@ -398,7 +399,8 @@ def test_env_example_and_readme_capture_acceptance_contract():
         "UI_DEFAULT_LOCALE",
         "CODEX_BIN",
         "CODEX_API_KEY",
-        "CODEX_MODEL",
+        "DEFAULT_CODEX_MODEL",
+        "DEFAULT_CODEX_EFFORT",
         "CODEX_TIMEOUT_SECONDS",
         "WORKER_POLL_SECONDS",
         "WORKER_HEARTBEAT_SECONDS",
@@ -476,6 +478,7 @@ def _script_env(tmp_path: Path) -> dict[str, str]:
     uploads_dir.mkdir(parents=True)
 
     env = os.environ.copy()
+    env.pop("CODEX_MODEL", None)
     env.update(
         {
             "APP_BASE_URL": "http://localhost:8000",
@@ -487,7 +490,8 @@ def _script_env(tmp_path: Path) -> dict[str, str]:
             "REPO_MOUNT_DIR": str(repo_mount_dir),
             "MANUALS_MOUNT_DIR": str(manuals_mount_dir),
             "CODEX_BIN": "codex",
-            "CODEX_MODEL": "",
+            "DEFAULT_CODEX_MODEL": "gpt-test",
+            "DEFAULT_CODEX_EFFORT": "medium",
             "CODEX_TIMEOUT_SECONDS": "3600",
             "WORKER_POLL_SECONDS": "10",
             "AUTO_SUPPORT_REPLY_MIN_CONFIDENCE": "0.85",
@@ -500,6 +504,51 @@ def _script_env(tmp_path: Path) -> dict[str, str]:
         }
     )
     return env
+
+
+def _apply_settings_env(monkeypatch, values: dict[str, str]) -> None:
+    monkeypatch.delenv("CODEX_MODEL", raising=False)
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+
+def test_get_settings_requires_and_reads_codex_deployment_defaults(monkeypatch, tmp_path):
+    from shared.config import get_settings
+
+    _apply_settings_env(monkeypatch, _script_env(tmp_path))
+    get_settings.cache_clear()
+
+    settings = get_settings()
+
+    assert settings.default_codex_model == "gpt-test"
+    assert settings.default_codex_effort == "medium"
+    get_settings.cache_clear()
+
+
+def test_get_settings_rejects_invalid_default_codex_effort(monkeypatch, tmp_path):
+    from shared.config import SettingsError, get_settings
+
+    values = _script_env(tmp_path)
+    values["DEFAULT_CODEX_EFFORT"] = "MEDIUM"
+    _apply_settings_env(monkeypatch, values)
+    get_settings.cache_clear()
+
+    with pytest.raises(SettingsError, match="DEFAULT_CODEX_EFFORT must be one of"):
+        get_settings()
+    get_settings.cache_clear()
+
+
+def test_get_settings_rejects_nonempty_legacy_codex_model(monkeypatch, tmp_path):
+    from shared.config import SettingsError, get_settings
+
+    values = _script_env(tmp_path)
+    _apply_settings_env(monkeypatch, values)
+    monkeypatch.setenv("CODEX_MODEL", "gpt-legacy")
+    get_settings.cache_clear()
+
+    with pytest.raises(SettingsError, match="CODEX_MODEL has been replaced by DEFAULT_CODEX_MODEL"):
+        get_settings()
+    get_settings.cache_clear()
 
 
 def _create_runtime_schema(db_path: Path) -> None:
@@ -523,6 +572,7 @@ def _create_runtime_schema(db_path: Path) -> None:
                 requested_by_user_id TEXT,
                 input_hash TEXT,
                 model_name TEXT,
+                reasoning_effort TEXT,
                 pipeline_version TEXT,
                 final_step_id TEXT,
                 final_agent_spec_id TEXT,
@@ -551,6 +601,7 @@ def _create_runtime_schema(db_path: Path) -> None:
                 agent_spec_version TEXT NOT NULL,
                 output_contract TEXT NOT NULL,
                 model_name TEXT,
+                reasoning_effort TEXT,
                 status TEXT NOT NULL,
                 prompt_path TEXT,
                 schema_path TEXT,
@@ -580,7 +631,9 @@ def test_get_settings_allows_missing_codex_api_key(monkeypatch, tmp_path):
     monkeypatch.setenv("MANUALS_MOUNT_DIR", str(workspace_dir / "manuals"))
     monkeypatch.setenv("CODEX_BIN", "codex")
     monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    monkeypatch.setenv("CODEX_MODEL", "")
+    monkeypatch.delenv("CODEX_MODEL", raising=False)
+    monkeypatch.setenv("DEFAULT_CODEX_MODEL", "gpt-test")
+    monkeypatch.setenv("DEFAULT_CODEX_EFFORT", "medium")
     monkeypatch.setenv("CODEX_TIMEOUT_SECONDS", "3600")
     monkeypatch.setenv("WORKER_POLL_SECONDS", "10")
     monkeypatch.setenv("AUTO_SUPPORT_REPLY_MIN_CONFIDENCE", "0.85")
@@ -617,7 +670,9 @@ def test_get_settings_reads_codex_rollout_flags_without_changing_shared_home(mon
     monkeypatch.setenv("MANUALS_MOUNT_DIR", str(workspace_dir / "manuals"))
     monkeypatch.setenv("CODEX_BIN", "codex")
     monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    monkeypatch.setenv("CODEX_MODEL", "")
+    monkeypatch.delenv("CODEX_MODEL", raising=False)
+    monkeypatch.setenv("DEFAULT_CODEX_MODEL", "gpt-test")
+    monkeypatch.setenv("DEFAULT_CODEX_EFFORT", "medium")
     monkeypatch.setenv("CODEX_TIMEOUT_SECONDS", "3600")
     monkeypatch.setenv("WORKER_POLL_SECONDS", "10")
     monkeypatch.setenv("AUTO_SUPPORT_REPLY_MIN_CONFIDENCE", "0.85")
@@ -656,7 +711,9 @@ def test_get_settings_ignores_legacy_slack_env_runtime_config(monkeypatch, tmp_p
     monkeypatch.setenv("MANUALS_MOUNT_DIR", str(workspace_dir / "manuals"))
     monkeypatch.setenv("CODEX_BIN", "codex")
     monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    monkeypatch.setenv("CODEX_MODEL", "")
+    monkeypatch.delenv("CODEX_MODEL", raising=False)
+    monkeypatch.setenv("DEFAULT_CODEX_MODEL", "gpt-test")
+    monkeypatch.setenv("DEFAULT_CODEX_EFFORT", "medium")
     monkeypatch.setenv("CODEX_TIMEOUT_SECONDS", "3600")
     monkeypatch.setenv("WORKER_POLL_SECONDS", "10")
     monkeypatch.setenv("AUTO_SUPPORT_REPLY_MIN_CONFIDENCE", "0.85")
@@ -708,7 +765,9 @@ def test_get_settings_ignores_invalid_legacy_slack_env_runtime_config(monkeypatc
     monkeypatch.setenv("MANUALS_MOUNT_DIR", str(workspace_dir / "manuals"))
     monkeypatch.setenv("CODEX_BIN", "codex")
     monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    monkeypatch.setenv("CODEX_MODEL", "")
+    monkeypatch.delenv("CODEX_MODEL", raising=False)
+    monkeypatch.setenv("DEFAULT_CODEX_MODEL", "gpt-test")
+    monkeypatch.setenv("DEFAULT_CODEX_EFFORT", "medium")
     monkeypatch.setenv("CODEX_TIMEOUT_SECONDS", "3600")
     monkeypatch.setenv("WORKER_POLL_SECONDS", "10")
     monkeypatch.setenv("AUTO_SUPPORT_REPLY_MIN_CONFIDENCE", "0.85")
@@ -744,7 +803,8 @@ def test_settings_validate_contracts_rejects_uploads_dir_outside_workspace(tmp_p
         manuals_mount_dir=workspace_dir / "manuals",
         codex_bin="codex",
         codex_api_key=None,
-        codex_model="",
+        default_codex_model="gpt-test",
+        default_codex_effort="medium",
         codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,
@@ -772,7 +832,8 @@ def test_settings_web_contract_does_not_require_codex_home_mount(tmp_path):
         manuals_mount_dir=workspace_dir / "manuals",
         codex_bin="codex",
         codex_api_key=None,
-        codex_model="",
+        default_codex_model="gpt-test",
+        default_codex_effort="medium",
         codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,
@@ -829,7 +890,8 @@ def test_settings_validate_worker_contracts_requires_existing_codex_home(tmp_pat
         manuals_mount_dir=workspace_dir / "manuals",
         codex_bin="codex",
         codex_api_key=None,
-        codex_model="",
+        default_codex_model="gpt-test",
+        default_codex_effort="medium",
         codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,
@@ -860,7 +922,8 @@ def test_settings_validate_worker_contracts_requires_writable_codex_home(monkeyp
         manuals_mount_dir=workspace_dir / "manuals",
         codex_bin="codex",
         codex_api_key=None,
-        codex_model="",
+        default_codex_model="gpt-test",
+        default_codex_effort="medium",
         codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,

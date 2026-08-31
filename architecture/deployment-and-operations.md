@@ -32,7 +32,7 @@ Dependencies use bounded major-version ranges in `requirements.txt`, but there i
 ### Optional environment groups
 
 - Workspace: `TRIAGE_WORKSPACE_DIR`, `UPLOADS_DIR`, `REPO_MOUNT_DIR`, `MANUALS_MOUNT_DIR`.
-- Codex/worker: `CODEX_API_KEY`, `CODEX_MODEL`, timeouts, polling, heartbeat and recovery budget. Persistent conversations, app-server specialist transport, and active-turn steering use `CODEX_CONVERSATIONS_ENABLED`, `CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED`, and `CODEX_ACTIVE_TURN_STEERING_ENABLED`; each defaults to `false`. `CODEX_HOME` defaults to `~/autosac/codex` and is shared by AutoSac Codex ticket sessions.
+- Codex/worker: `CODEX_API_KEY`, `DEFAULT_CODEX_MODEL`, `DEFAULT_CODEX_EFFORT`, timeouts, polling, heartbeat and recovery budget. The model and effort are required deployment defaults resolved for every Codex step; agent-specific model overrides still take precedence. Persistent conversations, app-server specialist transport, and active-turn steering use `CODEX_CONVERSATIONS_ENABLED`, `CODEX_APP_SERVER_SPECIALIST_TRANSPORT_ENABLED`, and `CODEX_ACTIVE_TURN_STEERING_ENABLED`; each defaults to `false`. `CODEX_HOME` defaults to `~/autosac/codex` and is shared by AutoSac Codex ticket sessions, but it is not a second source for AutoSac's model or effort policy.
 - Publication: two legacy-looking numeric threshold settings are loaded (`AUTO_SUPPORT_REPLY_MIN_CONFIDENCE`, `AUTO_CONFIRM_INTENT_MIN_CONFIDENCE`), while the current registry pipeline uses categorical per-route publication policy. They remain part of `Settings` but are not the current publication decision source.
 - Uploads: count and byte limits; names still use `MAX_IMAGES_*` though arbitrary files are accepted.
 - Sessions: default hours and remember days.

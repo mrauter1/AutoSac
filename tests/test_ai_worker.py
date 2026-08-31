@@ -35,7 +35,8 @@ def _make_settings(tmp_path: Path, *, codex_api_key: str | None = "test-key") ->
         manuals_mount_dir=workspace_dir / "manuals",
         codex_bin="codex",
         codex_api_key=codex_api_key,
-        codex_model="gpt-test",
+        default_codex_model="gpt-test",
+        default_codex_effort="medium",
         codex_timeout_seconds=3600,
         worker_poll_seconds=10,
         auto_support_reply_min_confidence=0.85,
@@ -1170,10 +1171,37 @@ def test_build_codex_command_omits_api_key_when_not_configured(monkeypatch, tmp_
     )
 
     monkeypatch.setenv("CODEX_API_KEY", "stale-parent-key")
-    _command, env = symbols["build_codex_command"](settings, prepared=prepared)
+    command, env = symbols["build_codex_command"](settings, prepared=prepared)
 
     assert "CODEX_API_KEY" not in env
     assert env["CODEX_HOME"] == str(settings.resolved_codex_home)
+    assert command[command.index("--model") + 1] == "gpt-test"
+    assert 'model_reasoning_effort="medium"' in command
+    assert prepared.reasoning_effort == "medium"
+
+
+def test_prepare_step_run_preserves_agent_model_override_with_deployment_effort(tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    context = _make_context()
+    spec = replace(symbols["load_agent_spec"]("support"), model_override="gpt-agent-override")
+    router_result = symbols["RouterResult"].model_validate(_route_payload())
+
+    prepared = symbols["prepare_step_run"](
+        settings,
+        run_id=uuid.uuid4(),
+        ticket_id=context.ticket.id,
+        worker_instance_id="worker-test",
+        step_index=2,
+        step_kind="specialist",
+        spec=spec,
+        context=context,
+        router_result=router_result,
+        target_route_target_id="support",
+    )
+
+    assert prepared.model_name == "gpt-agent-override"
+    assert prepared.reasoning_effort == "medium"
 
 
 def test_build_persistent_codex_command_includes_initial_exec_controls(tmp_path):
@@ -1216,6 +1244,8 @@ def test_build_persistent_codex_command_includes_initial_exec_controls(tmp_path)
     assert "standalone_web_search" in command_spec.command
     assert str(prepared.paths.schema_path) in command_spec.command
     assert str(prepared.paths.final_output_path) in command_spec.command
+    assert command_spec.command[command_spec.command.index("--model") + 1] == "gpt-test"
+    assert 'model_reasoning_effort="medium"' in command_spec.command
     assert command_spec.command[-1] == "-"
     assert command_spec.env["CODEX_HOME"] == str(settings.resolved_codex_home)
     assert command_spec.resumed is False
@@ -1254,6 +1284,8 @@ def test_build_persistent_codex_command_uses_explicit_thread_id_on_resume(tmp_pa
     assert command_spec.command[:5] == ["codex", "--ask-for-approval", "never", "exec", "resume"]
     assert "--sandbox" not in command_spec.command
     assert "thread-123" in command_spec.command
+    assert command_spec.command[command_spec.command.index("--model") + 1] == "gpt-test"
+    assert 'model_reasoning_effort="medium"' in command_spec.command
     assert command_spec.command[-2:] == ["thread-123", "-"]
     assert command_spec.resumed is True
 
@@ -3792,13 +3824,13 @@ def test_execute_step_writes_selected_specialist_registration_id_to_step_manifes
         selected_specialist_id="support-primary",
     )
     prepared.paths.final_output_path.write_text(json.dumps(_specialist_payload()), encoding="utf-8")
-    observed = {"metadata": []}
+    observed = {"manifests": []}
 
     monkeypatch.setattr("worker.step_runner._create_running_step_row", lambda settings, prepared: uuid.uuid4())
     monkeypatch.setattr("worker.step_runner._update_step_row", lambda **kwargs: None)
     monkeypatch.setattr(
         "worker.step_runner.write_step_manifest",
-        lambda *args, **kwargs: observed["metadata"].append(kwargs["metadata"]),
+        lambda *args, **kwargs: observed["manifests"].append(kwargs),
     )
 
     def fake_run(command, **kwargs):
@@ -3808,7 +3840,9 @@ def test_execute_step_writes_selected_specialist_registration_id_to_step_manifes
 
     symbols["execute_step"](settings, prepared=prepared)
 
-    assert observed["metadata"][-1]["selected_specialist_id"] == "support-primary"
+    assert observed["manifests"][-1]["metadata"]["selected_specialist_id"] == "support-primary"
+    assert observed["manifests"][-1]["model_name"] == "gpt-test"
+    assert observed["manifests"][-1]["reasoning_effort"] == "medium"
 
 
 def test_execute_step_raises_when_run_ownership_is_lost_before_step_completion(monkeypatch, tmp_path):
@@ -4373,6 +4407,7 @@ def test_prepare_run_skips_when_last_processed_hash_matches(monkeypatch, tmp_pat
         triggered_by="new_ticket",
         input_hash=None,
         model_name=None,
+        reasoning_effort=None,
         pipeline_version=None,
         final_step_id=None,
         final_agent_spec_id=None,
@@ -4400,6 +4435,8 @@ def test_prepare_run_skips_when_last_processed_hash_matches(monkeypatch, tmp_pat
     assert prepared is None
     assert run.status == "skipped"
     assert run.pipeline_version == "agent-pipeline-v1"
+    assert run.model_name is None
+    assert run.reasoning_effort is None
     assert run.ended_at is not None
     assert observed["requeue"] == 1
 
@@ -4461,7 +4498,11 @@ def _pipeline_result(
 ):
     router_step = SimpleNamespace(
         step_id=uuid.uuid4(),
-        prepared=SimpleNamespace(spec=SimpleNamespace(id="router"), model_name="gpt-router"),
+        prepared=SimpleNamespace(
+            spec=SimpleNamespace(id="router"),
+            model_name="gpt-router",
+            reasoning_effort="medium",
+        ),
         output_payload=_route_payload(route_target_id=route_target.id, routing_rationale="Router rationale."),
     )
     router_result = SimpleNamespace(route_target_id=route_target.id, routing_rationale="Router rationale.")
@@ -4472,7 +4513,11 @@ def _pipeline_result(
     else:
         specialist_step = SimpleNamespace(
             step_id=uuid.uuid4(),
-            prepared=SimpleNamespace(spec=SimpleNamespace(id=specialist_spec_id, output_contract="specialist_result"), model_name="gpt-specialist"),
+            prepared=SimpleNamespace(
+                spec=SimpleNamespace(id=specialist_spec_id, output_contract="specialist_result"),
+                model_name="gpt-specialist",
+                reasoning_effort="medium",
+            ),
             output_payload=specialist_payload,
         )
         specialist_result = _load_worker_symbols()["SpecialistResult"].model_validate(specialist_payload)
@@ -7017,6 +7062,7 @@ def test_write_run_manifest_snapshot_serializes_route_target_metadata(monkeypatc
             output_contract="router_result",
             status="succeeded",
             model_name="gpt-router",
+            reasoning_effort="medium",
             prompt_path="/tmp/router-prompt.txt",
             schema_path="/tmp/router-schema.json",
             final_output_path="/tmp/router-final.json",
@@ -7033,6 +7079,7 @@ def test_write_run_manifest_snapshot_serializes_route_target_metadata(monkeypatc
             output_contract="specialist_selector_result",
             status="succeeded",
             model_name="gpt-selector",
+            reasoning_effort="medium",
             prompt_path="/tmp/selector-prompt.txt",
             schema_path="/tmp/selector-schema.json",
             final_output_path="/tmp/selector-final.json",
@@ -7049,6 +7096,7 @@ def test_write_run_manifest_snapshot_serializes_route_target_metadata(monkeypatc
             output_contract="specialist_result",
             status="succeeded",
             model_name="gpt-bug",
+            reasoning_effort="medium",
             prompt_path="/tmp/bug-prompt.txt",
             schema_path="/tmp/bug-schema.json",
             final_output_path="/tmp/bug-final.json",
@@ -7102,6 +7150,7 @@ def test_write_run_manifest_snapshot_serializes_route_target_metadata(monkeypatc
     assert metadata["effective_publication_mode"] == "draft_for_human"
     assert observed["steps"][1]["selected_specialist_id"] == "bug"
     assert observed["steps"][2]["publish_mode_recommendation"] == "draft_for_human"
+    assert [step["reasoning_effort"] for step in observed["steps"]] == ["medium", "medium", "medium"]
 
 
 def test_write_run_manifest_snapshot_prefers_router_output_over_stale_ticket_route_target(monkeypatch, tmp_path):
@@ -7130,6 +7179,7 @@ def test_write_run_manifest_snapshot_prefers_router_output_over_stale_ticket_rou
             output_contract="router_result",
             status="succeeded",
             model_name="gpt-router",
+            reasoning_effort="medium",
             prompt_path="/tmp/router-prompt.txt",
             schema_path="/tmp/router-schema.json",
             final_output_path="/tmp/router-final.json",
@@ -7215,6 +7265,7 @@ def test_write_run_manifest_snapshot_uses_fixed_specialist_registration_id(monke
             output_contract="router_result",
             status="succeeded",
             model_name="gpt-router",
+            reasoning_effort="medium",
             prompt_path="/tmp/router-prompt.txt",
             schema_path="/tmp/router-schema.json",
             final_output_path="/tmp/router-final.json",
@@ -7231,6 +7282,7 @@ def test_write_run_manifest_snapshot_uses_fixed_specialist_registration_id(monke
             output_contract="specialist_result",
             status="succeeded",
             model_name="gpt-support",
+            reasoning_effort="medium",
             prompt_path="/tmp/support-prompt.txt",
             schema_path="/tmp/support-schema.json",
             final_output_path="/tmp/support-final.json",
