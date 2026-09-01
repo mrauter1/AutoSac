@@ -1,0 +1,35 @@
+<section id="ticket-ledger-region" class="panel stack requester-detail__thread">
+  {% for item in timeline %}
+  {% if item.kind == "status_change" %}
+  <article class="timeline-status">
+    <div class="timeline-status__meta">
+      <span class="lane-pill lane-pill--status">{{ item.lane_label }}</span>
+      <span>{{ format_datetime_utc(item.created_at) }}</span>
+    </div>
+    <p class="timeline-status__text">{{ item.summary }}</p>
+  </article>
+  {% else %}
+  <article
+    id="ticket-message-{{ item.id }}"
+    class="message-card"
+    {% if auto_scroll_message_id is defined and auto_scroll_message_id == item.id %}data-auto-scroll-target="true"{% endif %}
+  >
+    <div class="message-card__meta">
+      <strong>{{ item.author_label }}</strong>
+      <span>{{ format_datetime_utc(item.created_at) }}</span>
+    </div>
+    <div class="message-card__body">{{ item.body_html | safe }}</div>
+    {% if item.attachments %}
+    <ul class="attachment-list">
+      {% for attachment in item.attachments %}
+      <li>
+        <a href="/attachments/{{ attachment.id }}">{{ attachment.original_filename }}</a>
+        <span class="muted">{{ attachment.mime_type }} · {{ t("common.bytes", count=attachment.size_bytes) }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </article>
+  {% endif %}
+  {% endfor %}
+</section>

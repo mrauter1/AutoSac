@@ -6,7 +6,7 @@ from typing import Any
 import uuid
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.formparsers import MultiPartException
@@ -17,13 +17,15 @@ from app.i18n import (
     requester_role_suffix_label,
     requester_status_change_summary,
     requester_status_label,
+    get_translator,
     resolve_ui_locale,
     timeline_lane_label,
 )
 from app.auth import get_current_user, get_required_auth_session, require_requester_user, validate_csrf_token
 from app.render import render_markdown_to_html
 from app.timeline import build_author_label, load_ticket_status_history, load_users_by_ids, merge_timeline_items, serialize_status_changes
-from app.ui import build_template_context, templates
+from app.ticket_live import if_none_match_matches, load_ticket_live_state, ticket_live_representation_etag
+from app.ui import build_template_context, is_htmx_request, templates
 from app.uploads import (
     UploadValidationError,
     get_form_attachments,
@@ -138,6 +140,32 @@ def _build_requester_timeline(db: Session, *, ticket_id, ui_locale: str = DEFAUL
             user_display_names={user_id: user.display_name for user_id, user in users_by_id.items()},
         ),
     )
+
+
+def _requester_ticket_detail_context(
+    db: Session,
+    *,
+    ticket: Ticket,
+    ui_locale: str,
+    stale_timeout_seconds: int,
+    reply_body: str = "",
+) -> dict[str, object]:
+    timeline = _build_requester_timeline(db, ticket_id=ticket.id, ui_locale=ui_locale)
+    return {
+        "ticket": ticket,
+        "timeline": timeline,
+        "auto_scroll_message_id": _last_public_message_item_id(timeline),
+        "reply_body": reply_body,
+        "live_audience": "requester",
+        "live_state_url": f"/app/tickets/{ticket.reference}/live-state",
+        "live_detail_url": f"/app/tickets/{ticket.reference}",
+        "live_state": load_ticket_live_state(
+            db,
+            ticket=ticket,
+            audience="requester",
+            stale_timeout_seconds=stale_timeout_seconds,
+        ),
+    }
 
 
 def _parse_bool(value: str | None) -> bool:
@@ -320,6 +348,7 @@ def requester_ticket_detail(
     request: Request,
     current_user: User = Depends(require_requester_user),
     auth_session: SessionRecord = Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
     db: Session = Depends(db_session_dependency),
 ):
     ui_locale = resolve_ui_locale(request)
@@ -330,22 +359,69 @@ def requester_ticket_detail(
             status_code=status.HTTP_303_SEE_OTHER,
         )
     upsert_ticket_view(db, user_id=current_user.id, ticket_id=ticket.id)
-    timeline = _build_requester_timeline(db, ticket_id=ticket.id, ui_locale=ui_locale)
+    detail_context = _requester_ticket_detail_context(
+        db,
+        ticket=ticket,
+        ui_locale=ui_locale,
+        stale_timeout_seconds=settings.ai_run_stale_timeout_seconds,
+    )
     db.commit()
+    context = build_template_context(
+        request=request,
+        current_user=current_user,
+        auth_session=auth_session,
+        extra=detail_context,
+        ui_locale=ui_locale,
+    )
+    if is_htmx_request(request) and request.headers.get("X-AutoSac-Live-Refresh", "").lower() == "true":
+        response = templates.TemplateResponse(request, "requester_ticket_live_fragments.html", context)
+        response.headers["X-Ticket-Content-Version"] = detail_context["live_state"].content_version
+        return response
     return templates.TemplateResponse(
         request,
         "requester_ticket_detail.html",
-        build_template_context(
-            request=request,
-            current_user=current_user,
-            auth_session=auth_session,
-            extra={
-                "ticket": ticket,
-                "timeline": timeline,
-                "auto_scroll_message_id": _last_public_message_item_id(timeline),
-            },
-            ui_locale=ui_locale,
-        ),
+        context,
+    )
+
+
+@router.get("/app/tickets/{reference}/live-state")
+def requester_ticket_live_state(
+    reference: str,
+    request: Request,
+    current_user: User = Depends(require_requester_user),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(db_session_dependency),
+):
+    if can_access_all_tickets(current_user):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
+    ticket = _load_requester_ticket_or_404(db, reference=reference, requester_id=current_user.id)
+    live_state = load_ticket_live_state(
+        db,
+        ticket=ticket,
+        audience="requester",
+        stale_timeout_seconds=settings.ai_run_stale_timeout_seconds,
+    )
+    ui_locale = resolve_ui_locale(request)
+    etag = ticket_live_representation_etag(version=live_state.version, ui_locale=ui_locale)
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "private, no-cache",
+        "Vary": "Cookie, Accept-Language",
+    }
+    if if_none_match_matches(request.headers.get("If-None-Match"), etag=etag):
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    translator = get_translator(ui_locale)
+    return JSONResponse(
+        {
+            "active": live_state.active,
+            "phase": live_state.phase,
+            "label": translator(f"ticket.live.requester.{live_state.phase}"),
+            "version": live_state.version,
+            "content_version": live_state.content_version,
+            "started_at": live_state.started_at.isoformat() if live_state.started_at is not None else None,
+            "delayed": live_state.delayed,
+        },
+        headers=headers,
     )
 
 

@@ -1,0 +1,28 @@
+<div id="ticket-pending-draft-region" {% if live_oob %}hx-swap-oob="outerHTML"{% endif %} {% if not pending_draft %}hidden{% endif %}>
+  {% if pending_draft %}
+  <section
+    id="ticket-pending-draft-actions-{{ pending_draft.id }}"
+    class="panel stack ops-ticket-detail__sidebar-section"
+    hx-preserve
+  >
+    <h2>{{ t("ops.detail.pending_ai_draft") }}</h2>
+    <div class="message-card__body ops-ticket-detail__rich-text">{{ pending_draft_html | safe }}</div>
+    <form method="post" action="/ops/drafts/{{ pending_draft.id }}/approve-publish" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="field">
+        <span>{{ t("field.next_status") }}</span>
+        <select name="next_status">
+          {% for value in draft_reply_status_options %}
+          <option value="{{ value }}" {% if value == "waiting_on_user" %}selected{% endif %}>{{ ops_status_label(value) }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit" class="button">{{ t("button.approve_and_publish") }}</button>
+    </form>
+    <form method="post" action="/ops/drafts/{{ pending_draft.id }}/reject">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="button button--ghost">{{ t("button.reject_draft") }}</button>
+    </form>
+  </section>
+  {% endif %}
+</div>

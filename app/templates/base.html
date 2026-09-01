@@ -6,6 +6,7 @@
     <title>{% block title %}{{ t("brand.name") }}{% endblock %}</title>
     <link rel="stylesheet" href="/static/app.css">
     <script src="/static/htmx.min.js"></script>
+    {% block page_scripts %}{% endblock %}
   </head>
   <body>
     <header class="site-header">

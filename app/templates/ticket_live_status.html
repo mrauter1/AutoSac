@@ -1,0 +1,29 @@
+<div
+  class="ticket-live"
+  data-ticket-live-controller
+  data-live-state-url="{{ live_state_url }}"
+  data-detail-url="{{ live_detail_url }}"
+  data-content-version="{{ live_state.content_version }}"
+  data-active="{{ 'true' if live_state.active else 'false' }}"
+  data-started-at="{{ live_state.started_at.isoformat() if live_state.started_at else '' }}"
+  data-update-label="{{ t('ticket.live.updated_available') }}"
+  data-jump-label="{{ t('ticket.live.jump_to_latest') }}"
+  data-stopped-label="{{ t('ticket.live.connection_stopped') }}"
+>
+  <div
+    id="ticket-live-region"
+    class="ticket-live__status{% if live_state.delayed %} ticket-live__status--delayed{% endif %}"
+    role="status"
+    aria-live="polite"
+    aria-label="{{ t('ticket.live.region_label') }}"
+    {% if not live_state.active %}hidden{% endif %}
+  >
+    <span class="ticket-live__spinner" aria-hidden="true"></span>
+    <span data-ticket-live-label>{{ t("ticket.live." ~ live_audience ~ "." ~ live_state.phase) }}</span>
+    <span class="ticket-live__elapsed" data-ticket-live-elapsed></span>
+  </div>
+  <p class="ticket-live__error" data-ticket-live-error hidden>{{ t("ticket.live.connection_delayed") }}</p>
+  <button type="button" class="button button--ghost ticket-live__jump" data-ticket-live-jump hidden>
+    {{ t("ticket.live.jump_to_latest") }}
+  </button>
+</div>

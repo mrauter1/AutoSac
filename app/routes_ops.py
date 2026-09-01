@@ -7,7 +7,7 @@ import uuid
 
 import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from starlette.formparsers import MultiPartException
@@ -24,12 +24,19 @@ from app.i18n import (
     ops_role_suffix_label,
     ops_status_change_summary,
     ops_status_label,
+    get_translator,
     resolve_ui_locale,
     timeline_lane_label,
 )
 from app.auth import get_required_auth_session, require_admin_user, require_ops_user, validate_csrf_token
 from app.render import render_markdown_to_html
 from app.timeline import build_author_label, load_ticket_status_history, load_users_by_ids, merge_timeline_items, serialize_status_changes
+from app.ticket_live import (
+    build_ticket_live_state,
+    if_none_match_matches,
+    load_ticket_live_state,
+    ticket_live_representation_etag,
+)
 from app.ui import build_template_context, is_htmx_request, templates
 from app.uploads import (
     UploadValidationError,
@@ -277,7 +284,7 @@ def _load_ops_users(db: Session) -> list[User]:
 
 def _load_latest_run(db: Session, *, ticket_id) -> AIRun | None:
     return db.execute(
-        select(AIRun).where(AIRun.ticket_id == ticket_id).order_by(AIRun.created_at.desc())
+        select(AIRun).where(AIRun.ticket_id == ticket_id).order_by(AIRun.created_at.desc(), AIRun.id.desc())
     ).scalars().first()
 
 
@@ -289,7 +296,7 @@ def _load_latest_analysis_run(db: Session, *, ticket_id) -> AIRun | None:
             AIRun.status.in_(("succeeded", "human_review")),
             AIRun.final_output_json.is_not(None),
         )
-        .order_by(AIRun.created_at.desc())
+        .order_by(AIRun.created_at.desc(), AIRun.id.desc())
     ).scalars().first()
 
 
@@ -982,6 +989,7 @@ def _ticket_detail_context(
     current_user: User,
     ui_locale: str = DEFAULT_UI_LOCALE,
     persistent_visibility_enabled: bool = False,
+    ai_run_stale_timeout_seconds: int = 300,
 ) -> dict[str, object]:
     pending_draft = _load_pending_draft(db, ticket_id=ticket.id)
     latest_run = _load_latest_run(db, ticket_id=ticket.id)
@@ -1000,6 +1008,13 @@ def _ticket_detail_context(
     )
     creator = db.get(User, ticket.created_by_user_id)
     assignee = db.get(User, ticket.assigned_to_user_id) if ticket.assigned_to_user_id else None
+    live_state = build_ticket_live_state(
+        ticket=ticket,
+        latest_run=latest_run,
+        latest_step=latest_run_steps[-1] if latest_run_steps else None,
+        audience="ops",
+        stale_timeout_seconds=ai_run_stale_timeout_seconds,
+    )
     return {
         "ticket": ticket,
         "route_target_display": present_ticket_route_target(ticket),
@@ -1027,6 +1042,10 @@ def _ticket_detail_context(
         "rerun_specialist_options": _ops_manual_rerun_specialist_options(),
         "persistent_conversation": persistent_conversation,
         "persistent_visibility_enabled": persistent_visibility_enabled,
+        "live_audience": "ops",
+        "live_state_url": f"/ops/tickets/{ticket.reference}/live-state",
+        "live_detail_url": f"/ops/tickets/{ticket.reference}",
+        "live_state": live_state,
     }
 
 
@@ -1369,22 +1388,68 @@ def ops_ticket_detail(
     ticket = _load_ops_ticket_or_404(db, reference=reference)
     upsert_ticket_view(db, user_id=current_user.id, ticket_id=ticket.id)
     db.commit()
+    context = build_template_context(
+        request=request,
+        current_user=current_user,
+        auth_session=auth_session,
+        extra=_ticket_detail_context(
+            db,
+            ticket=ticket,
+            current_user=current_user,
+            ui_locale=ui_locale,
+            persistent_visibility_enabled=settings.codex_conversations_enabled,
+            ai_run_stale_timeout_seconds=settings.ai_run_stale_timeout_seconds,
+        ),
+        ui_locale=ui_locale,
+    )
+    if is_htmx_request(request) and request.headers.get("X-AutoSac-Live-Refresh", "").lower() == "true":
+        response = templates.TemplateResponse(request, "ops_ticket_live_fragments.html", context)
+        live_state = context["live_state"]
+        response.headers["X-Ticket-Content-Version"] = live_state.content_version
+        return response
     return templates.TemplateResponse(
         request,
         "ops_ticket_detail.html",
-        build_template_context(
-            request=request,
-            current_user=current_user,
-            auth_session=auth_session,
-            extra=_ticket_detail_context(
-                db,
-                ticket=ticket,
-                current_user=current_user,
-                ui_locale=ui_locale,
-                persistent_visibility_enabled=settings.codex_conversations_enabled,
-            ),
-            ui_locale=ui_locale,
-        ),
+        context,
+    )
+
+
+@router.get("/ops/tickets/{reference}/live-state")
+def ops_ticket_live_state(
+    reference: str,
+    request: Request,
+    current_user: User = Depends(require_ops_user),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(db_session_dependency),
+):
+    ticket = _load_ops_ticket_or_404(db, reference=reference)
+    live_state = load_ticket_live_state(
+        db,
+        ticket=ticket,
+        audience="ops",
+        stale_timeout_seconds=settings.ai_run_stale_timeout_seconds,
+    )
+    ui_locale = resolve_ui_locale(request)
+    etag = ticket_live_representation_etag(version=live_state.version, ui_locale=ui_locale)
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "private, no-cache",
+        "Vary": "Cookie, Accept-Language",
+    }
+    if if_none_match_matches(request.headers.get("If-None-Match"), etag=etag):
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    translator = get_translator(ui_locale)
+    return JSONResponse(
+        {
+            "active": live_state.active,
+            "phase": live_state.phase,
+            "label": translator(f"ticket.live.ops.{live_state.phase}"),
+            "version": live_state.version,
+            "content_version": live_state.content_version,
+            "started_at": live_state.started_at.isoformat() if live_state.started_at is not None else None,
+            "delayed": live_state.delayed,
+        },
+        headers=headers,
     )
 
 

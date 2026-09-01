@@ -229,6 +229,17 @@ class _RouteDb:
     def get(self, model, key):
         return self.objects.get((model, key))
 
+    def execute(self, statement):
+        return _EmptyRouteResult()
+
+
+class _EmptyRouteResult:
+    def scalars(self):
+        return self
+
+    def first(self):
+        return None
+
 
 class _FakePreauthStore:
     def __init__(self):
@@ -625,7 +636,13 @@ def test_requester_routes_source_uses_custom_auth_and_explicit_multipart_limits(
     source = Path("app/routes_requester.py").read_text(encoding="utf-8")
     upload_source = Path("app/uploads.py").read_text(encoding="utf-8")
     i18n_source = Path("app/i18n.py").read_text(encoding="utf-8")
-    template_source = Path("app/templates/requester_ticket_detail.html").read_text(encoding="utf-8")
+    template_source = "\n".join(
+        Path(path).read_text(encoding="utf-8")
+        for path in (
+            "app/templates/requester_ticket_detail.html",
+            "app/templates/requester_ticket_ledger.html",
+        )
+    )
 
     assert '"/app/tickets/{reference}/reply"' in source
     assert "parse_multipart_form(request, settings)" in source
@@ -1093,11 +1110,29 @@ def test_requester_detail_route_marks_ticket_as_read(monkeypatch):
     db = _RouteDb()
     requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester")
     auth_session = SimpleNamespace(csrf_token="csrf-token")
-    ticket = SimpleNamespace(reference="T-000001", id=uuid.uuid4(), title="Ticket", status="new", urgent=False)
+    ticket = SimpleNamespace(
+        reference="T-000001",
+        id=uuid.uuid4(),
+        title="Ticket",
+        status="new",
+        urgent=False,
+        updated_at=datetime(2026, 3, 26, 19, 0, tzinfo=timezone.utc),
+    )
     observed = {"view_updates": 0}
 
     monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
     monkeypatch.setattr(stack["routes_requester"], "_build_requester_timeline", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        stack["routes_requester"],
+        "load_ticket_live_state",
+        lambda *args, **kwargs: SimpleNamespace(
+            active=False,
+            phase="idle",
+            started_at=None,
+            delayed=False,
+            content_version="content-v1",
+        ),
+    )
     monkeypatch.setattr(
         stack["routes_requester"],
         "upsert_ticket_view",
@@ -1113,6 +1148,109 @@ def test_requester_detail_route_marks_ticket_as_read(monkeypatch):
 
     assert response.status_code == 200
     assert observed["view_updates"] == 1
+    assert db.commit_calls == 1
+
+
+def test_requester_live_state_is_read_only_conditional_and_coarse(monkeypatch, tmp_path):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings(tmp_path)
+    requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester")
+    ticket = SimpleNamespace(reference="T-000041", id=uuid.uuid4(), status="ai_triage")
+    started_at = datetime(2026, 9, 1, 14, 0, tzinfo=timezone.utc)
+    live_state = SimpleNamespace(
+        active=True,
+        phase="working",
+        started_at=started_at,
+        delayed=False,
+        version="state-v1",
+        content_version="content-v1",
+        etag='"state-v1"',
+    )
+    observed = {"view_updates": 0}
+
+    monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(stack["routes_requester"], "load_ticket_live_state", lambda *args, **kwargs: live_state)
+    monkeypatch.setattr(
+        stack["routes_requester"],
+        "upsert_ticket_view",
+        lambda *args, **kwargs: observed.__setitem__("view_updates", observed["view_updates"] + 1),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: requester
+    app.dependency_overrides[stack["routes_requester"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        response = client.get(f"/app/tickets/{ticket.reference}/live-state")
+        unchanged = client.get(
+            f"/app/tickets/{ticket.reference}/live-state",
+            headers={"If-None-Match": response.headers["etag"]},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "active": True,
+        "phase": "working",
+        "label": "Working on your ticket",
+        "version": "state-v1",
+        "content_version": "content-v1",
+        "started_at": started_at.isoformat(),
+        "delayed": False,
+    }
+    assert response.headers["cache-control"] == "private, no-cache"
+    assert response.headers["vary"] == "Cookie, Accept-Language"
+    assert unchanged.status_code == 304
+    assert unchanged.content == b""
+    assert db.commit_calls == 0
+    assert observed["view_updates"] == 0
+
+
+def test_requester_live_fragment_refresh_excludes_composer(monkeypatch, tmp_path):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings(tmp_path)
+    requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000042", id=uuid.uuid4(), title="Updated ticket", status="waiting_on_user", urgent=False)
+    live_state = SimpleNamespace(active=False, phase="idle", started_at=None, delayed=False, content_version="content-v2")
+
+    monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_requester"],
+        "_requester_ticket_detail_context",
+        lambda *args, **kwargs: {
+            "ticket": ticket,
+            "timeline": [],
+            "auto_scroll_message_id": None,
+            "reply_body": "",
+            "live_audience": "requester",
+            "live_state_url": f"/app/tickets/{ticket.reference}/live-state",
+            "live_detail_url": f"/app/tickets/{ticket.reference}",
+            "live_state": live_state,
+        },
+    )
+    monkeypatch.setattr(stack["routes_requester"], "upsert_ticket_view", lambda *args, **kwargs: None)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: requester
+    app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_requester"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        response = client.get(
+            f"/app/tickets/{ticket.reference}",
+            headers={"HX-Request": "true", "X-AutoSac-Live-Refresh": "true"},
+        )
+
+    assert response.status_code == 200
+    assert 'id="ticket-ledger-region"' in response.text
+    assert 'id="ticket-status-region"' in response.text
+    assert 'hx-swap-oob="outerHTML"' in response.text
+    assert 'id="ticket-composer-region"' not in response.text
+    assert response.headers["x-ticket-content-version"] == "content-v2"
     assert db.commit_calls == 1
 
 
@@ -1280,7 +1418,14 @@ def test_requester_detail_renders_attachment_links(monkeypatch):
     db = _RouteDb()
     requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester")
     auth_session = SimpleNamespace(csrf_token="csrf-token")
-    ticket = SimpleNamespace(reference="T-000001", id=uuid.uuid4(), title="Ticket", status="new", urgent=False)
+    ticket = SimpleNamespace(
+        reference="T-000001",
+        id=uuid.uuid4(),
+        title="Ticket",
+        status="new",
+        urgent=False,
+        updated_at=datetime(2026, 3, 26, 19, 0, tzinfo=timezone.utc),
+    )
     attachment_id = uuid.uuid4()
     thread = [
         {
@@ -1321,7 +1466,14 @@ def test_requester_detail_marks_last_public_message_for_auto_scroll(monkeypatch)
     db = _RouteDb()
     requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester")
     auth_session = SimpleNamespace(csrf_token="csrf-token")
-    ticket = SimpleNamespace(reference="T-000003", id=uuid.uuid4(), title="Ticket", status="new", urgent=False)
+    ticket = SimpleNamespace(
+        reference="T-000003",
+        id=uuid.uuid4(),
+        title="Ticket",
+        status="new",
+        urgent=False,
+        updated_at=datetime(2026, 3, 26, 19, 0, tzinfo=timezone.utc),
+    )
     first_message_id = str(uuid.uuid4())
     last_message_id = str(uuid.uuid4())
     timeline = [
@@ -1376,7 +1528,14 @@ def test_requester_detail_does_not_render_ops_persistent_turn_metadata(monkeypat
     db = _RouteDb()
     requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester")
     auth_session = SimpleNamespace(csrf_token="csrf-token")
-    ticket = SimpleNamespace(reference="T-000004", id=uuid.uuid4(), title="Ticket", status="new", urgent=False)
+    ticket = SimpleNamespace(
+        reference="T-000004",
+        id=uuid.uuid4(),
+        title="Ticket",
+        status="new",
+        urgent=False,
+        updated_at=datetime(2026, 3, 26, 19, 0, tzinfo=timezone.utc),
+    )
     timeline = [
         {
             "kind": "message",

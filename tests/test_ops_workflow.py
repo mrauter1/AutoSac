@@ -3541,6 +3541,148 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
     assert "Software Architect" in response.text
 
 
+def test_ops_live_state_is_read_only_and_honors_etag(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    ticket = SimpleNamespace(reference="T-000043", id=uuid.uuid4())
+    started_at = datetime(2026, 9, 1, 14, 0, tzinfo=timezone.utc)
+    live_state = SimpleNamespace(
+        active=True,
+        phase="selecting_specialist",
+        started_at=started_at,
+        delayed=False,
+        version="state-v1",
+        content_version="content-v1",
+        etag='"state-v1"',
+    )
+    observed = {"view_updates": 0}
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(stack["routes_ops"], "load_ticket_live_state", lambda *args, **kwargs: live_state)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "upsert_ticket_view",
+        lambda *args, **kwargs: observed.__setitem__("view_updates", observed["view_updates"] + 1),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        response = client.get(f"/ops/tickets/{ticket.reference}/live-state")
+        unchanged = client.get(
+            f"/ops/tickets/{ticket.reference}/live-state",
+            headers={"If-None-Match": response.headers["etag"]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["phase"] == "selecting_specialist"
+    assert response.json()["label"] == "Selecting a specialist"
+    assert response.headers["cache-control"] == "private, no-cache"
+    assert response.headers["vary"] == "Cookie, Accept-Language"
+    assert unchanged.status_code == 304
+    assert unchanged.content == b""
+    assert db.commit_calls == 0
+    assert observed["view_updates"] == 0
+
+
+def test_ops_live_fragment_refresh_updates_safe_regions_only(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(
+        reference="T-000044",
+        id=uuid.uuid4(),
+        title="Live ops ticket",
+        status="ai_triage",
+        urgent=False,
+        updated_at=datetime.now(timezone.utc),
+        requester_language="en",
+        last_ai_action=None,
+        requeue_requested=False,
+    )
+    live_state = SimpleNamespace(active=True, phase="analyzing", started_at=None, delayed=False, content_version="content-v2")
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_ticket_detail_context",
+        lambda *args, **kwargs: {
+            "ticket": ticket,
+            "route_target_display": {"id": "support", "label": "Support", "kind": "direct_ai"},
+            "creator": None,
+            "assignee": None,
+            "activity_timeline": [],
+            "auto_scroll_message_id": None,
+            "ops_users": [],
+            "status_options": [],
+            "draft_reply_status_options": [],
+            "public_reply_status_options": [],
+            "default_public_reply_status": "waiting_on_user",
+            "pending_draft": None,
+            "pending_draft_html": "",
+            "latest_run": None,
+            "latest_analysis_run": None,
+            "latest_run_steps": [],
+            "latest_analysis_steps": [],
+            "latest_ai_note": None,
+            "latest_ai_note_html": "",
+            "analysis_view": {
+                "summary_short": "",
+                "summary_internal": "",
+                "relevant_paths": [],
+                "response_confidence": None,
+                "risk_level": None,
+                "publish_mode_recommendation": None,
+                "risk_reason": "",
+                "handoff_reason": "",
+                "assistant_used": None,
+                "assistant_specialist_id": None,
+            },
+            "ai_relevant_paths": [],
+            "ai_summary_short": "",
+            "ai_summary_internal": "",
+            "rerun_specialist_options": [],
+            "persistent_conversation": None,
+            "persistent_visibility_enabled": False,
+            "live_audience": "ops",
+            "live_state_url": f"/ops/tickets/{ticket.reference}/live-state",
+            "live_detail_url": f"/ops/tickets/{ticket.reference}",
+            "live_state": live_state,
+        },
+    )
+    monkeypatch.setattr(stack["routes_ops"], "upsert_ticket_view", lambda *args, **kwargs: None)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        response = client.get(
+            f"/ops/tickets/{ticket.reference}",
+            headers={"HX-Request": "true", "X-AutoSac-Live-Refresh": "true"},
+        )
+
+    assert response.status_code == 200
+    assert 'id="ticket-ledger-region"' in response.text
+    assert 'id="ticket-status-region"' in response.text
+    assert 'id="ticket-ai-analysis-region"' in response.text
+    assert 'id="ticket-pending-draft-region"' in response.text
+    assert response.text.count('hx-swap-oob="outerHTML"') == 3
+    assert 'id="ticket-composer-region"' not in response.text
+    assert 'name="body"' not in response.text
+    assert response.headers["x-ticket-content-version"] == "content-v2"
+    assert db.commit_calls == 1
+
+
 def test_ops_reply_public_allows_forced_specialist_route_target(monkeypatch):
     stack = _load_web_stack()
     app = stack["create_app"]()
@@ -4451,8 +4593,14 @@ def test_ticket_detail_context_uses_latest_accepted_analysis_run(tmp_path, monke
     stack = _load_web_stack()
     ticket = SimpleNamespace(
         id=uuid.uuid4(),
+        reference="T-000099",
+        title="Accepted analysis context",
+        status="waiting_on_dev_ti",
+        urgent=False,
+        updated_at=datetime.now(timezone.utc),
         created_by_user_id=uuid.uuid4(),
         assigned_to_user_id=None,
+        route_target_id=None,
     )
     latest_run = SimpleNamespace(status="failed", error_text="boom")
     analysis_run = SimpleNamespace(
@@ -4504,8 +4652,14 @@ def test_ticket_detail_context_uses_last_public_message_for_auto_scroll(monkeypa
     last_public_message_id = str(uuid.uuid4())
     ticket = SimpleNamespace(
         id=uuid.uuid4(),
+        reference="T-000100",
+        title="Auto scroll context",
+        status="waiting_on_user",
+        urgent=False,
+        updated_at=datetime.now(timezone.utc),
         created_by_user_id=uuid.uuid4(),
         assigned_to_user_id=None,
+        route_target_id=None,
     )
     timeline = [
         {
@@ -4569,8 +4723,14 @@ def test_ticket_detail_context_loads_persistent_projection_when_enabled(monkeypa
     stack = _load_web_stack()
     ticket = SimpleNamespace(
         id=uuid.uuid4(),
+        reference="T-000001",
         created_by_user_id=uuid.uuid4(),
         assigned_to_user_id=None,
+        status="ai_triage",
+        updated_at=datetime(2026, 4, 2, 12, 0, tzinfo=timezone.utc),
+        title="Ticket",
+        urgent=False,
+        route_target_id=None,
     )
     persistent_projection = {
         "conversation": {"status": "active", "turn_count": 1, "session_count": 1},
@@ -4608,8 +4768,14 @@ def test_ticket_detail_context_skips_persistent_projection_when_disabled(monkeyp
     stack = _load_web_stack()
     ticket = SimpleNamespace(
         id=uuid.uuid4(),
+        reference="T-000002",
         created_by_user_id=uuid.uuid4(),
         assigned_to_user_id=None,
+        status="ai_triage",
+        updated_at=datetime(2026, 4, 2, 12, 0, tzinfo=timezone.utc),
+        title="Ticket",
+        urgent=False,
+        route_target_id=None,
     )
 
     class _ContextDb:
@@ -4689,8 +4855,14 @@ def test_ticket_detail_context_defaults_public_reply_to_waiting_on_user_for_othe
     stack = _load_web_stack()
     ticket = SimpleNamespace(
         id=uuid.uuid4(),
+        reference="T-000003",
         created_by_user_id=uuid.uuid4(),
         assigned_to_user_id=None,
+        status="ai_triage",
+        updated_at=datetime(2026, 4, 2, 12, 0, tzinfo=timezone.utc),
+        title="Ticket",
+        urgent=False,
+        route_target_id=None,
     )
 
     class _ContextDb:
@@ -4786,7 +4958,16 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     app_css = Path("app/static/app.css").read_text(encoding="utf-8")
     base_template = Path("app/templates/base.html").read_text(encoding="utf-8")
     filters_template = Path("app/templates/ops_filters.html").read_text(encoding="utf-8")
-    detail_template = Path("app/templates/ops_ticket_detail.html").read_text(encoding="utf-8")
+    detail_template = "\n".join(
+        Path(path).read_text(encoding="utf-8")
+        for path in (
+            "app/templates/ops_ticket_detail.html",
+            "app/templates/ops_ticket_header.html",
+            "app/templates/ops_ticket_ledger.html",
+            "app/templates/ops_ticket_analysis.html",
+            "app/templates/ops_ticket_pending_draft.html",
+        )
+    )
     persistent_history_template = Path("app/templates/ops_persistent_turn_history.html").read_text(encoding="utf-8")
     board_template = Path("app/templates/ops_board_columns.html").read_text(encoding="utf-8")
     list_template = Path("app/templates/ops_ticket_list.html").read_text(encoding="utf-8")
@@ -4832,7 +5013,7 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert "timeline-status" in detail_template
     assert 't("ops.detail.summary")' in detail_template
     assert 't("ops.detail.internal_summary")' in detail_template
-    assert '<details class="analysis-disclosure">' in detail_template
+    assert '<details class="analysis-disclosure" data-live-disclosure="more-analysis">' in detail_template
     assert 't("ops.detail.more_analysis")' in detail_template
     persistent_include = '{% include "ops_persistent_turn_history.html" %}'
     assert detail_template.count(persistent_include) == 1

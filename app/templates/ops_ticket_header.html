@@ -1,0 +1,28 @@
+<section
+  id="ticket-status-region"
+  class="page-header page-header--stack ops-ticket-detail__header"
+  {% if live_oob %}hx-swap-oob="outerHTML"{% endif %}
+>
+  <div class="ticket-card__meta ops-ticket-detail__meta">
+    <span class="ticket-ref">{{ ticket.reference }}</span>
+    <span class="status-pill">{{ ops_status_label(ticket.status) }}</span>
+    {% if route_target_display.id %}
+    <span class="status-pill">{{ route_target_display.label }}</span>
+    {% endif %}
+    {% if route_target_display.kind %}
+    <span class="status-pill">{{ route_target_kind_label(route_target_display.kind) }}</span>
+    {% endif %}
+    {% if ticket.urgent %}
+    <span class="urgent-pill">{{ t("common.urgent") }}</span>
+    {% endif %}
+    {% if pending_draft %}
+    <span class="updated-pill">{{ t("ops.detail.draft_pending_approval") }}</span>
+    {% endif %}
+  </div>
+  <h1>{{ ticket.title }}</h1>
+  <p class="muted ops-ticket-detail__subtitle">
+    {{ t("ops.detail.requester", value=creator.display_name if creator else unknown_label) }}
+    · {{ t("ops.detail.assigned", value=assignee.display_name if assignee else unassigned_label) }}
+    · {{ t("ops.detail.updated", value=format_datetime_utc(ticket.updated_at)) }}
+  </p>
+</section>

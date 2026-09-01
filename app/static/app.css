@@ -1025,6 +1025,82 @@ small {
   background: rgba(255, 255, 255, 0.55);
 }
 
+.ticket-live {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+  min-height: 2rem;
+}
+
+.ticket-live__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: fit-content;
+  padding: 0.5rem 0.8rem;
+  border: 1px solid rgba(36, 93, 74, 0.18);
+  border-radius: 999px;
+  background: rgba(235, 247, 242, 0.92);
+  color: #245d4a;
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.ticket-live__status[hidden],
+.ticket-live__error[hidden],
+.ticket-live__jump[hidden] {
+  display: none;
+}
+
+.ticket-live__status--delayed {
+  border-color: rgba(151, 99, 26, 0.22);
+  background: rgba(252, 244, 226, 0.95);
+  color: #865b1d;
+}
+
+.ticket-live__spinner {
+  width: 0.78rem;
+  height: 0.78rem;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: ticket-live-spin 0.8s linear infinite;
+}
+
+.ticket-live__elapsed {
+  color: currentColor;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+
+.ticket-live__error {
+  margin: 0;
+  color: var(--app-text-muted);
+  font-size: 0.88rem;
+}
+
+.ticket-live__jump.button {
+  width: auto;
+  min-height: 2rem;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.85rem;
+}
+
+@keyframes ticket-live-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ticket-live__spinner {
+    animation: none;
+    border-right-color: currentColor;
+    opacity: 0.65;
+  }
+}
+
 @media (max-width: 1279px) {
   .page--ops-ticket-detail {
     max-width: 1180px;
