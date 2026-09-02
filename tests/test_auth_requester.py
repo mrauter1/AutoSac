@@ -193,7 +193,7 @@ def _load_web_stack():
     pytest.importorskip("sqlalchemy")
     from fastapi.testclient import TestClient
     from app.main import create_app
-    from app import routes_auth, routes_ops, routes_requester
+    from app import requester_view, routes_auth, routes_ops, routes_requester
     from shared.db import db_session_dependency
 
     return {
@@ -202,6 +202,7 @@ def _load_web_stack():
         "routes_auth": routes_auth,
         "routes_ops": routes_ops,
         "routes_requester": routes_requester,
+        "requester_view": requester_view,
         "db_session_dependency": db_session_dependency,
     }
 
@@ -634,6 +635,7 @@ def test_session_expiry_and_requester_status_mapping(tmp_path):
 
 def test_requester_routes_source_uses_custom_auth_and_explicit_multipart_limits():
     source = Path("app/routes_requester.py").read_text(encoding="utf-8")
+    presenter_source = Path("app/requester_view.py").read_text(encoding="utf-8")
     upload_source = Path("app/uploads.py").read_text(encoding="utf-8")
     i18n_source = Path("app/i18n.py").read_text(encoding="utf-8")
     template_source = "\n".join(
@@ -650,8 +652,8 @@ def test_requester_routes_source_uses_custom_auth_and_explicit_multipart_limits(
     assert "MULTIPART_PART_SIZE_SLACK_BYTES" in upload_source
     assert "max_part_size=settings.max_image_bytes + MULTIPART_PART_SIZE_SLACK_BYTES" in upload_source
     assert "requester_author_label" in i18n_source
-    assert "build_author_label(" in source
-    assert "_build_requester_timeline" in source
+    assert "build_author_label(" in presenter_source
+    assert "build_requester_ticket_detail_context" in source
     assert "item.author_label" in template_source
     assert "timeline-status" in template_source
 
@@ -1121,9 +1123,9 @@ def test_requester_detail_route_marks_ticket_as_read(monkeypatch):
     observed = {"view_updates": 0}
 
     monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
-    monkeypatch.setattr(stack["routes_requester"], "_build_requester_timeline", lambda *args, **kwargs: [])
+    monkeypatch.setattr(stack["requester_view"], "build_requester_timeline", lambda *args, **kwargs: [])
     monkeypatch.setattr(
-        stack["routes_requester"],
+        stack["requester_view"],
         "load_ticket_live_state",
         lambda *args, **kwargs: SimpleNamespace(
             active=False,
@@ -1198,6 +1200,7 @@ def test_requester_live_state_is_read_only_conditional_and_coarse(monkeypatch, t
         "content_version": "content-v1",
         "started_at": started_at.isoformat(),
         "delayed": False,
+        "run_key": None,
     }
     assert response.headers["cache-control"] == "private, no-cache"
     assert response.headers["vary"] == "Cookie, Accept-Language"
@@ -1220,7 +1223,7 @@ def test_requester_live_fragment_refresh_excludes_composer(monkeypatch, tmp_path
     monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
     monkeypatch.setattr(
         stack["routes_requester"],
-        "_requester_ticket_detail_context",
+        "build_requester_ticket_detail_context",
         lambda *args, **kwargs: {
             "ticket": ticket,
             "timeline": [],
@@ -1313,25 +1316,104 @@ def test_serialize_public_thread_includes_message_attachments(monkeypatch):
         size_bytes=256,
     )
 
-    monkeypatch.setattr(stack["routes_requester"], "_load_public_ticket_messages", lambda db, ticket_id: messages)
+    monkeypatch.setattr(stack["requester_view"], "_load_public_ticket_messages", lambda db, ticket_id: messages)
     monkeypatch.setattr(
-        stack["routes_requester"],
-        "_load_attachments_by_message",
+        stack["requester_view"],
+        "_load_public_attachments_by_message",
         lambda db, ticket_id, visibility="public": {first_message_id: [linked_attachment]},
     )
     monkeypatch.setattr(
-        stack["routes_requester"],
+        stack["requester_view"],
         "load_users_by_ids",
         lambda db, user_ids: {messages[0].author_user_id: SimpleNamespace(display_name="Marcelo")},
     )
-    monkeypatch.setattr(stack["routes_requester"], "render_markdown_to_html", lambda body: f"<p>{body}</p>")
+    monkeypatch.setattr(stack["requester_view"], "render_markdown_to_html", lambda body: f"<p>{body}</p>")
 
-    thread = stack["routes_requester"]._serialize_public_thread(object(), ticket_id=uuid.uuid4())
+    thread = stack["requester_view"].serialize_requester_public_thread(object(), ticket_id=uuid.uuid4())
 
     assert thread[0]["attachments"] == [linked_attachment]
     assert thread[1]["attachments"] == []
     assert thread[0]["author_label"] == "Marcelo (requester)"
     assert thread[1]["author_label"] == "You (requester)"
+
+
+def test_requester_presenter_filters_public_rows_and_projects_allowlisted_fields():
+    stack = _load_web_stack()
+    ticket_id = uuid.uuid4()
+    message = SimpleNamespace(id=uuid.uuid4(), visibility="public")
+    attachment = SimpleNamespace(
+        id=uuid.uuid4(),
+        message_id=message.id,
+        original_filename="public.pdf",
+        mime_type="application/pdf",
+        size_bytes=123,
+        visibility="public",
+        stored_path="/private/storage/path",
+    )
+
+    class RecordingDb:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            rows = [message] if "ticket_messages" in str(statement) else [attachment]
+            return SimpleNamespace(scalars=lambda: rows)
+
+    db = RecordingDb()
+    messages = stack["requester_view"]._load_public_ticket_messages(db, ticket_id=ticket_id)
+    attachments = stack["requester_view"]._load_public_attachments_by_message(db, ticket_id=ticket_id)
+
+    assert messages == [message]
+    assert len(db.statements) == 2
+    assert all("public" in statement.compile().params.values() for statement in db.statements)
+    projected_attachment = attachments[message.id][0]
+    assert projected_attachment.original_filename == "public.pdf"
+    assert not hasattr(projected_attachment, "visibility")
+    assert not hasattr(projected_attachment, "stored_path")
+
+    raw_ticket = SimpleNamespace(
+        reference="T-000055",
+        title="Public title",
+        status="new",
+        urgent=False,
+        internal_summary="PRIVATE SUMMARY",
+    )
+    projected_ticket = stack["requester_view"].RequesterTicketView.from_ticket(raw_ticket)
+    assert projected_ticket.title == "Public title"
+    assert not hasattr(projected_ticket, "internal_summary")
+
+
+def test_requester_preview_context_disables_actions_and_live_state(monkeypatch):
+    stack = _load_web_stack()
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000056",
+        title="Ticket",
+        status="new",
+        urgent=False,
+    )
+    monkeypatch.setattr(stack["requester_view"], "build_requester_timeline", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        stack["requester_view"],
+        "load_ticket_live_state",
+        lambda *args, **kwargs: pytest.fail("preview must not load live state"),
+    )
+
+    context = stack["requester_view"].build_requester_ticket_detail_context(
+        object(),
+        ticket=ticket,
+        ui_locale="en",
+        stale_timeout_seconds=60,
+        interaction_mode=stack["requester_view"].REQUESTER_INTERACTION_ADMIN_PREVIEW,
+    )
+
+    assert context["interaction_mode"] == "admin_preview_readonly"
+    assert context["requester_actions_enabled"] is False
+    assert context["requester_live_updates_enabled"] is False
+    assert "live_state" not in context
+    assert "live_state_url" not in context
+    assert "live_detail_url" not in context
 
 
 def test_build_author_label_formats_human_roles_with_display_name():
@@ -1402,10 +1484,10 @@ def test_build_requester_timeline_merges_status_changes_chronologically(monkeypa
         ),
     ]
 
-    monkeypatch.setattr(stack["routes_requester"], "_serialize_public_thread", lambda *args, **kwargs: public_thread)
-    monkeypatch.setattr(stack["routes_requester"], "load_ticket_status_history", lambda *args, **kwargs: history)
+    monkeypatch.setattr(stack["requester_view"], "serialize_requester_public_thread", lambda *args, **kwargs: public_thread)
+    monkeypatch.setattr(stack["requester_view"], "load_ticket_status_history", lambda *args, **kwargs: history)
 
-    timeline = stack["routes_requester"]._build_requester_timeline(object(), ticket_id=ticket_id)
+    timeline = stack["requester_view"].build_requester_timeline(object(), ticket_id=ticket_id)
 
     assert [item["kind"] for item in timeline] == ["message", "status_change", "message", "status_change"]
     assert timeline[1]["summary"] == "Status changed to Reviewing"
@@ -1445,7 +1527,7 @@ def test_requester_detail_renders_attachment_links(monkeypatch):
     ]
 
     monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
-    monkeypatch.setattr(stack["routes_requester"], "_build_requester_timeline", lambda *args, **kwargs: thread)
+    monkeypatch.setattr(stack["requester_view"], "build_requester_timeline", lambda *args, **kwargs: thread)
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: requester
@@ -1458,6 +1540,9 @@ def test_requester_detail_renders_attachment_links(monkeypatch):
     assert f'/attachments/{attachment_id}' in response.text
     assert "notes.pdf" in response.text
     assert "application/pdf" in response.text
+    assert f'action="/app/tickets/{ticket.reference}/reply"' in response.text
+    assert f'action="/app/tickets/{ticket.reference}/resolve"' in response.text
+    assert "/static/ticket-live.js" in response.text
 
 
 def test_requester_detail_marks_last_public_message_for_auto_scroll(monkeypatch):
@@ -1503,7 +1588,7 @@ def test_requester_detail_marks_last_public_message_for_auto_scroll(monkeypatch)
     ]
 
     monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
-    monkeypatch.setattr(stack["routes_requester"], "_build_requester_timeline", lambda *args, **kwargs: timeline)
+    monkeypatch.setattr(stack["requester_view"], "build_requester_timeline", lambda *args, **kwargs: timeline)
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: requester
@@ -1548,7 +1633,7 @@ def test_requester_detail_does_not_render_ops_persistent_turn_metadata(monkeypat
     ]
 
     monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
-    monkeypatch.setattr(stack["routes_requester"], "_build_requester_timeline", lambda *args, **kwargs: timeline)
+    monkeypatch.setattr(stack["requester_view"], "build_requester_timeline", lambda *args, **kwargs: timeline)
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: requester

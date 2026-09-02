@@ -3,6 +3,7 @@
   class="page-header page-header--stack ops-ticket-detail__header"
   {% if live_oob %}hx-swap-oob="outerHTML"{% endif %}
 >
+  <a class="ticket-back-link" href="{{ ops_return_url | default('/ops/board') }}">← {{ t("ops.detail.back_to_work") }}</a>
   <div class="ticket-card__meta ops-ticket-detail__meta">
     <span class="ticket-ref">{{ ticket.reference }}</span>
     <span class="status-pill">{{ ops_status_label(ticket.status) }}</span>
@@ -19,7 +20,14 @@
     <span class="updated-pill">{{ t("ops.detail.draft_pending_approval") }}</span>
     {% endif %}
   </div>
-  <h1>{{ ticket.title }}</h1>
+  <div class="ticket-header__row">
+    <h1>{{ ticket.title }}</h1>
+    {% if is_admin_user %}
+    <div class="ops-ticket-detail__header-actions">
+      <a class="button button--ghost" href="{{ requester_preview_url | default('/ops/tickets/' ~ ticket.reference ~ '/requester-preview') }}">{{ t("button.preview_as_requester") }}</a>
+    </div>
+    {% endif %}
+  </div>
   <p class="muted ops-ticket-detail__subtitle">
     {{ t("ops.detail.requester", value=creator.display_name if creator else unknown_label) }}
     · {{ t("ops.detail.assigned", value=assignee.display_name if assignee else unassigned_label) }}

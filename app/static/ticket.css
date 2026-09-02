@@ -1,0 +1,410 @@
+.page--ticket {
+  scroll-padding-bottom: 12rem;
+}
+
+.requester-detail,
+.ops-ticket-detail {
+  min-width: 0;
+}
+
+.requester-detail {
+  max-width: 860px;
+  margin-inline: auto;
+}
+
+.requester-detail__header,
+.page--ops-ticket-detail .ops-ticket-detail__header {
+  position: sticky;
+  top: 0.5rem;
+  z-index: 8;
+  margin-bottom: 1rem;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: rgb(255 255 255 / 0.94);
+  box-shadow: var(--shadow-soft);
+  backdrop-filter: blur(12px);
+}
+
+.ticket-back-link {
+  display: inline-flex;
+  margin-bottom: 0.45rem;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  text-decoration: none;
+}
+
+.ticket-back-link:hover,
+.ticket-back-link:focus-visible {
+  color: var(--accent-strong);
+}
+
+.ticket-header__row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.ticket-header__row h1,
+.page--ops-ticket-detail .ticket-header__row h1 {
+  max-width: 34ch;
+  margin: 0.4rem 0 0;
+  font-size: clamp(1.3rem, 2vw, 1.9rem);
+  line-height: 1.18;
+}
+
+.ticket-conversation-layout,
+.requester-detail__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+.ticket-thread,
+.requester-detail__thread.panel,
+.page--ops-ticket-detail .ops-ticket-detail__thread.panel {
+  min-width: 0;
+  display: grid;
+  gap: 1.2rem;
+  padding: 1rem 0.25rem;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.thread-header {
+  padding-inline: 0.75rem;
+}
+
+.thread-header h2 {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ticket-thread .message-card {
+  position: relative;
+  max-width: min(90%, 46rem);
+  padding: 0.9rem 1rem;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  box-shadow: none;
+}
+
+.ticket-thread .message-card--requester {
+  justify-self: end;
+  background: var(--accent-soft);
+}
+
+.ticket-thread .message-card--internal {
+  width: 100%;
+  max-width: none;
+  border-left: 4px solid var(--warning);
+  background: var(--warning-soft);
+}
+
+.ticket-thread .message-card--ai {
+  border-left: 3px solid var(--accent);
+}
+
+.ticket-thread .message-card__meta {
+  margin-bottom: 0.55rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.ticket-thread .message-card__meta strong {
+  color: var(--text);
+}
+
+.source-label {
+  display: inline-flex;
+  padding: 0.08rem 0.38rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.7rem;
+}
+
+.ticket-thread .timeline-status {
+  justify-self: center;
+  max-width: 90%;
+  display: grid;
+  justify-items: center;
+  gap: 0.15rem;
+  padding: 0.25rem 0.7rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.ticket-thread .timeline-status__meta {
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.ticket-thread .timeline-status__text {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.ticket-composer {
+  position: static;
+  min-width: 0;
+  padding: 0.9rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: rgb(255 255 255 / 0.97);
+  box-shadow: 0 10px 30px rgb(15 23 42 / 0.13);
+}
+
+.ticket-composer h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.ticket-composer textarea {
+  min-height: 7rem;
+  border-color: var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.ticket-composer form > .button {
+  justify-self: end;
+}
+
+.ticket-composer__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-bottom: 0.75rem;
+}
+
+.ticket-composer-modes {
+  display: none;
+  gap: 0.25rem;
+  padding: 0.2rem;
+  border-radius: var(--radius-sm);
+  background: var(--surface-subtle);
+}
+
+.ticket-composer--enhanced .ticket-composer-modes {
+  display: flex;
+}
+
+.ticket-composer-modes button {
+  min-height: 2.35rem;
+  border: 0;
+  border-radius: 7px;
+  padding: 0.35rem 0.65rem;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.ticket-composer-modes button[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgb(15 23 42 / 0.12);
+}
+
+.ticket-composer__mode + .ticket-composer__mode {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.ticket-composer--enhanced .ticket-composer__mode + .ticket-composer__mode {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.ticket-composer__mode[hidden] {
+  display: none;
+}
+
+.audience-guidance,
+.composer-consequence {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.83rem;
+}
+
+.audience-guidance--public,
+.composer-consequence {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.audience-guidance--internal {
+  border-left: 3px solid var(--warning);
+  background: var(--warning-soft);
+  color: var(--warning-strong);
+}
+
+.composer-advanced {
+  border-top: 1px solid var(--border);
+  padding-top: 0.65rem;
+}
+
+.composer-advanced summary,
+.inspector-action > summary {
+  cursor: pointer;
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.composer-advanced[open] summary,
+.inspector-action[open] > summary {
+  margin-bottom: 0.75rem;
+}
+
+.field-error {
+  margin: -0.25rem 0 0;
+  padding: 0.55rem 0.7rem;
+  border-left: 3px solid var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+  font-size: 0.86rem;
+}
+
+.ticket-live {
+  min-height: 0;
+}
+
+.ticket-live-provisional {
+  width: 100%;
+  justify-self: stretch;
+  background: var(--surface-subtle) !important;
+}
+
+.ticket-live-provisional[hidden] {
+  display: none;
+}
+
+.ticket-live-provisional__body {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--accent-strong);
+  font-weight: 650;
+}
+
+.ticket-live__error,
+.ticket-live__jump {
+  margin-inline: 0.75rem;
+}
+
+.page--ops-ticket-detail {
+  max-width: 1440px;
+}
+
+.page--ops-ticket-detail .ops-ticket-detail__layout {
+  grid-template-columns: minmax(0, 820px) minmax(300px, 380px);
+  justify-content: center;
+  gap: clamp(1rem, 2vw, 1.5rem);
+}
+
+.page--ops-ticket-detail .ops-ticket-detail__main {
+  min-width: 0;
+}
+
+.page--ops-ticket-detail .ops-ticket-detail__sidebar {
+  position: sticky;
+  top: 0.75rem;
+}
+
+.page--ops-ticket-detail .ops-ticket-detail__sidebar-section.panel,
+.page--ops-ticket-detail .ops-ticket-detail__main-section.panel,
+.page--ops-ticket-detail .analysis-panel {
+  padding: 0.9rem;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.page--ops-ticket-detail .ops-ticket-detail__sidebar-section h2 {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  letter-spacing: 0.06em;
+}
+
+.ops-ticket-controls form + form {
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+}
+
+.ops-ticket-detail__header-actions .button {
+  white-space: nowrap;
+}
+
+@media (max-width: 959px) {
+  .requester-detail__header,
+  .page--ops-ticket-detail .ops-ticket-detail__header {
+    position: static;
+  }
+
+  .page--ops-ticket-detail .ops-ticket-detail__layout {
+    grid-template-columns: minmax(0, 820px);
+  }
+
+  .page--ops-ticket-detail .ops-ticket-detail__sidebar {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+}
+
+/* The desktop rail appears at 1100px. Until the remaining work surface can
+   comfortably hold both panes, keep the inspector in normal document flow. */
+@media (min-width: 1100px) and (max-width: 1279px) {
+  .page--ops-ticket-detail .ops-ticket-detail__layout {
+    grid-template-columns: minmax(0, 820px);
+  }
+
+  .page--ops-ticket-detail .ops-ticket-detail__sidebar {
+    position: static;
+  }
+}
+
+@media (max-width: 560px) {
+  .page--ticket,
+  .page--ops-ticket-detail {
+    padding-inline: 0.65rem;
+  }
+
+  .ticket-header__row {
+    display: grid;
+  }
+
+  .ticket-header__row form,
+  .ticket-header__row .button {
+    width: 100%;
+  }
+
+  .ticket-thread .message-card {
+    max-width: 96%;
+    padding-inline: 0.75rem;
+  }
+
+  .ticket-composer__header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ticket-composer-modes button {
+    flex: 1;
+  }
+}

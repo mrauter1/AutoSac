@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from pathlib import Path
-from typing import Any
 import uuid
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
@@ -11,19 +9,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.formparsers import MultiPartException
 
-from app.i18n import (
-    DEFAULT_UI_LOCALE,
-    requester_author_label,
-    requester_role_suffix_label,
-    requester_status_change_summary,
-    requester_status_label,
-    get_translator,
-    resolve_ui_locale,
-    timeline_lane_label,
-)
+from app.i18n import get_translator, resolve_ui_locale
 from app.auth import get_current_user, get_required_auth_session, require_requester_user, validate_csrf_token
-from app.render import render_markdown_to_html
-from app.timeline import build_author_label, load_ticket_status_history, load_users_by_ids, merge_timeline_items, serialize_status_changes
+from app.requester_view import build_requester_ticket_detail_context
 from app.ticket_live import if_none_match_matches, load_ticket_live_state, ticket_live_representation_etag
 from app.ui import build_template_context, is_htmx_request, templates
 from app.uploads import (
@@ -36,7 +24,7 @@ from app.uploads import (
 from shared.config import Settings, get_settings
 from shared.db import db_session_dependency
 from shared.integrations import build_slack_runtime_context
-from shared.models import SessionRecord, Ticket, TicketAttachment, TicketMessage, TicketView, User
+from shared.models import SessionRecord, Ticket, TicketAttachment, TicketView, User
 from shared.permissions import can_access_all_tickets
 from shared.ticketing import (
     add_requester_reply,
@@ -54,15 +42,6 @@ def _ticket_detail_path(*, current_user: User, reference: str) -> str:
     return f"/app/tickets/{reference}"
 
 
-def _last_public_message_item_id(timeline: list[dict[str, object]]) -> str | None:
-    for item in reversed(timeline):
-        if item.get("kind") == "message":
-            item_id = item.get("id")
-            if isinstance(item_id, str) and item_id:
-                return item_id
-    return None
-
-
 def _load_requester_ticket_or_404(db: Session, *, reference: str, requester_id) -> Ticket:
     ticket = db.execute(
         select(Ticket).where(Ticket.reference == reference, Ticket.created_by_user_id == requester_id)
@@ -70,102 +49,6 @@ def _load_requester_ticket_or_404(db: Session, *, reference: str, requester_id) 
     if ticket is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
     return ticket
-
-
-def _load_public_ticket_messages(db: Session, *, ticket_id) -> list[TicketMessage]:
-    return list(
-        db.execute(
-            select(TicketMessage)
-            .where(TicketMessage.ticket_id == ticket_id, TicketMessage.visibility == "public")
-            .order_by(TicketMessage.created_at.asc(), TicketMessage.id.asc())
-        ).scalars()
-    )
-
-
-def _load_attachments_by_message(db: Session, *, ticket_id, visibility: str = "public") -> dict[Any, list[TicketAttachment]]:
-    attachments = list(
-        db.execute(
-            select(TicketAttachment)
-            .where(TicketAttachment.ticket_id == ticket_id, TicketAttachment.visibility == visibility)
-            .order_by(TicketAttachment.created_at.asc())
-        ).scalars()
-    )
-    grouped: dict[Any, list[TicketAttachment]] = defaultdict(list)
-    for attachment in attachments:
-        grouped[attachment.message_id].append(attachment)
-    return grouped
-
-
-def _serialize_public_thread(db: Session, *, ticket_id, ui_locale: str = DEFAULT_UI_LOCALE) -> list[dict[str, object]]:
-    attachments_by_message = _load_attachments_by_message(db, ticket_id=ticket_id)
-    messages = _load_public_ticket_messages(db, ticket_id=ticket_id)
-    users_by_id = load_users_by_ids(db, (message.author_user_id for message in messages))
-    thread: list[dict[str, object]] = []
-    for message in messages:
-        thread.append(
-            {
-                "kind": "message",
-                "id": str(message.id),
-                "created_at": message.created_at,
-                "lane": "public",
-                "lane_label": timeline_lane_label("public", ui_locale),
-                "author_type": message.author_type,
-                "author_label": build_author_label(
-                    author_type=message.author_type,
-                    display_name=users_by_id.get(message.author_user_id).display_name if message.author_user_id in users_by_id else None,
-                    fallback_label=lambda author_type: requester_author_label(author_type, ui_locale),
-                    role_suffix_label=lambda author_type: requester_role_suffix_label(author_type, ui_locale),
-                ),
-                "source": message.source,
-                "body_markdown": message.body_markdown,
-                "body_html": render_markdown_to_html(message.body_markdown),
-                "attachments": attachments_by_message.get(message.id, []),
-            }
-        )
-    return thread
-
-
-def _build_requester_timeline(db: Session, *, ticket_id, ui_locale: str = DEFAULT_UI_LOCALE) -> list[dict[str, object]]:
-    history_entries = load_ticket_status_history(db, ticket_id=ticket_id)
-    users_by_id = load_users_by_ids(db, (getattr(entry, "changed_by_user_id", None) for entry in history_entries))
-    return merge_timeline_items(
-        _serialize_public_thread(db, ticket_id=ticket_id, ui_locale=ui_locale),
-        serialize_status_changes(
-            history_entries,
-            status_label=lambda status: requester_status_label(status, ui_locale),
-            actor_label=lambda author_type: requester_author_label(author_type, ui_locale),
-            actor_role_suffix_label=lambda author_type: requester_role_suffix_label(author_type, ui_locale),
-            status_summary=lambda from_status_label, to_status_label: requester_status_change_summary(to_status_label, ui_locale),
-            lane_label=timeline_lane_label("status", ui_locale),
-            user_display_names={user_id: user.display_name for user_id, user in users_by_id.items()},
-        ),
-    )
-
-
-def _requester_ticket_detail_context(
-    db: Session,
-    *,
-    ticket: Ticket,
-    ui_locale: str,
-    stale_timeout_seconds: int,
-    reply_body: str = "",
-) -> dict[str, object]:
-    timeline = _build_requester_timeline(db, ticket_id=ticket.id, ui_locale=ui_locale)
-    return {
-        "ticket": ticket,
-        "timeline": timeline,
-        "auto_scroll_message_id": _last_public_message_item_id(timeline),
-        "reply_body": reply_body,
-        "live_audience": "requester",
-        "live_state_url": f"/app/tickets/{ticket.reference}/live-state",
-        "live_detail_url": f"/app/tickets/{ticket.reference}",
-        "live_state": load_ticket_live_state(
-            db,
-            ticket=ticket,
-            audience="requester",
-            stale_timeout_seconds=stale_timeout_seconds,
-        ),
-    }
 
 
 def _parse_bool(value: str | None) -> bool:
@@ -359,7 +242,7 @@ def requester_ticket_detail(
             status_code=status.HTTP_303_SEE_OTHER,
         )
     upsert_ticket_view(db, user_id=current_user.id, ticket_id=ticket.id)
-    detail_context = _requester_ticket_detail_context(
+    detail_context = build_requester_ticket_detail_context(
         db,
         ticket=ticket,
         ui_locale=ui_locale,
@@ -420,6 +303,7 @@ def requester_ticket_live_state(
             "content_version": live_state.content_version,
             "started_at": live_state.started_at.isoformat() if live_state.started_at is not None else None,
             "delayed": live_state.delayed,
+            "run_key": getattr(live_state, "run_key", None),
         },
         headers=headers,
     )
@@ -445,6 +329,13 @@ async def requester_ticket_reply(
         if len(upload_attachments) > settings.max_images_per_message:
             raise UploadValidationError(f"Attach at most {settings.max_images_per_message} files.")
     except UploadValidationError as exc:
+        detail_context = build_requester_ticket_detail_context(
+            db,
+            ticket=ticket,
+            ui_locale=ui_locale,
+            stale_timeout_seconds=settings.ai_run_stale_timeout_seconds,
+            reply_body=body,
+        )
         return templates.TemplateResponse(
             request,
             "requester_ticket_detail.html",
@@ -453,10 +344,8 @@ async def requester_ticket_reply(
                 current_user=current_user,
                 auth_session=auth_session,
                 extra={
-                    "ticket": ticket,
-                    "timeline": _build_requester_timeline(db, ticket_id=ticket.id, ui_locale=ui_locale),
+                    **detail_context,
                     "error": str(exc),
-                    "reply_body": body,
                 },
                 ui_locale=ui_locale,
                 ui_switch_path=f"/app/tickets/{ticket.reference}",

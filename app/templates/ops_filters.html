@@ -1,66 +1,95 @@
-<form
-  method="get"
-  action="{{ filters_action }}"
-  class="panel ops-filters"
-  hx-get="{{ filters_action }}"
-  hx-target="#{{ filters_target_id }}"
-  hx-swap="outerHTML"
-  hx-push-url="true"
->
-  <div class="ops-filters__grid">
-    <label class="field">
-      <span>{{ t("filters.status") }}</span>
-      <select name="status">
-        <option value="">{{ t("filters.all_statuses") }}</option>
-        {% for value in status_options %}
-        <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ ops_status_label(value) }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label class="field">
-      <span>{{ t("filters.route_target") }}</span>
-      <select name="route_target_id">
-        <option value="">{{ t("filters.all_route_targets") }}</option>
-        {% for option in route_target_options %}
-        <option value="{{ option.id }}" {% if filters.route_target_id == option.id %}selected{% endif %}>{{ option.label }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label class="field">
-      <span>{{ t("filters.assigned_to") }}</span>
-      <select name="assigned_to">
-        <option value="">{{ t("filters.anyone") }}</option>
-        <option value="unassigned" {% if filters.assigned_to == "unassigned" %}selected{% endif %}>{{ t("common.unassigned") }}</option>
-        {% for user in ops_users %}
-        <option value="{{ user.id }}" {% if filters.assigned_to == user.id|string %}selected{% endif %}>{{ user.display_name }}</option>
-        {% endfor %}
-      </select>
-    </label>
+<section class="ops-toolbar" aria-label="{{ t('filters.heading') }}">
+  <form
+    method="get"
+    action="{{ filters_action }}"
+    class="ops-filters"
+    hx-get="{{ filters_action }}"
+    hx-target="#{{ filters_target_id }}"
+    hx-swap="outerHTML"
+    hx-push-url="true"
+  >
+    <div class="ops-toolbar__primary">
+      <label class="field ops-filter-search">
+        <span class="visually-hidden">{{ t("filters.search") }}</span>
+        <input type="search" name="q" value="{{ filters.q | default('') }}" placeholder="{{ t('filters.search_placeholder') }}" maxlength="120">
+      </label>
+      <button type="submit" class="button">{{ t("filters.search_action") }}</button>
+      <details class="ops-filter-disclosure"{% if active_filter_count | default(0) > 0 %} open{% endif %}>
+        <summary class="button button--ghost">
+          {{ t("filters.heading") }}{% if active_filter_count | default(0) %} <span class="filter-count">{{ active_filter_count }}</span>{% endif %}
+        </summary>
+        <div class="ops-filter-disclosure__content">
+          <div class="ops-filters__grid">
+            <label class="field">
+              <span>{{ t("filters.status") }}</span>
+              <select name="status">
+                <option value="">{{ t("filters.all_statuses") }}</option>
+                {% for value in status_options %}
+                <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ ops_status_label(value) }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="field">
+              <span>{{ t("filters.route_target") }}</span>
+              <select name="route_target_id">
+                <option value="">{{ t("filters.all_route_targets") }}</option>
+                {% for option in route_target_options %}
+                <option value="{{ option.id }}" {% if filters.route_target_id == option.id %}selected{% endif %}>{{ option.label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="field">
+              <span>{{ t("filters.assigned_to") }}</span>
+              <select name="assigned_to">
+                <option value="">{{ t("filters.anyone") }}</option>
+                <option value="unassigned" {% if filters.assigned_to == "unassigned" %}selected{% endif %}>{{ t("common.unassigned") }}</option>
+                {% for user in ops_users %}
+                <option value="{{ user.id }}" {% if filters.assigned_to == user.id|string %}selected{% endif %}>{{ user.display_name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+          </div>
+          <div class="ops-filters__checks">
+            <label class="checkbox"><input type="checkbox" name="urgent" {% if filters.urgent %}checked{% endif %}><span>{{ t("filters.urgent_only") }}</span></label>
+            <label class="checkbox"><input type="checkbox" name="unassigned_only" {% if filters.unassigned_only %}checked{% endif %}><span>{{ t("filters.unassigned_only") }}</span></label>
+            <label class="checkbox"><input type="checkbox" name="created_by_me" {% if filters.created_by_me %}checked{% endif %}><span>{{ t("filters.created_by_me") }}</span></label>
+            <label class="checkbox"><input type="checkbox" name="needs_approval" {% if filters.needs_approval %}checked{% endif %}><span>{{ t("filters.needs_approval") }}</span></label>
+            <label class="checkbox"><input type="checkbox" name="updated_since_viewed" {% if filters.updated_since_viewed %}checked{% endif %}><span>{{ t("filters.updated_since_viewed") }}</span></label>
+          </div>
+          <div class="button-row">
+            <button type="submit" class="button">{{ t("button.apply_filters") }}</button>
+            <a class="button button--ghost" href="{{ filters_action }}">{{ t("button.reset") }}</a>
+          </div>
+        </div>
+      </details>
+      <nav class="view-switch" aria-label="{{ t('filters.view_label') }}">
+        <a href="{{ board_url | default('/ops/board') }}"{% if request.url.path == '/ops/board' %} aria-current="page"{% endif %}>{{ t("filters.board_view") }}</a>
+        <a href="{{ list_url | default('/ops') }}"{% if request.url.path == '/ops' %} aria-current="page"{% endif %}>{{ t("filters.list_view") }}</a>
+      </nav>
+    </div>
+  </form>
+
+  <div class="ops-toolbar__summary">
+    <span>{{ t("filters.result_count", count=result_count | default(rows | default([]) | length)) }}</span>
+    {% if filter_chips | default([]) %}
+    <div class="filter-chips" aria-label="{{ t('filters.active') }}">
+      {% for chip in filter_chips %}
+      <a class="filter-chip" href="{{ filters_action }}{% if chip.remaining_query %}?{{ chip.remaining_query }}{% endif %}">
+        {% if chip.key == "q" %}{{ t("filters.search") }}: {{ chip.value }}
+        {% elif chip.key == "status" %}{{ ops_status_label(chip.value) }}
+        {% elif chip.key == "route_target_id" %}{{ t("filters.route_target") }}: {{ chip.display_value }}
+        {% elif chip.key == "assigned_to" %}{{ t("filters.assigned_to") }}: {{ chip.display_value }}
+        {% elif chip.key == "urgent" %}{{ t("filters.urgent_only") }}
+        {% elif chip.key == "unassigned_only" %}{{ t("filters.unassigned_only") }}
+        {% elif chip.key == "created_by_me" %}{{ t("filters.created_by_me") }}
+        {% elif chip.key == "needs_approval" %}{{ t("filters.needs_approval") }}
+        {% elif chip.key == "updated_since_viewed" %}{{ t("filters.updated_since_viewed") }}
+        {% endif %}
+        <span aria-hidden="true">×</span><span class="visually-hidden">{{ t("filters.remove") }}</span>
+      </a>
+      {% endfor %}
+      <a class="filter-chip filter-chip--clear" href="{{ filters_action }}">{{ t("filters.clear_all") }}</a>
+    </div>
+    {% endif %}
   </div>
-  <div class="ops-filters__checks">
-    <label class="checkbox">
-      <input type="checkbox" name="urgent" {% if filters.urgent %}checked{% endif %}>
-      <span>{{ t("filters.urgent_only") }}</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" name="unassigned_only" {% if filters.unassigned_only %}checked{% endif %}>
-      <span>{{ t("filters.unassigned_only") }}</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" name="created_by_me" {% if filters.created_by_me %}checked{% endif %}>
-      <span>{{ t("filters.created_by_me") }}</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" name="needs_approval" {% if filters.needs_approval %}checked{% endif %}>
-      <span>{{ t("filters.needs_approval") }}</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" name="updated_since_viewed" {% if filters.updated_since_viewed %}checked{% endif %}>
-      <span>{{ t("filters.updated_since_viewed") }}</span>
-    </label>
-  </div>
-  <div class="button-row">
-    <button type="submit" class="button">{{ t("button.apply_filters") }}</button>
-    <a class="button button--ghost" href="{{ filters_action }}">{{ t("button.reset") }}</a>
-  </div>
-</form>
+</section>

@@ -1,22 +1,23 @@
-<section id="ticket-ledger-region" class="panel stack requester-detail__thread">
+<section id="ticket-ledger-region" class="ticket-thread stack requester-detail__thread" aria-label="{{ t('requester.detail.conversation') }}">
   {% for item in timeline %}
   {% if item.kind == "status_change" %}
-  <article class="timeline-status">
+  <article class="timeline-status" aria-label="{{ item.lane_label }}">
     <div class="timeline-status__meta">
       <span class="lane-pill lane-pill--status">{{ item.lane_label }}</span>
-      <span>{{ format_datetime_utc(item.created_at) }}</span>
+      <time datetime="{{ format_datetime_iso(item.created_at) }}">{{ format_datetime_utc(item.created_at) }}</time>
     </div>
     <p class="timeline-status__text">{{ item.summary }}</p>
   </article>
   {% else %}
   <article
     id="ticket-message-{{ item.id }}"
-    class="message-card"
+    class="message-card message-card--{{ item.author_type }}{% if item.source == 'ai' %} message-card--ai{% endif %}"
     {% if auto_scroll_message_id is defined and auto_scroll_message_id == item.id %}data-auto-scroll-target="true"{% endif %}
   >
     <div class="message-card__meta">
       <strong>{{ item.author_label }}</strong>
-      <span>{{ format_datetime_utc(item.created_at) }}</span>
+      {% if item.author_type == "ai" %}<span class="source-label">{{ t("ticket.source.ai") }}</span>{% endif %}
+      <time datetime="{{ format_datetime_iso(item.created_at) }}">{{ format_datetime_utc(item.created_at) }}</time>
     </div>
     <div class="message-card__body">{{ item.body_html | safe }}</div>
     {% if item.attachments %}
@@ -32,4 +33,22 @@
   </article>
   {% endif %}
   {% endfor %}
+  {% if live_state is defined %}
+  <article
+    id="ticket-live-provisional"
+    class="message-card message-card--ai ticket-live-provisional{% if live_state.delayed %} ticket-live__status--delayed{% endif %}"
+    data-ticket-live-provisional
+    data-run-key="{{ live_state.run_key | default('') or '' }}"
+    role="status"
+    aria-live="polite"
+    {% if not live_state.active %}hidden{% endif %}
+  >
+    <div class="message-card__meta"><strong>{{ t("ticket.source.ai") }}</strong><span>{{ t("ticket.live.working_label") }}</span></div>
+    <div class="ticket-live-provisional__body">
+      <span class="ticket-live__spinner" aria-hidden="true"></span>
+      <span data-ticket-live-label>{{ t("ticket.live." ~ live_audience ~ "." ~ live_state.phase) }}</span>
+      <span class="ticket-live__elapsed" data-ticket-live-elapsed aria-hidden="true"></span>
+    </div>
+  </article>
+  {% endif %}
 </section>

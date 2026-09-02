@@ -3,12 +3,13 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit
 import uuid
 
 import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from starlette.formparsers import MultiPartException
 
@@ -27,9 +28,14 @@ from app.i18n import (
     get_translator,
     resolve_ui_locale,
     timeline_lane_label,
+    translate_error_text,
 )
 from app.auth import get_required_auth_session, require_admin_user, require_ops_user, validate_csrf_token
 from app.render import render_markdown_to_html
+from app.requester_view import (
+    REQUESTER_INTERACTION_ADMIN_PREVIEW,
+    build_requester_ticket_detail_context,
+)
 from app.timeline import build_author_label, load_ticket_status_history, load_users_by_ids, merge_timeline_items, serialize_status_changes
 from app.ticket_live import (
     build_ticket_live_state,
@@ -102,6 +108,37 @@ _OPS_DRAFT_REPLY_STATUSES = ("waiting_on_user", "waiting_on_dev_ti", "resolved")
 _OPS_PUBLIC_REPLY_STATUSES = ("ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")
 _OPS_FILTERABLE_STATUSES = ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")
 _MANAGEABLE_USER_ROLES = ("requester", "dev_ti")
+_OPS_FILTER_QUERY_KEYS = frozenset(
+    {
+        "q",
+        "status",
+        "route_target_id",
+        "assigned_to",
+        "urgent",
+        "unassigned_only",
+        "created_by_me",
+        "needs_approval",
+        "updated_since_viewed",
+    }
+)
+_OPS_RETURN_PATHS = frozenset({"/ops", "/ops/board"})
+
+
+class _OpsPublicReplyFormError(UploadValidationError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        body: str,
+        csrf_token: str,
+        next_status: str,
+        forced_route_target_id: str,
+    ):
+        super().__init__(message)
+        self.body = body
+        self.csrf_token = csrf_token
+        self.next_status = next_status
+        self.forced_route_target_id = forced_route_target_id
 
 
 def _parse_bool(value: str | None) -> bool:
@@ -115,6 +152,76 @@ def _parse_required_bool(value: str) -> bool:
     if normalized in {"off", "false", "0", "no"}:
         return False
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid active state.")
+
+
+def _filter_query_items(filters: dict[str, object]) -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = []
+    for key in ("q", "status", "route_target_id", "assigned_to"):
+        value = str(filters.get(key, "")).strip()
+        if value:
+            items.append((key, value))
+    for key in ("urgent", "unassigned_only", "created_by_me", "needs_approval", "updated_since_viewed"):
+        if filters.get(key):
+            items.append((key, "on"))
+    return items
+
+
+def _ops_view_url(path: str, filters: dict[str, object]) -> str:
+    query = urlencode(_filter_query_items(filters))
+    return f"{path}?{query}" if query else path
+
+
+def _filter_chips(filters: dict[str, object]) -> list[dict[str, str]]:
+    chips: list[dict[str, str]] = []
+    for key, value in _filter_query_items(filters):
+        without_key = dict(filters)
+        without_key[key] = False if isinstance(filters.get(key), bool) else ""
+        chips.append(
+            {
+                "key": key,
+                "value": value,
+                "remaining_query": urlencode(_filter_query_items(without_key)),
+            }
+        )
+    return chips
+
+
+def _sanitize_ops_return_to(value: str | None, *, default: str = "/ops/board") -> str:
+    candidate = (value or "").strip()
+    if not candidate:
+        return default
+    parsed = urlsplit(candidate)
+    if parsed.scheme or parsed.netloc or parsed.path not in _OPS_RETURN_PATHS or parsed.fragment:
+        return default
+    if len(parsed.query) > 1024:
+        return default
+    items = parse_qsl(parsed.query, keep_blank_values=False)
+    keys = [key for key, _ in items]
+    if len(keys) != len(set(keys)) or any(key not in _OPS_FILTER_QUERY_KEYS for key in keys):
+        return default
+    query = urlencode(items)
+    return f"{parsed.path}?{query}" if query else parsed.path
+
+
+def _request_return_to(request: Request) -> str | None:
+    query_params = getattr(request, "query_params", None)
+    if query_params is None:
+        return None
+    return query_params.get("return_to")
+
+
+def _ops_ticket_detail_path(reference: str, return_to: str | None = None) -> str:
+    if not return_to:
+        return f"/ops/tickets/{reference}"
+    safe_return = _sanitize_ops_return_to(return_to)
+    return f"/ops/tickets/{reference}?{urlencode({'return_to': safe_return})}"
+
+
+def _requester_preview_path(reference: str, return_to: str | None = None) -> str:
+    if not return_to:
+        return f"/ops/tickets/{reference}/requester-preview"
+    safe_return = _sanitize_ops_return_to(return_to)
+    return f"/ops/tickets/{reference}/requester-preview?{urlencode({'return_to': safe_return})}"
 
 
 async def _parse_ops_public_reply_form(
@@ -131,7 +238,16 @@ async def _parse_ops_public_reply_form(
     next_status = str(form.get("next_status", "")).strip()
     forced_route_target_id = str(form.get("forced_route_target_id", "")).strip()
     uploads = get_form_attachments(form)
-    attachments = [await validate_attachment_upload(upload, settings) for upload in uploads]
+    try:
+        attachments = [await validate_attachment_upload(upload, settings) for upload in uploads]
+    except UploadValidationError as exc:
+        raise _OpsPublicReplyFormError(
+            str(exc),
+            body=body,
+            csrf_token=csrf_token,
+            next_status=next_status,
+            forced_route_target_id=forced_route_target_id,
+        ) from exc
     return body, csrf_token, next_status, forced_route_target_id, attachments
 
 
@@ -434,6 +550,7 @@ def _load_persistent_conversation_projection(
     db: Session,
     *,
     ticket: Ticket,
+    return_to: str | None = None,
 ) -> dict[str, object] | None:
     conversation = _load_codex_conversation(db, ticket_id=ticket.id)
     if conversation is None:
@@ -504,7 +621,10 @@ def _load_persistent_conversation_projection(
         )
         presented["steering_receipt_count"] = receipt_counts.get(turn.id, 0)
         presented["ambiguous_blocker_count"] = ambiguous_receipt_counts.get(turn.id, 0)
-        presented["detail_path"] = f"/ops/tickets/{ticket.reference}/persistent-turns/{turn.id}"
+        detail_path = f"/ops/tickets/{ticket.reference}/persistent-turns/{turn.id}"
+        if return_to:
+            detail_path = f"{detail_path}?{urlencode({'return_to': _sanitize_ops_return_to(return_to)})}"
+        presented["detail_path"] = detail_path
         turn_cards.append(presented)
     return {
         "conversation": present_codex_conversation_overview(conversation, sessions=sessions, turns=turns),
@@ -875,6 +995,7 @@ def _run_slack_auth_test(*, bot_token: str, timeout_seconds: int):
 def _read_filters(request: Request) -> dict[str, object]:
     query = request.query_params
     return {
+        "q": query.get("q", "").strip()[:120],
         "status": query.get("status", "").strip(),
         "route_target_id": query.get("route_target_id", "").strip(),
         "assigned_to": query.get("assigned_to", "").strip(),
@@ -888,9 +1009,19 @@ def _read_filters(request: Request) -> dict[str, object]:
 
 def _load_filtered_ticket_rows(db: Session, *, current_user: User, filters: dict[str, object]) -> list[dict[str, object]]:
     statement = select(Ticket).order_by(Ticket.updated_at.desc())
+    search_filter = str(filters["q"])
     status_filter = str(filters["status"])
     route_target_filter = str(filters["route_target_id"])
     assigned_to_filter = str(filters["assigned_to"])
+    if search_filter:
+        escaped_search = search_filter.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped_search}%"
+        statement = statement.where(
+            or_(
+                Ticket.reference.ilike(pattern, escape="\\"),
+                Ticket.title.ilike(pattern, escape="\\"),
+            )
+        )
     if status_filter:
         statement = statement.where(Ticket.status == status_filter)
     if route_target_filter:
@@ -966,13 +1097,31 @@ def _group_ticket_rows(rows: list[dict[str, object]]) -> dict[str, list[dict[str
 
 def _ops_filter_context(db: Session, *, current_user: User, filters: dict[str, object]) -> dict[str, object]:
     rows = _load_filtered_ticket_rows(db, current_user=current_user, filters=filters)
+    ops_users = _load_ops_users(db)
+    route_target_options = _ops_route_target_options()
+    board_url = _ops_view_url("/ops/board", filters)
+    list_url = _ops_view_url("/ops", filters)
+    filter_chips = _filter_chips(filters)
+    user_labels = {str(user.id): user.display_name for user in ops_users}
+    route_labels = {option["id"]: option["label"] for option in route_target_options}
+    for chip in filter_chips:
+        if chip["key"] == "assigned_to":
+            chip["display_value"] = user_labels.get(chip["value"], chip["value"])
+        elif chip["key"] == "route_target_id":
+            chip["display_value"] = route_labels.get(chip["value"], chip["value"])
     return {
         "filters": filters,
-        "ops_users": _load_ops_users(db),
+        "ops_users": ops_users,
         "status_options": _OPS_FILTERABLE_STATUSES,
-        "route_target_options": _ops_route_target_options(),
+        "route_target_options": route_target_options,
         "rows": rows,
         "grouped_rows": _group_ticket_rows(rows),
+        "result_count": len(rows),
+        "active_filter_count": len(_filter_query_items(filters)),
+        "filter_chips": filter_chips,
+        "board_url": board_url,
+        "list_url": list_url,
+        "ticket_return_to": board_url,
     }
 
 
@@ -990,6 +1139,13 @@ def _ticket_detail_context(
     ui_locale: str = DEFAULT_UI_LOCALE,
     persistent_visibility_enabled: bool = False,
     ai_run_stale_timeout_seconds: int = 300,
+    ops_return_url: str = "/ops/board",
+    public_reply_body: str = "",
+    internal_note_body: str = "",
+    composer_mode: str = "public",
+    composer_error: str | None = None,
+    public_reply_next_status: str | None = None,
+    public_reply_route_target_id: str = "",
 ) -> dict[str, object]:
     pending_draft = _load_pending_draft(db, ticket_id=ticket.id)
     latest_run = _load_latest_run(db, ticket_id=ticket.id)
@@ -1002,7 +1158,7 @@ def _ticket_detail_context(
     analysis_view = present_ai_run_output(latest_analysis_run)
     activity_timeline = _build_ops_activity_timeline(db, ticket_id=ticket.id, ui_locale=ui_locale)
     persistent_conversation = (
-        _load_persistent_conversation_projection(db, ticket=ticket)
+        _load_persistent_conversation_projection(db, ticket=ticket, return_to=ops_return_url)
         if persistent_visibility_enabled
         else None
     )
@@ -1026,7 +1182,9 @@ def _ticket_detail_context(
         "status_options": _OPS_FILTERABLE_STATUSES,
         "draft_reply_status_options": _OPS_DRAFT_REPLY_STATUSES,
         "public_reply_status_options": _OPS_PUBLIC_REPLY_STATUSES,
-        "default_public_reply_status": _default_public_reply_status(ticket=ticket, current_user=current_user),
+        "default_public_reply_status": public_reply_next_status
+        or _default_public_reply_status(ticket=ticket, current_user=current_user),
+        "public_reply_route_target_id": public_reply_route_target_id,
         "pending_draft": pending_draft,
         "pending_draft_html": render_markdown_to_html(pending_draft.body_markdown) if pending_draft else "",
         "latest_run": latest_run,
@@ -1044,8 +1202,14 @@ def _ticket_detail_context(
         "persistent_visibility_enabled": persistent_visibility_enabled,
         "live_audience": "ops",
         "live_state_url": f"/ops/tickets/{ticket.reference}/live-state",
-        "live_detail_url": f"/ops/tickets/{ticket.reference}",
+        "live_detail_url": f"/ops/tickets/{ticket.reference}?{urlencode({'return_to': ops_return_url})}",
         "live_state": live_state,
+        "ops_return_url": ops_return_url,
+        "requester_preview_url": _requester_preview_path(ticket.reference, ops_return_url),
+        "public_reply_body": public_reply_body,
+        "internal_note_body": internal_note_body,
+        "composer_mode": composer_mode,
+        "composer_error": composer_error,
     }
 
 
@@ -1059,6 +1223,54 @@ def _template_or_partial_response(
     if is_htmx_request(request):
         return templates.TemplateResponse(request, partial_name, context)
     return templates.TemplateResponse(request, template_name, context)
+
+
+def _render_ops_ticket_form_error(
+    request: Request,
+    *,
+    current_user: User,
+    auth_session,
+    settings: Settings,
+    db: Session,
+    ticket: Ticket,
+    error: str,
+    composer_mode: str,
+    public_reply_body: str = "",
+    internal_note_body: str = "",
+    public_reply_next_status: str | None = None,
+    public_reply_route_target_id: str = "",
+):
+    ui_locale = resolve_ui_locale(request)
+    ops_return_url = _sanitize_ops_return_to(_request_return_to(request))
+    context = build_template_context(
+        request=request,
+        current_user=current_user,
+        auth_session=auth_session,
+        extra=_ticket_detail_context(
+            db,
+            ticket=ticket,
+            current_user=current_user,
+            ui_locale=ui_locale,
+            persistent_visibility_enabled=settings.codex_conversations_enabled,
+            ai_run_stale_timeout_seconds=settings.ai_run_stale_timeout_seconds,
+            ops_return_url=ops_return_url,
+            public_reply_body=public_reply_body,
+            internal_note_body=internal_note_body,
+            composer_mode=composer_mode,
+            composer_error=error,
+            public_reply_next_status=public_reply_next_status,
+            public_reply_route_target_id=public_reply_route_target_id,
+        ),
+        ui_locale=ui_locale,
+        ui_switch_path=_ops_ticket_detail_path(ticket.reference, ops_return_url),
+    )
+    context["composer_error"] = translate_error_text(error, ui_locale)
+    return templates.TemplateResponse(
+        request,
+        "ops_ticket_detail.html",
+        context,
+        status_code=status.HTTP_400_BAD_REQUEST,
+    )
 
 
 @router.get("/ops/users", response_class=HTMLResponse)
@@ -1337,13 +1549,14 @@ def ops_ticket_list(
         extra={
             **_ops_filter_context(db, current_user=current_user, filters=filters),
             "filters_action": "/ops",
-            "filters_target_id": "ops-results",
+            "filters_target_id": "ops-workspace-results",
+            "ticket_return_to": _ops_view_url("/ops", filters),
         },
     )
     return _template_or_partial_response(
         request,
         template_name="ops_ticket_list.html",
-        partial_name="ops_ticket_rows.html",
+        partial_name="ops_list_results.html",
         context=context,
     )
 
@@ -1364,13 +1577,13 @@ def ops_board(
         extra={
             **_ops_filter_context(db, current_user=current_user, filters=filters),
             "filters_action": "/ops/board",
-            "filters_target_id": "ops-results",
+            "filters_target_id": "ops-workspace-results",
         },
     )
     return _template_or_partial_response(
         request,
         template_name="ops_board.html",
-        partial_name="ops_board_columns.html",
+        partial_name="ops_board_results.html",
         context=context,
     )
 
@@ -1385,6 +1598,7 @@ def ops_ticket_detail(
     db: Session = Depends(db_session_dependency),
 ):
     ui_locale = resolve_ui_locale(request)
+    ops_return_url = _sanitize_ops_return_to(_request_return_to(request))
     ticket = _load_ops_ticket_or_404(db, reference=reference)
     upsert_ticket_view(db, user_id=current_user.id, ticket_id=ticket.id)
     db.commit()
@@ -1399,6 +1613,7 @@ def ops_ticket_detail(
             ui_locale=ui_locale,
             persistent_visibility_enabled=settings.codex_conversations_enabled,
             ai_run_stale_timeout_seconds=settings.ai_run_stale_timeout_seconds,
+            ops_return_url=ops_return_url,
         ),
         ui_locale=ui_locale,
     )
@@ -1411,6 +1626,47 @@ def ops_ticket_detail(
         request,
         "ops_ticket_detail.html",
         context,
+    )
+
+
+@router.get("/ops/tickets/{reference}/requester-preview", response_class=HTMLResponse)
+def admin_requester_ticket_preview(
+    reference: str,
+    request: Request,
+    current_user: User = Depends(require_admin_user),
+    auth_session=Depends(get_required_auth_session),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(db_session_dependency),
+):
+    ui_locale = resolve_ui_locale(request)
+    ops_return_url = _sanitize_ops_return_to(_request_return_to(request))
+    ticket = _load_ops_ticket_or_404(db, reference=reference)
+    preview_url = _requester_preview_path(ticket.reference, ops_return_url)
+    context = build_template_context(
+        request=request,
+        current_user=current_user,
+        auth_session=auth_session,
+        extra={
+            **build_requester_ticket_detail_context(
+                db,
+                ticket=ticket,
+                ui_locale=ui_locale,
+                stale_timeout_seconds=settings.ai_run_stale_timeout_seconds,
+                interaction_mode=REQUESTER_INTERACTION_ADMIN_PREVIEW,
+            ),
+            "ops_ticket_url": _ops_ticket_detail_path(ticket.reference, ops_return_url),
+        },
+        ui_locale=ui_locale,
+        ui_switch_path=preview_url,
+    )
+    return templates.TemplateResponse(
+        request,
+        "requester_ticket_detail.html",
+        context,
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Robots-Tag": "noindex, nofollow",
+        },
     )
 
 
@@ -1448,6 +1704,7 @@ def ops_ticket_live_state(
             "content_version": live_state.content_version,
             "started_at": live_state.started_at.isoformat() if live_state.started_at is not None else None,
             "delayed": live_state.delayed,
+            "run_key": getattr(live_state, "run_key", None),
         },
         headers=headers,
     )
@@ -1466,6 +1723,7 @@ def ops_persistent_turn_detail(
     if not settings.codex_conversations_enabled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Persistent turn not found")
     ui_locale = resolve_ui_locale(request)
+    ops_return_url = _sanitize_ops_return_to(_request_return_to(request))
     ticket = _load_ops_ticket_or_404(db, reference=reference)
     detail = _load_ops_persistent_turn_detail_or_404(db, ticket=ticket, turn_id=turn_id)
     upsert_ticket_view(db, user_id=current_user.id, ticket_id=ticket.id)
@@ -1481,6 +1739,7 @@ def ops_persistent_turn_detail(
                 "ticket": ticket,
                 "persistent_conversation": detail["conversation"],
                 "persistent_turn": detail["turn"],
+                "ops_ticket_url": _ops_ticket_detail_path(ticket.reference, ops_return_url),
             },
             ui_locale=ui_locale,
         ),
@@ -1490,6 +1749,7 @@ def ops_persistent_turn_detail(
 @router.post("/ops/tickets/{reference}/assign")
 def ops_assign_ticket(
     reference: str,
+    request: Request,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
     csrf_token: str = Form(...),
@@ -1510,21 +1770,27 @@ def ops_assign_ticket(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid assignee")
     assign_ticket_for_ops(db, ticket=ticket, actor=current_user, assignee=assignee)
     db.commit()
-    return RedirectResponse(f"/ops/tickets/{ticket.reference}", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        _ops_ticket_detail_path(ticket.reference, _request_return_to(request)),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @router.post("/ops/tickets/{reference}/set-status")
 def ops_set_ticket_status(
     reference: str,
+    request: Request,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
     settings: Settings = Depends(get_settings),
     csrf_token: str = Form(...),
     next_status: str = Form(...),
+    return_to: str = Form(default=""),
     db: Session = Depends(db_session_dependency),
 ):
     validate_csrf_token(auth_session, csrf_token)
     ticket = _load_ops_ticket_or_404(db, reference=reference)
+    wants_json = "application/json" in request.headers.get("Accept", "").lower()
     try:
         set_ticket_status_for_ops(
             db,
@@ -1534,9 +1800,27 @@ def ops_set_ticket_status(
             next_status=next_status.strip(),
         )
     except ValueError as exc:
+        if wants_json:
+            return JSONResponse(
+                {"ok": False, "error": str(exc)},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     db.commit()
-    return RedirectResponse(f"/ops/tickets/{ticket.reference}", status_code=status.HTTP_303_SEE_OTHER)
+    if wants_json:
+        return JSONResponse(
+            {
+                "ok": True,
+                "reference": ticket.reference,
+                "status": ticket.status,
+            }
+        )
+    safe_return = (
+        _sanitize_ops_return_to(return_to, default=f"/ops/tickets/{ticket.reference}")
+        if return_to
+        else _ops_ticket_detail_path(ticket.reference, _request_return_to(request))
+    )
+    return RedirectResponse(safe_return, status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.post("/ops/tickets/{reference}/reply-public")
@@ -1548,6 +1832,7 @@ async def ops_reply_public(
     settings: Settings = Depends(get_settings),
     db: Session = Depends(db_session_dependency),
 ):
+    body = ""
     try:
         body, csrf_token, next_status, forced_route_target_id, upload_attachments = await _parse_ops_public_reply_form(
             request,
@@ -1555,13 +1840,58 @@ async def ops_reply_public(
         )
         validate_csrf_token(auth_session, csrf_token)
         if not body:
-            raise UploadValidationError("Reply text is required")
+            raise _OpsPublicReplyFormError(
+                "Reply text is required",
+                body=body,
+                csrf_token=csrf_token,
+                next_status=next_status,
+                forced_route_target_id=forced_route_target_id,
+            )
         if len(upload_attachments) > settings.max_images_per_message:
-            raise UploadValidationError(f"Attach at most {settings.max_images_per_message} files.")
+            raise _OpsPublicReplyFormError(
+                f"Attach at most {settings.max_images_per_message} files.",
+                body=body,
+                csrf_token=csrf_token,
+                next_status=next_status,
+                forced_route_target_id=forced_route_target_id,
+            )
     except UploadValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        if not isinstance(exc, _OpsPublicReplyFormError):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        validate_csrf_token(auth_session, exc.csrf_token)
+        ticket = _load_ops_ticket_or_404(db, reference=reference)
+        return _render_ops_ticket_form_error(
+            request,
+            current_user=current_user,
+            auth_session=auth_session,
+            settings=settings,
+            db=db,
+            ticket=ticket,
+            error=str(exc),
+            composer_mode="public",
+            public_reply_body=exc.body,
+            public_reply_next_status=exc.next_status,
+            public_reply_route_target_id=exc.forced_route_target_id,
+        )
     ticket = _load_ops_ticket_or_404(db, reference=reference)
-    route_target_value, forced_specialist_id = _resolve_manual_rerun_specialist_override(forced_route_target_id)
+    try:
+        route_target_value, forced_specialist_id = _resolve_manual_rerun_specialist_override(forced_route_target_id)
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_400_BAD_REQUEST:
+            raise
+        return _render_ops_ticket_form_error(
+            request,
+            current_user=current_user,
+            auth_session=auth_session,
+            settings=settings,
+            db=db,
+            ticket=ticket,
+            error=str(exc.detail),
+            composer_mode="public",
+            public_reply_body=body,
+            public_reply_next_status=next_status,
+            public_reply_route_target_id=forced_route_target_id,
+        )
     saved_paths: list[Path] = []
     try:
         _, persisted_attachments = add_ops_public_reply(
@@ -1584,17 +1914,34 @@ async def ops_reply_public(
     except ValueError as exc:
         db.rollback()
         _cleanup_paths(saved_paths)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        ticket = _load_ops_ticket_or_404(db, reference=reference)
+        return _render_ops_ticket_form_error(
+            request,
+            current_user=current_user,
+            auth_session=auth_session,
+            settings=settings,
+            db=db,
+            ticket=ticket,
+            error=str(exc),
+            composer_mode="public",
+            public_reply_body=body,
+            public_reply_next_status=next_status,
+            public_reply_route_target_id=forced_route_target_id,
+        )
     except Exception:
         db.rollback()
         _cleanup_paths(saved_paths)
         raise
-    return RedirectResponse(f"/ops/tickets/{ticket.reference}", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        _ops_ticket_detail_path(ticket.reference, _request_return_to(request)),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @router.post("/ops/tickets/{reference}/note-internal")
 def ops_note_internal(
     reference: str,
+    request: Request,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
     settings: Settings = Depends(get_settings),
@@ -1605,7 +1952,17 @@ def ops_note_internal(
     validate_csrf_token(auth_session, csrf_token)
     ticket = _load_ops_ticket_or_404(db, reference=reference)
     if not body.strip():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Internal note text is required")
+        return _render_ops_ticket_form_error(
+            request,
+            current_user=current_user,
+            auth_session=auth_session,
+            settings=settings,
+            db=db,
+            ticket=ticket,
+            error="Internal note text is required",
+            composer_mode="internal",
+            internal_note_body=body,
+        )
     add_ops_internal_note(
         db,
         settings=settings,
@@ -1614,12 +1971,16 @@ def ops_note_internal(
         body_markdown=body.strip(),
     )
     db.commit()
-    return RedirectResponse(f"/ops/tickets/{ticket.reference}", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        _ops_ticket_detail_path(ticket.reference, _request_return_to(request)),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @router.post("/ops/tickets/{reference}/rerun-ai")
 def ops_rerun_ai(
     reference: str,
+    request: Request,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
     settings: Settings = Depends(get_settings),
@@ -1639,12 +2000,16 @@ def ops_rerun_ai(
         forced_specialist_id=forced_specialist_id,
     )
     db.commit()
-    return RedirectResponse(f"/ops/tickets/{ticket.reference}", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        _ops_ticket_detail_path(ticket.reference, _request_return_to(request)),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @router.post("/ops/drafts/{draft_id}/approve-publish")
 def ops_approve_publish_draft(
     draft_id: str,
+    request: Request,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
     settings: Settings = Depends(get_settings),
@@ -1669,12 +2034,16 @@ def ops_approve_publish_draft(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     db.commit()
-    return RedirectResponse(f"/ops/tickets/{ticket.reference}", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        _ops_ticket_detail_path(ticket.reference, _request_return_to(request)),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @router.post("/ops/drafts/{draft_id}/reject")
 def ops_reject_draft(
     draft_id: str,
+    request: Request,
     current_user: User = Depends(require_ops_user),
     auth_session=Depends(get_required_auth_session),
     csrf_token: str = Form(...),
@@ -1690,4 +2059,7 @@ def ops_reject_draft(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     db.commit()
-    return RedirectResponse(f"/ops/tickets/{ticket.reference}", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(
+        _ops_ticket_detail_path(ticket.reference, _request_return_to(request)),
+        status_code=status.HTTP_303_SEE_OTHER,
+    )

@@ -1,19 +1,31 @@
 {% extends "base.html" %}
 
 {% block title %}{{ t("ops.board.heading") }} | {{ t("brand.name") }}{% endblock %}
-{% block page_class %} page--workspace{% endblock %}
+{% block page_class %} page--workspace page--board{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/board.css">{% endblock %}
+{% block page_scripts %}<script src="/static/board.js" defer></script>{% endblock %}
 
 {% block body %}
-<div class="workspace-view workspace-view--ops">
-  <section class="page-header page-header--card">
+<div
+  class="workspace-view workspace-view--ops board-workspace"
+  data-board-controller
+  data-board-error-label="{{ t('ops.board.move_error') }}"
+  data-board-success-label="{{ t('ops.board.move_success') }}"
+  data-board-refresh-error-label="{{ t('ops.board.move_refresh_error') }}"
+  data-board-reconcile-error-label="{{ t('ops.board.move_reconcile_error') }}"
+  data-board-reconciled-label="{{ t('ops.board.move_reconciled') }}"
+>
+  <section class="page-header board-page-header">
     <div>
       <p class="eyebrow">{{ t("eyebrow.dev_ti_view") }}</p>
       <h1>{{ t("ops.board.heading") }}</h1>
     </div>
-    <a class="button button--ghost" href="/ops">{{ t("button.open_list_view") }}</a>
   </section>
-
-  {% include "ops_filters.html" %}
-  {% include "ops_board_columns.html" %}
+  <p class="visually-hidden" role="status" aria-live="polite" data-board-announcer></p>
+  <div class="board-feedback" role="alert" data-board-feedback hidden>
+    <span data-board-feedback-message></span>
+    <a class="button button--ghost" href="{{ board_url | default('/ops/board') }}" data-board-refresh hidden>{{ t("ops.board.refresh") }}</a>
+  </div>
+  {% include "ops_board_results.html" %}
 </div>
 {% endblock %}

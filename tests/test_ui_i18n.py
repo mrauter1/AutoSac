@@ -73,7 +73,7 @@ def _load_web_stack():
     pytest.importorskip("fastapi")
     pytest.importorskip("sqlalchemy")
     from fastapi.testclient import TestClient
-    from app import auth, routes_auth, routes_ops, routes_requester
+    from app import auth, requester_view, routes_auth, routes_ops, routes_requester
     from app.main import create_app
     from shared.db import db_session_dependency
 
@@ -83,6 +83,7 @@ def _load_web_stack():
         "routes_auth": routes_auth,
         "routes_ops": routes_ops,
         "routes_requester": routes_requester,
+        "requester_view": requester_view,
         "create_app": create_app,
         "db_session_dependency": db_session_dependency,
     }
@@ -332,7 +333,17 @@ def test_requester_reply_error_uses_ticket_detail_for_language_switch(monkeypatc
 
     monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
     monkeypatch.setattr(stack["routes_requester"], "_parse_requester_message_form", fake_parse_requester_message_form)
-    monkeypatch.setattr(stack["routes_requester"], "_build_requester_timeline", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        stack["routes_requester"],
+        "build_requester_ticket_detail_context",
+        lambda *args, **kwargs: {
+            "ticket": ticket,
+            "timeline": [],
+            "reply_body": "",
+            "requester_actions_enabled": True,
+            "requester_live_updates_enabled": False,
+        },
+    )
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: requester
@@ -627,10 +638,10 @@ def test_requester_timeline_uses_portuguese_status_labels(monkeypatch):
         ),
     ]
 
-    monkeypatch.setattr(stack["routes_requester"], "_serialize_public_thread", lambda *args, **kwargs: public_thread)
-    monkeypatch.setattr(stack["routes_requester"], "load_ticket_status_history", lambda *args, **kwargs: history)
+    monkeypatch.setattr(stack["requester_view"], "serialize_requester_public_thread", lambda *args, **kwargs: public_thread)
+    monkeypatch.setattr(stack["requester_view"], "load_ticket_status_history", lambda *args, **kwargs: history)
 
-    timeline = stack["routes_requester"]._build_requester_timeline(object(), ticket_id=ticket_id, ui_locale="pt-BR")
+    timeline = stack["requester_view"].build_requester_timeline(object(), ticket_id=ticket_id, ui_locale="pt-BR")
 
     assert timeline[1]["summary"] == "Status alterado para Em análise"
     assert timeline[3]["summary"] == "Status alterado para Aguardando sua resposta"

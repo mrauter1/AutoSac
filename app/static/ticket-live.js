@@ -23,11 +23,13 @@
       this.polling = false;
       this.refreshing = false;
       this.pendingContentVersion = null;
+      this.awaitingCanonical = false;
+      this.runKey = null;
       this.jumpAfterRefresh = false;
       this.lastPollAt = 0;
-      this.statusRegion = root.querySelector("#ticket-live-region");
-      this.label = root.querySelector("[data-ticket-live-label]");
-      this.elapsed = root.querySelector("[data-ticket-live-elapsed]");
+      this.statusRegion = null;
+      this.label = null;
+      this.elapsed = null;
       this.error = root.querySelector("[data-ticket-live-error]");
       this.jump = root.querySelector("[data-ticket-live-jump]");
       this.onVisibilityChange = this.onVisibilityChange.bind(this);
@@ -36,6 +38,7 @@
     }
 
     start() {
+      this.syncProjectedElements();
       document.addEventListener("visibilitychange", this.onVisibilityChange);
       window.addEventListener("focus", this.onFocus);
       if (this.jump) {
@@ -43,6 +46,12 @@
       }
       this.updateElapsedTimer();
       this.schedule(0);
+    }
+
+    syncProjectedElements() {
+      this.statusRegion = document.querySelector("[data-ticket-live-provisional]");
+      this.label = this.statusRegion ? this.statusRegion.querySelector("[data-ticket-live-label]") : null;
+      this.elapsed = this.statusRegion ? this.statusRegion.querySelector("[data-ticket-live-elapsed]") : null;
     }
 
     parseDate(value) {
@@ -78,7 +87,7 @@
         return;
       }
       const messages = document.querySelectorAll("#ticket-ledger-region [id^='ticket-message-']");
-      const latest = messages[messages.length - 1];
+      const latest = messages[messages.length - 1] || document.querySelector("[data-ticket-live-provisional]:not([hidden])");
       if (latest) {
         latest.scrollIntoView({ block: "start", behavior: "smooth" });
       }
@@ -154,14 +163,16 @@
           typeof payload.active !== "boolean" ||
           typeof payload.phase !== "string" ||
           typeof payload.label !== "string" ||
-          typeof payload.content_version !== "string"
+          typeof payload.content_version !== "string" ||
+          !(typeof payload.run_key === "string" || payload.run_key === null)
         ) {
           throw new Error("Ticket live-state response was invalid");
         }
         this.etag = response.headers.get("ETag");
-        this.applyState(payload);
+        const needsRefresh = payload.content_version !== this.contentVersion;
+        this.applyState(payload, !payload.active && needsRefresh);
         let refreshWasHealthy = true;
-        if (payload.content_version !== this.contentVersion) {
+        if (needsRefresh) {
           this.pendingContentVersion = payload.content_version;
           refreshWasHealthy = await this.refreshFragments(payload.content_version);
         }
@@ -181,15 +192,21 @@
       }
     }
 
-    applyState(payload) {
+    applyState(payload, awaitingCanonical) {
       this.active = payload.active;
+      this.awaitingCanonical = Boolean(awaitingCanonical);
+      this.runKey = payload.run_key;
       this.startedAt = this.parseDate(payload.started_at);
       this.root.dataset.active = payload.active ? "true" : "false";
+      this.syncProjectedElements();
       if (this.label) {
-        this.label.textContent = payload.label;
+        this.label.textContent = this.awaitingCanonical
+          ? (this.root.dataset.reconcilingLabel || payload.label)
+          : payload.label;
       }
       if (this.statusRegion) {
-        this.statusRegion.hidden = !payload.active;
+        this.statusRegion.dataset.runKey = payload.run_key || "";
+        this.statusRegion.hidden = !(payload.active || this.awaitingCanonical);
         this.statusRegion.classList.toggle("ticket-live__status--delayed", Boolean(payload.delayed));
       }
       this.updateElapsedTimer();
@@ -216,6 +233,7 @@
       this.active = false;
       this.startedAt = null;
       this.pendingContentVersion = null;
+      this.awaitingCanonical = false;
       this.jumpAfterRefresh = false;
       this.root.dataset.active = "false";
       this.clearScheduledPoll();
@@ -372,25 +390,48 @@
       this.refreshing = true;
       const previousLatestId = this.latestMessageId();
       const previousScrollY = window.scrollY;
+      const activeElement = document.activeElement;
+      const composerFocused = Boolean(activeElement && activeElement.closest("#ticket-composer-region"));
+      const composerViewportTop = composerFocused ? activeElement.getBoundingClientRect().top : null;
       const documentHeight = document.documentElement.scrollHeight;
       const nearLatest = window.innerHeight + previousScrollY >= documentHeight - NEAR_LATEST_PX;
       const openDisclosures = this.disclosureState();
       try {
         await this.requestFragmentSwap();
         this.contentVersion = expectedVersion;
+        this.awaitingCanonical = false;
         if (this.pendingContentVersion === expectedVersion) {
           this.pendingContentVersion = null;
         }
         this.root.dataset.contentVersion = expectedVersion;
+        this.syncProjectedElements();
+        if (this.statusRegion && !this.active) {
+          this.statusRegion.hidden = true;
+        }
+        this.updateElapsedTimer();
         this.restoreDisclosures(openDisclosures);
         window.requestAnimationFrame(() => {
           const currentLatestId = this.latestMessageId();
-          if (nearLatest || this.jumpAfterRefresh) {
+          if (this.jumpAfterRefresh) {
             const latest = currentLatestId ? document.getElementById(currentLatestId) : null;
             if (latest) {
-              latest.scrollIntoView({ block: "start", behavior: this.jumpAfterRefresh ? "smooth" : "auto" });
+              latest.scrollIntoView({ block: "start", behavior: "smooth" });
             }
             this.jumpAfterRefresh = false;
+            if (this.jump) {
+              this.jump.hidden = true;
+            }
+          } else if (composerFocused) {
+            const currentComposerTop = activeElement.getBoundingClientRect().top;
+            window.scrollBy({ top: currentComposerTop - composerViewportTop, behavior: "auto" });
+            if (currentLatestId && currentLatestId !== previousLatestId) {
+              this.showUpdateAvailable(null);
+            }
+          } else if (nearLatest) {
+            const latest = currentLatestId ? document.getElementById(currentLatestId) : null;
+            if (latest) {
+              latest.scrollIntoView({ block: "start", behavior: "auto" });
+            }
             if (this.jump) {
               this.jump.hidden = true;
             }

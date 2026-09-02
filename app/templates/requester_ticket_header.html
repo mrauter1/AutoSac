@@ -3,12 +3,22 @@
   class="page-header page-header--card page-header--stack requester-detail__header"
   {% if live_oob %}hx-swap-oob="outerHTML"{% endif %}
 >
-  <div class="ticket-card__meta">
-    <span class="ticket-ref">{{ ticket.reference }}</span>
-    <span class="status-pill">{{ requester_status_label(ticket.status) }}</span>
-    {% if ticket.urgent %}
-    <span class="urgent-pill">{{ t("common.urgent") }}</span>
+  <a class="ticket-back-link" href="/app/tickets">← {{ t("base.nav.my_tickets") }}</a>
+  <div class="ticket-header__row">
+    <div>
+      <div class="ticket-card__meta">
+        <span class="ticket-ref">{{ ticket.reference }}</span>
+        <span class="status-pill">{{ requester_status_label(ticket.status) }}</span>
+        {% if ticket.urgent %}<span class="urgent-pill">{{ t("common.urgent") }}</span>{% endif %}
+      </div>
+      <h1>{{ ticket.title }}</h1>
+    </div>
+    {% set actions_enabled = requester_actions_enabled | default(false) %}
+    {% if ticket.status != "resolved" %}
+    <form{% if actions_enabled %} method="post" action="/app/tickets/{{ ticket.reference }}/resolve" data-confirm="{{ t('requester.detail.confirm_resolve') }}"{% else %} aria-disabled="true"{% endif %}>
+      {% if actions_enabled %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+      <button type="{{ 'submit' if actions_enabled else 'button' }}" class="button button--ghost"{% if not actions_enabled %} disabled{% endif %}>{{ t("button.mark_resolved") }}</button>
+    </form>
     {% endif %}
   </div>
-  <h1>{{ ticket.title }}</h1>
 </section>

@@ -1674,13 +1674,14 @@ def _load_web_stack():
     pytest.importorskip("fastapi")
     pytest.importorskip("sqlalchemy")
     from fastapi.testclient import TestClient
-    from app import auth, routes_ops
+    from app import auth, requester_view, routes_ops
     from app.main import create_app
     from shared.db import db_session_dependency
 
     return {
         "TestClient": TestClient,
         "auth": auth,
+        "requester_view": requester_view,
         "routes_ops": routes_ops,
         "create_app": create_app,
         "db_session_dependency": db_session_dependency,
@@ -3541,6 +3542,185 @@ def test_ops_detail_route_marks_ticket_as_read(monkeypatch):
     assert "Software Architect" in response.text
 
 
+def test_admin_requester_preview_is_read_only_and_does_not_mark_ticket_as_viewed(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings()
+    admin = SimpleNamespace(id=uuid.uuid4(), display_name="Admin", role="admin", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="admin-csrf-token")
+    ticket = SimpleNamespace(
+        reference="T-000051",
+        id=uuid.uuid4(),
+        title="Requester-facing ticket",
+        status="waiting_on_user",
+        urgent=True,
+        created_by_user_id=uuid.uuid4(),
+        internal_summary="PRIVATE TICKET FIELD",
+    )
+    attachment_id = uuid.uuid4()
+    timeline = [
+        {
+            "kind": "message",
+            "id": str(uuid.uuid4()),
+            "created_at": datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+            "author_label": "Support Team",
+            "body_html": "<p>PUBLIC REPLY</p>",
+            "attachments": [
+                SimpleNamespace(
+                    id=attachment_id,
+                    original_filename="public-report.pdf",
+                    mime_type="application/pdf",
+                    size_bytes=512,
+                )
+            ],
+        }
+    ]
+    observed = {"view_updates": 0}
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(stack["requester_view"], "build_requester_timeline", lambda *args, **kwargs: timeline)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "upsert_ticket_view",
+        lambda *args, **kwargs: observed.__setitem__("view_updates", observed["view_updates"] + 1),
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_admin_user] = lambda: admin
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
+
+    return_to = "/ops?status=new&urgent=on"
+    with stack["TestClient"](app) as client:
+        response = client.get(
+            f"/ops/tickets/{ticket.reference}/requester-preview",
+            params={"return_to": return_to},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["x-robots-tag"] == "noindex, nofollow"
+    assert "Requester preview — read only" in response.text
+    assert "PUBLIC REPLY" in response.text
+    assert "public-report.pdf" in response.text
+    assert f'/attachments/{attachment_id}' in response.text
+    assert "PRIVATE TICKET FIELD" not in response.text
+    assert f'action="/app/tickets/{ticket.reference}/reply"' not in response.text
+    assert f'action="/app/tickets/{ticket.reference}/resolve"' not in response.text
+    assert "/static/ticket-live.js" not in response.text
+    expected_back_url = stack["routes_ops"]._ops_ticket_detail_path(ticket.reference, return_to)
+    assert f'href="{expected_back_url}"' in response.text
+    assert response.text.count('name="csrf_token"') == 1
+    assert response.text.count(" disabled") >= 4
+    assert observed["view_updates"] == 0
+    assert db.commit_calls == 0
+
+
+def test_requester_detail_template_defaults_preview_capabilities_closed(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings()
+    admin = SimpleNamespace(id=uuid.uuid4(), display_name="Admin", role="admin", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="admin-csrf-token")
+    ticket = SimpleNamespace(
+        reference="T-000053",
+        id=uuid.uuid4(),
+        title="Ticket",
+        status="new",
+        urgent=False,
+    )
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "build_requester_ticket_detail_context",
+        lambda *args, **kwargs: {
+            "ticket": ticket,
+            "timeline": [],
+            "reply_body": "",
+            "interaction_mode": "admin_preview_readonly",
+        },
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_admin_user] = lambda: admin
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        response = client.get(f"/ops/tickets/{ticket.reference}/requester-preview")
+
+    assert response.status_code == 200
+    assert f'action="/app/tickets/{ticket.reference}/reply"' not in response.text
+    assert f'action="/app/tickets/{ticket.reference}/resolve"' not in response.text
+    assert "/static/ticket-live.js" not in response.text
+    assert 'aria-disabled="true"' in response.text
+
+
+@pytest.mark.parametrize("role", ["requester", "dev_ti"])
+def test_non_admin_cannot_access_requester_preview(role):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name=role, role=role, is_active=True)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["auth"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: SimpleNamespace(csrf_token="csrf")
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops/tickets/T-000999/requester-preview")
+
+    assert response.status_code == 403
+    assert db.commit_calls == 0
+
+
+def test_ops_ticket_header_shows_requester_preview_link_only_to_admin():
+    stack = _load_web_stack()
+    template = stack["routes_ops"].templates.get_template("ops_ticket_header.html")
+    ticket = SimpleNamespace(reference="T-000052", title="Ticket", status="new", urgent=False)
+    context = {
+        "ticket": ticket,
+        "route_target_display": {"id": None, "label": "", "kind": None},
+        "pending_draft": None,
+        "creator": None,
+        "assignee": None,
+        "unknown_label": "Unknown",
+        "unassigned_label": "Unassigned",
+        "ops_status_label": lambda value: value,
+        "route_target_kind_label": lambda value: value,
+        "format_datetime_utc": lambda value: value,
+        "t": lambda key, **kwargs: key,
+    }
+
+    requester_preview_url = f"/ops/tickets/{ticket.reference}/requester-preview?return_to=%2Fops%3Fstatus%3Dnew"
+    admin_html = template.render(
+        **context,
+        is_admin_user=True,
+        requester_preview_url=requester_preview_url,
+    )
+    dev_ti_html = template.render(**context, is_admin_user=False)
+
+    assert requester_preview_url in admin_html
+    assert "/requester-preview" not in dev_ti_html
+
+
+def test_requester_preview_path_sanitizes_return_location():
+    stack = _load_web_stack()
+    reference = "T-000054"
+
+    safe_path = stack["routes_ops"]._requester_preview_path(reference, "/ops?status=new&urgent=on")
+    unsafe_path = stack["routes_ops"]._requester_preview_path(reference, "https://attacker.example/ops")
+
+    assert safe_path == (
+        f"/ops/tickets/{reference}/requester-preview"
+        "?return_to=%2Fops%3Fstatus%3Dnew%26urgent%3Don"
+    )
+    assert unsafe_path == f"/ops/tickets/{reference}/requester-preview?return_to=%2Fops%2Fboard"
+
+
 def test_ops_live_state_is_read_only_and_honors_etag(monkeypatch):
     stack = _load_web_stack()
     app = stack["create_app"]()
@@ -3956,6 +4136,14 @@ def test_ops_reply_public_rejects_invalid_forced_route_target(monkeypatch):
     ticket = SimpleNamespace(reference="T-000012S", id=uuid.uuid4())
 
     monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_render_ops_ticket_form_error",
+        lambda *args, **kwargs: stack["routes_ops"].HTMLResponse(
+            "<p role='alert'>Invalid route target</p>",
+            status_code=400,
+        ),
+    )
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
@@ -4010,6 +4198,137 @@ def test_ops_set_ticket_status_ai_triage_triggers_manual_rerun(monkeypatch):
     assert response.headers["location"] == f"/ops/tickets/{ticket.reference}"
     assert observed["next_status"] == "ai_triage"
     assert db.commit_calls == 1
+
+
+def test_ops_set_ticket_status_supports_board_json_and_safe_return_paths(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000012B", id=uuid.uuid4(), status="new")
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+
+    def fake_set_status(db, slack_runtime, ticket, actor, next_status, note=None):
+        ticket.status = next_status
+
+    monkeypatch.setattr(stack["routes_ops"], "set_ticket_status_for_ops", fake_set_status)
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        json_response = client.post(
+            f"/ops/tickets/{ticket.reference}/set-status",
+            headers={"Accept": "application/json"},
+            data={
+                "csrf_token": "csrf-token",
+                "next_status": "waiting_on_user",
+                "return_to": "/ops/board?urgent=on",
+            },
+        )
+        redirect_response = client.post(
+            f"/ops/tickets/{ticket.reference}/set-status",
+            data={
+                "csrf_token": "csrf-token",
+                "next_status": "waiting_on_dev_ti",
+                "return_to": "/ops/board?urgent=on",
+            },
+            follow_redirects=False,
+        )
+        unsafe_response = client.post(
+            f"/ops/tickets/{ticket.reference}/set-status",
+            data={
+                "csrf_token": "csrf-token",
+                "next_status": "resolved",
+                "return_to": "https://attacker.example/ops",
+            },
+            follow_redirects=False,
+        )
+
+    assert json_response.status_code == 200
+    assert json_response.json() == {
+        "ok": True,
+        "reference": ticket.reference,
+        "status": "waiting_on_user",
+    }
+    assert redirect_response.headers["location"] == "/ops/board?urgent=on"
+    assert unsafe_response.headers["location"] == f"/ops/tickets/{ticket.reference}"
+
+
+def test_ops_public_reply_validation_returns_preserved_composer_context_after_csrf(monkeypatch):
+    stack = _load_web_stack()
+    db = _RouteDb()
+    settings = _make_settings()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000012C", id=uuid.uuid4())
+    observed = {}
+
+    async def fake_parse(request, *, settings):
+        return "", "csrf-token", "waiting_on_user", "", []
+
+    monkeypatch.setattr(stack["routes_ops"], "_parse_ops_public_reply_form", fake_parse)
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_render_ops_ticket_form_error",
+        lambda request, **kwargs: observed.update(kwargs) or "rendered-error",
+    )
+
+    result = asyncio.run(
+        stack["routes_ops"].ops_reply_public(
+            ticket.reference,
+            SimpleNamespace(),
+            current_user=ops_user,
+            auth_session=auth_session,
+            settings=settings,
+            db=db,
+        )
+    )
+
+    assert result == "rendered-error"
+    assert observed["ticket"] is ticket
+    assert observed["composer_mode"] == "public"
+    assert observed["public_reply_body"] == ""
+    assert observed["public_reply_next_status"] == "waiting_on_user"
+
+
+def test_ops_internal_note_validation_returns_preserved_composer_context(monkeypatch):
+    stack = _load_web_stack()
+    db = _RouteDb()
+    settings = _make_settings()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000012D", id=uuid.uuid4())
+    observed = {}
+
+    monkeypatch.setattr(stack["routes_ops"], "_load_ops_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_render_ops_ticket_form_error",
+        lambda request, **kwargs: observed.update(kwargs) or "rendered-error",
+    )
+
+    result = stack["routes_ops"].ops_note_internal(
+        ticket.reference,
+        SimpleNamespace(),
+        current_user=ops_user,
+        auth_session=auth_session,
+        settings=settings,
+        csrf_token="csrf-token",
+        body="   ",
+        db=db,
+    )
+
+    assert result == "rendered-error"
+    assert observed["ticket"] is ticket
+    assert observed["composer_mode"] == "internal"
+    assert observed["internal_note_body"] == "   "
 
 
 def test_ops_rerun_ai_allows_forced_specialist_route_target(monkeypatch):
@@ -4571,10 +4890,15 @@ def test_ops_persistent_turn_detail_route_renders_outcomes_and_raw_items(monkeyp
     app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
     app.dependency_overrides[stack["routes_ops"].get_settings] = lambda: settings
 
+    return_to = "/ops/board?urgent=on"
     with stack["TestClient"](app) as client:
-        response = client.get(f"/ops/tickets/{ticket.reference}/persistent-turns/{turn_id}")
+        response = client.get(
+            f"/ops/tickets/{ticket.reference}/persistent-turns/{turn_id}",
+            params={"return_to": return_to},
+        )
 
     assert response.status_code == 200
+    assert stack["routes_ops"]._ops_ticket_detail_path(ticket.reference, return_to) in response.text
     assert translate(locale, "ops.detail.outcome_history") in response.text
     assert translate(locale, "ops.detail.raw_turn_items") in response.text
     assert translate(locale, "ops.detail.steering_receipt_history") in response.text

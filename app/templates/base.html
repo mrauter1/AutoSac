@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}{{ t("brand.name") }}{% endblock %}</title>
     <link rel="stylesheet" href="/static/app.css">
+    {% block page_styles %}{% endblock %}
     <script src="/static/htmx.min.js"></script>
     {% block page_scripts %}{% endblock %}
   </head>
@@ -12,21 +13,23 @@
     <header class="site-header">
       <div class="site-header__inner">
         <a class="brand" href="{% if current_user and is_ops_user %}/ops{% elif current_user %}/app{% else %}/login{% endif %}">{{ t("brand.name") }}</a>
-        <div class="site-header__actions">
+        <details class="site-menu" open>
+          <summary class="site-menu__summary">{{ t("base.menu") }}</summary>
+          <div class="site-header__actions">
           {% if current_user %}
           <nav class="site-nav">
             {% if is_ops_user %}
-            <a href="/ops">{{ t("base.nav.queue") }}</a>
-            <a href="/ops/board">{{ t("base.nav.board") }}</a>
-            <a href="/app/tickets">{{ t("base.nav.my_tickets") }}</a>
-            <a href="/app/tickets/new">{{ t("base.nav.new_ticket") }}</a>
-            <a href="/ops/users">{{ t("base.nav.users") }}</a>
+            <a href="/ops"{% if request.url.path == '/ops' %} aria-current="page"{% endif %}>{{ t("base.nav.queue") }}</a>
+            <a href="/ops/board"{% if request.url.path == '/ops/board' %} aria-current="page"{% endif %}>{{ t("base.nav.board") }}</a>
+            <a href="/app/tickets"{% if request.url.path == '/app/tickets' %} aria-current="page"{% endif %}>{{ t("base.nav.my_tickets") }}</a>
+            <a href="/app/tickets/new"{% if request.url.path == '/app/tickets/new' %} aria-current="page"{% endif %}>{{ t("base.nav.new_ticket") }}</a>
+            <a href="/ops/users"{% if request.url.path == '/ops/users' %} aria-current="page"{% endif %}>{{ t("base.nav.users") }}</a>
             {% if is_admin_user %}
-            <a href="/ops/integrations/slack">{{ t("base.nav.slack") }}</a>
+            <a href="/ops/integrations/slack"{% if request.url.path == '/ops/integrations/slack' %} aria-current="page"{% endif %}>{{ t("base.nav.slack") }}</a>
             {% endif %}
             {% else %}
-            <a href="/app/tickets">{{ t("base.nav.my_tickets") }}</a>
-            <a href="/app/tickets/new">{{ t("base.nav.new_ticket") }}</a>
+            <a href="/app/tickets"{% if request.url.path == '/app/tickets' %} aria-current="page"{% endif %}>{{ t("base.nav.my_tickets") }}</a>
+            <a href="/app/tickets/new"{% if request.url.path == '/app/tickets/new' %} aria-current="page"{% endif %}>{{ t("base.nav.new_ticket") }}</a>
             {% endif %}
           </nav>
           {% endif %}
@@ -43,7 +46,8 @@
             </form>
           </div>
           {% endif %}
-        </div>
+          </div>
+        </details>
       </div>
     </header>
     <main class="page{% block page_class %}{% endblock %}">
@@ -53,6 +57,19 @@
       {% block body %}{% endblock %}
     </main>
     <script>
+      (() => {
+        const menu = document.querySelector(".site-menu");
+        if (!menu) {
+          return;
+        }
+        const mobileMenu = window.matchMedia("(max-width: 720px)");
+        const synchronizeMenu = () => {
+          menu.open = !mobileMenu.matches;
+        };
+        synchronizeMenu();
+        mobileMenu.addEventListener("change", synchronizeMenu);
+      })();
+
       window.addEventListener("load", () => {
         const target = document.querySelector("[data-auto-scroll-target='true']");
         if (!target) {

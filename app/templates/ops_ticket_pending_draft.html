@@ -7,7 +7,7 @@
   >
     <h2>{{ t("ops.detail.pending_ai_draft") }}</h2>
     <div class="message-card__body ops-ticket-detail__rich-text">{{ pending_draft_html | safe }}</div>
-    <form method="post" action="/ops/drafts/{{ pending_draft.id }}/approve-publish" class="stack">
+    <form method="post" action="/ops/drafts/{{ pending_draft.id }}/approve-publish?return_to={{ ops_return_url | default('/ops/board') | urlencode }}" class="stack">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label class="field">
         <span>{{ t("field.next_status") }}</span>
@@ -19,7 +19,7 @@
       </label>
       <button type="submit" class="button">{{ t("button.approve_and_publish") }}</button>
     </form>
-    <form method="post" action="/ops/drafts/{{ pending_draft.id }}/reject">
+    <form method="post" action="/ops/drafts/{{ pending_draft.id }}/reject?return_to={{ ops_return_url | default('/ops/board') | urlencode }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="button button--ghost">{{ t("button.reject_draft") }}</button>
     </form>

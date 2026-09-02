@@ -125,6 +125,7 @@ def build_template_context(
         "current_path": switch_path,
         "t": translator,
         "format_datetime_utc": lambda value: format_datetime_utc(value, resolved_locale),
+        "format_datetime_iso": lambda value: value.isoformat() if callable(getattr(value, "isoformat", None)) else "",
         "requester_status_label": lambda status: requester_status_label(status, resolved_locale),
         "requester_author_label": lambda author_type: requester_author_label(author_type, resolved_locale),
         "requester_role_suffix_label": lambda author_type: requester_role_suffix_label(author_type, resolved_locale),

@@ -1,16 +1,35 @@
 {% set ordered_statuses = ["new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved"] %}
+{% set shown_result_count = result_count | default(rows | default([]) | length) %}
 <div id="ops-results">
-<section class="ops-board">
+{% if shown_result_count == 0 %}
+<section class="board-empty" role="status">
+  <h2>{{ t("ops.rows.empty_heading") }}</h2>
+  <p>{{ t("ops.rows.empty_body") }}</p>
+  {% if active_filter_count | default(0) %}<a class="button button--ghost" href="/ops/board">{{ t("filters.clear_all") }}</a>{% endif %}
+</section>
+{% else %}
+<nav class="board-status-jump" aria-label="{{ t('ops.board.jump_label') }}">
   {% for status in ordered_statuses %}
-  <div class="ops-column">
+  {% if not filters.status or filters.status == status %}
+  <a href="#board-column-{{ status }}">{{ ops_status_label(status) }} <span>{{ grouped_rows[status] | length }}</span></a>
+  {% endif %}
+  {% endfor %}
+</nav>
+<section class="ops-board" aria-label="{{ t('ops.board.heading') }}">
+  {% for status in ordered_statuses %}
+  {% if not filters.status or filters.status == status %}
+  <section id="board-column-{{ status }}" class="ops-column" data-board-column data-status="{{ status }}" aria-labelledby="board-column-title-{{ status }}">
     <div class="ops-column__header">
-      <h2>{{ ops_status_label(status) }}</h2>
-      <span class="ticket-ref">{{ grouped_rows[status] | length }}</span>
+      <div>
+        <h2 id="board-column-title-{{ status }}">{{ ops_status_label(status) }}</h2>
+        <p>{{ t("ops.board.column." ~ status) }}</p>
+      </div>
+      <span class="column-count" aria-label="{{ t('ops.board.ticket_count', count=grouped_rows[status] | length) }}">{{ grouped_rows[status] | length }}</span>
     </div>
     <div class="ops-column__body">
       {% for row in grouped_rows[status] %}
       {% set ticket = row.ticket %}
-      <a class="ticket-card ticket-card--compact" href="/ops/tickets/{{ ticket.reference }}">
+      <article class="ticket-card board-card" data-board-card data-reference="{{ ticket.reference }}" data-status="{{ ticket.status }}">
         <div class="ticket-card__meta">
           <span class="ticket-ref">{{ ticket.reference }}</span>
           {% if ticket.urgent %}
@@ -20,22 +39,53 @@
           <span class="updated-pill">{{ t("common.updated") }}</span>
           {% endif %}
         </div>
-        <h3>{{ ticket.title }}</h3>
-        <p class="muted">{{ row.creator.display_name if row.creator else t("ops.board.unknown_requester") }}</p>
-        {% if row.route_target_display.id %}
-        <p class="muted">{{ row.route_target_display.label }}</p>
-        {% endif %}
-        {% if row.pending_draft %}
-        <p class="muted">{{ t("ops.board.pending_draft_approval") }}</p>
-        {% endif %}
-      </a>
+        <h3 title="{{ ticket.title }}">{{ ticket.title }}</h3>
+        <p class="board-card__requester">{{ row.creator.display_name if row.creator else t("ops.board.unknown_requester") }}</p>
+        <div class="board-card__labels">
+          {% if row.route_target_display.id %}<span class="card-label">{{ row.route_target_display.label }}</span>{% endif %}
+          {% if row.pending_draft %}<span class="card-label card-label--attention">{{ t("ops.board.pending_draft_approval") }}</span>{% endif %}
+        </div>
+        <div class="board-card__footer">
+          <span class="board-card__assignee">{{ row.assignee.display_name if row.assignee else unassigned_label }}</span>
+          <time datetime="{{ format_datetime_iso(ticket.updated_at) }}">{{ format_datetime_utc(ticket.updated_at) }}</time>
+        </div>
+        <div class="board-card__actions">
+          <details class="board-move-menu">
+            <summary class="button button--ghost">{{ t("ops.board.move") }}</summary>
+            <div class="board-move-menu__items">
+              <p>{{ t("ops.board.move_destination") }}</p>
+              {% for destination in status_options %}
+              {% if destination != ticket.status %}
+              <form
+                method="post"
+                action="/ops/tickets/{{ ticket.reference }}/set-status"
+                data-board-move-form
+                {% if destination == "ai_triage" %}data-confirm="{{ t('ops.board.confirm_ai_triage') }}"{% elif destination == "resolved" %}data-confirm="{{ t('ops.board.confirm_resolved') }}"{% endif %}
+              >
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="next_status" value="{{ destination }}">
+                <input type="hidden" name="return_to" value="{{ ticket_return_to | default('/ops/board') }}">
+                <button type="submit" class="board-move-menu__item">
+                  {{ ops_status_label(destination) }}
+                  {% if destination == "ai_triage" %}<span class="visually-hidden"> — {{ t("ops.board.ai_triage_effect") }}</span>{% elif destination == "resolved" %}<span class="visually-hidden"> — {{ t("ops.board.resolved_effect") }}</span>{% endif %}
+                </button>
+              </form>
+              {% endif %}
+              {% endfor %}
+            </div>
+          </details>
+          <a class="button board-card__open" href="/ops/tickets/{{ ticket.reference }}?return_to={{ ticket_return_to | default('/ops/board') | urlencode }}">{{ t("ops.board.open") }}</a>
+        </div>
+      </article>
       {% else %}
-      <div class="panel panel--quiet">
-        <p class="muted">{{ t("ops.board.no_tickets") }}</p>
+      <div class="ops-column__empty">
+        <p>{{ t("ops.board.empty_column", status=ops_status_label(status)) }}</p>
       </div>
       {% endfor %}
     </div>
-  </div>
+  </section>
+  {% endif %}
   {% endfor %}
 </section>
+{% endif %}
 </div>

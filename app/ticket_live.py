@@ -25,6 +25,7 @@ class TicketLiveState:
     delayed: bool
     version: str
     content_version: str
+    run_key: str | None
 
 
 def _canonical_value(value: object) -> object:
@@ -150,6 +151,7 @@ def build_ticket_live_state(
         delayed=delayed,
         version=state_version,
         content_version=_version_for(*content_values),
+        run_key=_version_for("ticket-live-run", audience, run_id)[:16] if run_id is not None else None,
     )
 
 

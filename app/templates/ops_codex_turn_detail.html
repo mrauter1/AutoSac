@@ -17,7 +17,7 @@
     <h1>{{ persistent_turn.specialist_display_name }}</h1>
     <p class="muted ops-ticket-detail__subtitle">
       {{ t("ops.detail.turn_detail_subtitle") }}
-      · <a href="/ops/tickets/{{ ticket.reference }}">{{ t("button.back_to_ticket") }}</a>
+      · <a href="{{ ops_ticket_url | default('/ops/tickets/' ~ ticket.reference) }}">{{ t("button.back_to_ticket") }}</a>
     </p>
   </section>
 

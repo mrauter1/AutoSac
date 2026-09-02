@@ -3,7 +3,7 @@
 <section class="ticket-list stack">
   {% for row in rows %}
   {% set ticket = row.ticket %}
-  <a class="ticket-card" href="/ops/tickets/{{ ticket.reference }}">
+  <a class="ticket-card" href="/ops/tickets/{{ ticket.reference }}?return_to={{ ticket_return_to | default('/ops') | urlencode }}">
     <div class="ticket-card__meta">
       <span class="ticket-ref">{{ ticket.reference }}</span>
       <span class="status-pill">{{ ops_status_label(ticket.status) }}</span>

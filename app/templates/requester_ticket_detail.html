@@ -1,43 +1,56 @@
 {% extends "base.html" %}
+{% set actions_enabled = requester_actions_enabled | default(false) %}
+{% set live_updates_enabled = requester_live_updates_enabled | default(false) %}
 
 {% block title %}{{ ticket.reference }} | {{ t("brand.name") }}{% endblock %}
-{% block page_class %} page--workspace{% endblock %}
-{% block page_scripts %}<script src="/static/ticket-live.js" defer></script>{% endblock %}
+{% block page_class %} page--workspace page--ticket{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/ticket.css">{% endblock %}
+{% block page_scripts %}{% if live_updates_enabled %}<script src="/static/ticket-live.js" defer></script>{% endif %}<script src="/static/ticket.js" defer></script>{% endblock %}
 
 {% block body %}
 <div class="workspace-view requester-detail">
-  {% include "requester_ticket_header.html" %}
-  {% if live_state is defined %}
-  {% include "ticket_live_status.html" %}
+  {% if interaction_mode == "admin_preview_readonly" %}
+  <section class="requester-preview-banner" role="status">
+    <div>
+      <strong>{{ t("requester.preview.heading") }}</strong>
+      <p>{{ t("requester.preview.body") }}</p>
+    </div>
+    <a class="button button--ghost" href="{{ ops_ticket_url | default('/ops/tickets/' ~ ticket.reference) }}">{{ t("button.back_to_ticket") }}</a>
+  </section>
   {% endif %}
-
-  <section class="requester-detail__layout">
+  {% include "requester_ticket_header.html" %}
+  <section class="requester-detail__layout ticket-conversation-layout">
     {% include "requester_ticket_ledger.html" %}
-
-    <aside class="requester-detail__sidebar stack">
-      <section id="ticket-composer-region" class="panel stack">
+    {% if live_state is defined %}{% include "ticket_live_status.html" %}{% endif %}
+    <section id="ticket-composer-region" class="ticket-composer stack" data-ticket-composer>
         <h2>{{ t("requester.detail.reply_heading") }}</h2>
-        <form method="post" action="/app/tickets/{{ ticket.reference }}/reply" enctype="multipart/form-data" class="stack">
+        <form
+          {% if actions_enabled %}
+          method="post"
+          action="/app/tickets/{{ ticket.reference }}/reply"
+          enctype="multipart/form-data"
+          {% else %}
+          aria-disabled="true"
+          {% endif %}
+          class="stack"
+        >
+          {% if actions_enabled %}
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {% endif %}
           <label class="field">
             <span>{{ t("field.message") }}</span>
-            <textarea name="body" rows="6" required>{{ reply_body or '' }}</textarea>
+            <small>{{ t("requester.detail.public_audience") }}</small>
+            <textarea name="body" rows="6"{% if actions_enabled %} required{% else %} disabled{% endif %}>{{ reply_body or '' }}</textarea>
           </label>
+          {% if error %}<p class="field-error" role="alert">{{ error }}</p>{% endif %}
           <label class="field">
             <span>{{ t("field.attachments") }}</span>
-            <input type="file" name="attachments" multiple>
+            <input type="file" name="attachments" multiple{% if not actions_enabled %} disabled{% endif %}>
             <small>{{ t("hint.attachments_limit") }}</small>
           </label>
-          <button type="submit" class="button">{{ t("button.send_reply") }}</button>
+          <button type="{{ 'submit' if actions_enabled else 'button' }}" class="button" data-submitting-label="{{ t('button.sending') }}"{% if not actions_enabled %} disabled{% endif %}>{{ t("button.send_reply") }}</button>
         </form>
-        {% if ticket.status != "resolved" %}
-        <form method="post" action="/app/tickets/{{ ticket.reference }}/resolve">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit" class="button button--ghost">{{ t("button.mark_resolved") }}</button>
-        </form>
-        {% endif %}
-      </section>
-    </aside>
+    </section>
   </section>
 </div>
 {% endblock %}
