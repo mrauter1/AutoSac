@@ -241,6 +241,17 @@
   line-height: 1.35;
 }
 
+.board-column__create {
+  min-height: 2.25rem;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.8rem;
+  text-decoration: none;
+}
+
+.ops-column > .board-column__create {
+  width: 100%;
+}
+
 .ops-column__body {
   gap: 0.55rem;
 }

@@ -1,38 +1,40 @@
 {% extends "base.html" %}
 
 {% block title %}{{ t("base.nav.new_ticket") }} | {{ t("brand.name") }}{% endblock %}
-{% block page_class %} page--workspace{% endblock %}
+{% block page_class %} page--workspace page--ticket page--ticket-create{% if is_ops_user %} page--ops-ticket-create{% else %} page--requester-ticket-create{% endif %}{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/ticket.css">{% endblock %}
 
 {% block body %}
-<div class="workspace-view requester-new">
-  <section class="page-header page-header--card page-header--stack">
-    <p class="eyebrow">{{ t("eyebrow.requester_view") }}</p>
+<div class="workspace-view ticket-create{% if is_ops_user %} ticket-create--ops{% else %} ticket-create--requester{% endif %}">
+  <header class="ticket-create__header">
+    <a class="ticket-back-link" href="{{ ticket_list_path }}">← {% if is_ops_user %}{{ t("ops.detail.back_to_work") }}{% else %}{{ t("base.nav.my_tickets") }}{% endif %}</a>
+    <p class="eyebrow">{% if is_ops_user %}{{ t("eyebrow.dev_ti_view") }}{% else %}{{ t("eyebrow.requester_view") }}{% endif %}</p>
     <h1>{{ t("requester.new.heading") }}</h1>
     <p class="muted">{{ t("requester.new.subtitle") }}</p>
-  </section>
+  </header>
 
-  <section class="panel">
-    <form method="post" action="/app/tickets" enctype="multipart/form-data" class="stack">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label class="field">
-        <span>{{ t("field.short_title") }}</span>
-        <input type="text" name="title" value="{{ form_title or '' }}" maxlength="120">
-      </label>
-      <label class="field">
-        <span>{{ t("field.description") }}</span>
-        <textarea name="description" rows="8" required>{{ form_description or '' }}</textarea>
-      </label>
-      <label class="field">
+  <form method="post" action="{{ ticket_create_action }}" enctype="multipart/form-data" class="ticket-create__form stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field">
+      <span>{{ t("field.short_title") }}</span>
+      <input type="text" name="title" value="{{ form_title or '' }}" maxlength="120">
+    </label>
+    <label class="field ticket-create__description-field">
+      <span>{{ t("field.description") }}</span>
+      <textarea name="description" rows="8" required>{{ form_description or '' }}</textarea>
+    </label>
+    <div class="ticket-create__footer">
+      <label class="field ticket-create__attachment-field">
         <span>{{ t("field.attachments") }}</span>
-        <input type="file" name="attachments" multiple>
-        <small>{{ t("hint.attachments_limit") }}</small>
+        <input type="file" name="attachments" multiple aria-describedby="ticket-create-attachment-hint">
+        <small id="ticket-create-attachment-hint">{{ t("hint.attachments_limit") }}</small>
       </label>
       <label class="checkbox">
         <input type="checkbox" name="urgent" {% if form_urgent %}checked{% endif %}>
         <span>{{ t("field.mark_urgent") }}</span>
       </label>
       <button type="submit" class="button">{{ t("button.create_ticket") }}</button>
-    </form>
-  </section>
+    </div>
+  </form>
 </div>
 {% endblock %}

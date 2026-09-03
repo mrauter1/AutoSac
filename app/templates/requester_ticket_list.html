@@ -10,7 +10,7 @@
       <p class="eyebrow">{{ t("eyebrow.requester_view") }}</p>
       <h1>{{ t("requester.list.heading") }}</h1>
     </div>
-    <a class="button" href="/app/tickets/new">{{ t("button.open_ticket") }}</a>
+    <a class="button" href="{{ new_ticket_path }}">{{ t("button.open_ticket") }}</a>
   </section>
 
   {% if tickets %}
@@ -37,7 +37,7 @@
   <section class="panel">
     <h2>{{ t("requester.list.empty_heading") }}</h2>
     <p class="muted">{{ t("requester.list.empty_body") }}</p>
-    <a class="button" href="/app/tickets/new">{{ t("button.create_first_ticket") }}</a>
+    <a class="button" href="{{ new_ticket_path }}">{{ t("button.create_first_ticket") }}</a>
   </section>
   {% endif %}
 </div>

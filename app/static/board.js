@@ -7,6 +7,7 @@
     constructor(root) {
       this.root = root;
       this.draggedCard = null;
+      this.dragDidStart = false;
       this.pointerStartedOnControl = false;
       this.submitting = false;
       this.announcer = root.querySelector("[data-board-announcer]");
@@ -15,6 +16,7 @@
       this.refreshLink = root.querySelector("[data-board-refresh]");
       this.onSubmit = this.onSubmit.bind(this);
       this.onPointerDown = this.onPointerDown.bind(this);
+      this.onClick = this.onClick.bind(this);
       this.onDragStart = this.onDragStart.bind(this);
       this.onDragEnd = this.onDragEnd.bind(this);
       this.onDragOver = this.onDragOver.bind(this);
@@ -27,6 +29,7 @@
     start() {
       this.root.addEventListener("submit", this.onSubmit);
       this.root.addEventListener("pointerdown", this.onPointerDown);
+      this.root.addEventListener("click", this.onClick);
       this.root.addEventListener("dragstart", this.onDragStart);
       this.root.addEventListener("dragend", this.onDragEnd);
       this.root.addEventListener("dragover", this.onDragOver);
@@ -105,7 +108,47 @@
     }
 
     onPointerDown(event) {
-      this.pointerStartedOnControl = Boolean(event.target.closest("a, button, input, summary, select, textarea"));
+      this.dragDidStart = false;
+      this.pointerStartedOnControl = this.isInteractiveTarget(event.target);
+    }
+
+    isInteractiveTarget(target) {
+      return Boolean(
+        target
+        && typeof target.closest === "function"
+        && target.closest("a, button, input, select, textarea, summary, label, form, details, [contenteditable='true']")
+      );
+    }
+
+    onClick(event) {
+      const target = event.target;
+      const card = target && typeof target.closest === "function"
+        ? target.closest("[data-board-card]")
+        : null;
+      if (!card || this.isInteractiveTarget(target)) {
+        return;
+      }
+      if (
+        event.defaultPrevented
+        || event.button !== 0
+        || event.metaKey
+        || event.ctrlKey
+        || event.shiftKey
+        || event.altKey
+        || this.isCardLocked(card)
+        || this.submitting
+      ) {
+        return;
+      }
+      if (this.dragDidStart) {
+        event.preventDefault();
+        this.dragDidStart = false;
+        return;
+      }
+      const openLink = card.querySelector(".board-card__open[href]");
+      if (openLink) {
+        window.location.assign(openLink.href);
+      }
     }
 
     onDragStart(event) {
@@ -114,6 +157,7 @@
         event.preventDefault();
         return;
       }
+      this.dragDidStart = true;
       this.draggedCard = card;
       card.classList.add("board-card--dragging");
       event.dataTransfer.effectAllowed = "move";

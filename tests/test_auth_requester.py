@@ -919,7 +919,8 @@ def test_protected_html_get_redirects_to_login_with_safe_next(monkeypatch):
 
 
 @pytest.mark.parametrize("role", ["dev_ti", "admin"])
-def test_ops_roles_can_open_new_ticket_page(role):
+@pytest.mark.parametrize("path", ["/ops/tickets/new", "/app/tickets/new"])
+def test_ops_roles_can_open_new_ticket_page(role, path):
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
@@ -931,15 +932,51 @@ def test_ops_roles_can_open_new_ticket_page(role):
     app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
 
     with stack["TestClient"](app) as client:
-        response = client.get("/app/tickets/new")
+        response = client.get(path)
 
     assert response.status_code == 200
-    assert '<form method="post" action="/app/tickets"' in response.text
+    assert '<form method="post" action="/ops/tickets"' in response.text
+    assert 'class="workspace-view ticket-create ticket-create--ops"' in response.text
+    assert 'href="/ops/board"' in response.text
+    assert db.commit_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("role", "expected_path", "unexpected_path"),
+    [
+        ("requester", "/app/tickets/new", "/ops/tickets/new"),
+        ("dev_ti", "/ops/tickets/new", "/app/tickets/new"),
+    ],
+)
+def test_ticket_list_uses_role_appropriate_new_ticket_link(
+    monkeypatch,
+    role,
+    expected_path,
+    unexpected_path,
+):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name="Test User", role=role, is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    monkeypatch.setattr(stack["routes_requester"], "_ticket_list_rows", lambda db, *, requester_id: [])
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_requester"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/app/tickets")
+
+    assert response.status_code == 200
+    assert response.text.count(f'href="{expected_path}"') == 3
+    assert f'href="{unexpected_path}"' not in response.text
     assert db.commit_calls == 1
 
 
 @pytest.mark.parametrize("role", ["dev_ti", "admin"])
-def test_ops_roles_can_submit_new_ticket_through_requester_flow(monkeypatch, tmp_path, role):
+@pytest.mark.parametrize("path", ["/ops/tickets", "/app/tickets"])
+def test_ops_roles_can_submit_new_ticket_through_shared_flow(monkeypatch, tmp_path, role, path):
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
@@ -974,7 +1011,7 @@ def test_ops_roles_can_submit_new_ticket_through_requester_flow(monkeypatch, tmp
     app.dependency_overrides[stack["routes_requester"].get_settings] = lambda: settings
 
     with stack["TestClient"](app) as client:
-        response = client.post("/app/tickets", data={"csrf_token": "csrf-token"}, follow_redirects=False)
+        response = client.post(path, data={"csrf_token": "csrf-token"}, follow_redirects=False)
 
     assert response.status_code == 303
     assert response.headers["location"] == "/ops/tickets/T-000321"
@@ -986,6 +1023,94 @@ def test_ops_roles_can_submit_new_ticket_through_requester_flow(monkeypatch, tmp
     assert captured["urgent"] is True
     assert captured["attachments"] == []
     assert db.commit_calls == 1
+
+
+def test_requester_new_ticket_stays_in_requester_namespace_and_cannot_use_ops_alias(tmp_path):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester", is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_requester"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_requester"].get_settings] = lambda: _make_settings(tmp_path)
+
+    with stack["TestClient"](app) as client:
+        requester_page = client.get("/app/tickets/new")
+        ops_page = client.get("/ops/tickets/new", follow_redirects=False)
+        ops_submit = client.post("/ops/tickets", data={"csrf_token": "csrf-token"}, follow_redirects=False)
+
+    assert requester_page.status_code == 200
+    assert '<form method="post" action="/app/tickets"' in requester_page.text
+    assert 'class="workspace-view ticket-create ticket-create--requester"' in requester_page.text
+    assert 'href="/app/tickets"' in requester_page.text
+    assert ops_page.status_code == 403
+    assert ops_submit.status_code == 403
+    assert db.commit_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("role", "path", "expected_action", "expected_variant", "expected_back_path"),
+    [
+        ("requester", "/app/tickets", "/app/tickets", "requester", "/app/tickets"),
+        ("dev_ti", "/ops/tickets", "/ops/tickets", "ops", "/ops/board"),
+    ],
+)
+def test_new_ticket_validation_error_preserves_values_and_role_appropriate_surface(
+    monkeypatch,
+    tmp_path,
+    role,
+    path,
+    expected_action,
+    expected_variant,
+    expected_back_path,
+):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    current_user = SimpleNamespace(id=uuid.uuid4(), display_name="Test User", role=role, is_active=True)
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    async def fake_parse_ticket_create_form(request, *, settings):
+        return "Printer <offline>", "", True, "csrf-token", []
+
+    monkeypatch.setattr(stack["routes_requester"], "_parse_ticket_create_form", fake_parse_ticket_create_form)
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_requester"].get_current_user] = lambda: current_user
+    app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_requester"].get_settings] = lambda: _make_settings(tmp_path)
+
+    with stack["TestClient"](app) as client:
+        response = client.post(path, data={"csrf_token": "csrf-token"}, follow_redirects=False)
+
+    assert response.status_code == 400
+    assert f'<form method="post" action="{expected_action}"' in response.text
+    assert f'class="workspace-view ticket-create ticket-create--{expected_variant}"' in response.text
+    assert f'href="{expected_back_path}"' in response.text
+    assert 'value="Printer &lt;offline&gt;"' in response.text
+    assert 'name="urgent" checked' in response.text
+    assert "Description is required." in response.text
+    assert db.commit_calls == 0
+
+
+def test_new_ticket_route_aliases_share_handlers_and_precede_ops_reference_route():
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+
+    def route(path, method):
+        return next(item for item in app.routes if getattr(item, "path", None) == path and method in item.methods)
+
+    requester_get = route("/app/tickets/new", "GET")
+    ops_get = route("/ops/tickets/new", "GET")
+    requester_post = route("/app/tickets", "POST")
+    ops_post = route("/ops/tickets", "POST")
+    ops_detail = route("/ops/tickets/{reference}", "GET")
+
+    assert requester_get.endpoint is ops_get.endpoint
+    assert requester_post.endpoint is ops_post.endpoint
+    assert app.routes.index(ops_get) < app.routes.index(ops_detail)
 
 
 def test_protected_htmx_get_keeps_401_instead_of_redirect():

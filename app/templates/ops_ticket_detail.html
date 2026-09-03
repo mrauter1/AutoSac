@@ -7,128 +7,138 @@
 
 {% block body %}
 <div class="ops-ticket-detail">
-  {% include "ops_ticket_header.html" %}
-
   <section class="ops-ticket-detail__layout">
     <div class="ops-ticket-detail__main stack">
-      {% include "ops_ticket_ledger.html" %}
-      {% if live_state is defined %}{% include "ticket_live_status.html" %}{% endif %}
+      {% include "ops_ticket_header.html" %}
 
-      <section id="ticket-composer-region" class="ticket-composer ops-ticket-detail__main-section" data-ticket-composer data-initial-mode="{{ composer_mode }}">
-        <div class="ticket-composer__header">
-          <h2>{{ t("ops.detail.respond") }}</h2>
-          <div class="ticket-composer-modes" aria-label="{{ t('ops.detail.response_type') }}">
-            <button type="button" data-composer-mode-button="public" aria-pressed="{{ 'true' if composer_mode == 'public' else 'false' }}">{{ t("ops.detail.public_reply") }}</button>
-            <button type="button" data-composer-mode-button="internal" aria-pressed="{{ 'true' if composer_mode == 'internal' else 'false' }}">{{ t("ops.detail.internal_note") }}</button>
+      <div class="ops-ticket-detail__conversation stack">
+        {% include "ops_ticket_ledger.html" %}
+        {% if live_state is defined %}{% include "ticket_live_status.html" %}{% endif %}
+
+        <section id="ticket-composer-region" class="ticket-composer ops-ticket-detail__main-section" data-ticket-composer data-initial-mode="{{ composer_mode }}">
+          <div class="ticket-composer__header">
+            <h2>{{ t("ops.detail.respond") }}</h2>
+            <div class="ticket-composer-modes" aria-label="{{ t('ops.detail.response_type') }}">
+              <button type="button" data-composer-mode-button="public" aria-pressed="{{ 'true' if composer_mode == 'public' else 'false' }}">{{ t("ops.detail.public_reply") }}</button>
+              <button type="button" data-composer-mode-button="internal" aria-pressed="{{ 'true' if composer_mode == 'internal' else 'false' }}">{{ t("ops.detail.internal_note") }}</button>
+            </div>
           </div>
-        </div>
 
-        <section class="ticket-composer__mode" data-composer-mode-panel="public" aria-label="{{ t('ops.detail.public_reply') }}">
-          <p class="audience-guidance audience-guidance--public">{{ t("ops.detail.public_audience") }}</p>
-          <form method="post" action="/ops/tickets/{{ ticket.reference }}/reply-public?return_to={{ ops_return_url | default('/ops/board') | urlencode }}" enctype="multipart/form-data" class="stack">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <label class="field">
-              <span>{{ t("field.reply") }}</span>
-              <textarea name="body" rows="6" required>{{ public_reply_body }}</textarea>
-            </label>
-            {% if composer_error and composer_mode == "public" %}<p class="field-error" role="alert">{{ composer_error }}</p>{% endif %}
-            <label class="field">
-              <span>{{ t("field.attachments") }}</span>
-              <input type="file" name="attachments" multiple>
-              <small>{{ t("hint.attachments_limit") }}</small>
-            </label>
-            <p class="composer-consequence">{{ t("ops.detail.after_send", status=ops_status_label(default_public_reply_status)) }}</p>
-            <details class="composer-advanced">
-              <summary>{{ t("ops.detail.advanced_options") }}</summary>
-              <div class="ops-ticket-detail__reply-controls">
-                <label class="field">
-                  <span>{{ t("field.next_status") }}</span>
-                  <select name="next_status">
-                    {% for value in public_reply_status_options %}
-                    <option value="{{ value }}" {% if value == default_public_reply_status %}selected{% endif %}>{{ ops_status_label(value) }}</option>
-                    {% endfor %}
-                  </select>
+          <section class="ticket-composer__mode" data-composer-mode-panel="public" aria-label="{{ t('ops.detail.public_reply') }}">
+            <form method="post" action="/ops/tickets/{{ ticket.reference }}/reply-public?return_to={{ ops_return_url | default('/ops/board') | urlencode }}" enctype="multipart/form-data" class="stack ticket-composer__form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <label class="field ticket-composer__message-field">
+                <span class="visually-hidden">{{ t("field.reply") }}</span>
+                <textarea name="body" rows="3" placeholder="{{ t('ops.detail.public_reply_placeholder') }}" required>{{ public_reply_body }}</textarea>
+              </label>
+              {% if composer_error and composer_mode == "public" %}<p class="field-error" role="alert">{{ composer_error }}</p>{% endif %}
+              <details class="composer-advanced">
+                <summary>{{ t("ops.detail.advanced_options") }}</summary>
+                <div class="ops-ticket-detail__reply-controls">
+                  <label class="field">
+                    <span>{{ t("field.next_status") }}</span>
+                    <select name="next_status">
+                      {% for value in public_reply_status_options %}
+                      <option value="{{ value }}" {% if value == default_public_reply_status %}selected{% endif %}>{{ ops_status_label(value) }}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>{{ t("field.route_ai_to_specialist") }}</span>
+                    <select name="forced_route_target_id">
+                      <option value="">{{ t("button.use_normal_routing") }}</option>
+                      {% for option in rerun_specialist_options %}
+                      <option value="{{ option.route_target_id }}"{% if public_reply_route_target_id == option.route_target_id %} selected{% endif %}>{{ option.route_target_label }}{% if option.specialist_display_name != option.route_target_label %} · {{ option.specialist_display_name }}{% endif %}</option>
+                      {% endfor %}
+                    </select>
+                  </label>
+                </div>
+              </details>
+              <div class="ticket-composer__footer">
+                <label class="field ticket-composer__attachment-field">
+                  <span class="visually-hidden">{{ t("field.attachments") }}</span>
+                  <input type="file" name="attachments" multiple aria-describedby="ops-public-attachment-hint">
+                  <small id="ops-public-attachment-hint" class="visually-hidden">{{ t("hint.attachments_limit") }}</small>
                 </label>
-                <label class="field">
-                  <span>{{ t("field.route_ai_to_specialist") }}</span>
-                  <select name="forced_route_target_id">
-                    <option value="">{{ t("button.use_normal_routing") }}</option>
-                    {% for option in rerun_specialist_options %}
-                    <option value="{{ option.route_target_id }}"{% if public_reply_route_target_id == option.route_target_id %} selected{% endif %}>{{ option.route_target_label }}{% if option.specialist_display_name != option.route_target_label %} · {{ option.specialist_display_name }}{% endif %}</option>
-                    {% endfor %}
-                  </select>
-                </label>
+                <p class="composer-consequence ticket-composer__footer-note">{{ t("ops.detail.after_send", status=ops_status_label(default_public_reply_status)) }}</p>
+                <button type="submit" class="button" data-submitting-label="{{ t('button.sending') }}">{{ t("button.send_public_reply") }}</button>
               </div>
-            </details>
-            <button type="submit" class="button" data-submitting-label="{{ t('button.sending') }}">{{ t("button.send_public_reply") }}</button>
-          </form>
-        </section>
+            </form>
+          </section>
 
-        <section class="ticket-composer__mode ticket-composer__mode--internal" data-composer-mode-panel="internal" aria-label="{{ t('ops.detail.internal_note') }}">
-          <p class="audience-guidance audience-guidance--internal">{{ t("ops.detail.internal_audience") }}</p>
-          <form method="post" action="/ops/tickets/{{ ticket.reference }}/note-internal?return_to={{ ops_return_url | default('/ops/board') | urlencode }}" class="stack">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <label class="field">
-              <span>{{ t("field.note") }}</span>
-              <textarea name="body" rows="6" required>{{ internal_note_body }}</textarea>
-            </label>
-            {% if composer_error and composer_mode == "internal" %}<p class="field-error" role="alert">{{ composer_error }}</p>{% endif %}
-            <button type="submit" class="button" data-submitting-label="{{ t('button.sending') }}">{{ t("button.add_internal_note") }}</button>
-          </form>
+          <section class="ticket-composer__mode ticket-composer__mode--internal" data-composer-mode-panel="internal" aria-label="{{ t('ops.detail.internal_note') }}">
+            <form method="post" action="/ops/tickets/{{ ticket.reference }}/note-internal?return_to={{ ops_return_url | default('/ops/board') | urlencode }}" class="stack ticket-composer__form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <label class="field ticket-composer__message-field">
+                <span class="visually-hidden">{{ t("field.note") }}</span>
+                <textarea name="body" rows="3" placeholder="{{ t('ops.detail.internal_note_placeholder') }}" required>{{ internal_note_body }}</textarea>
+              </label>
+              {% if composer_error and composer_mode == "internal" %}<p class="field-error" role="alert">{{ composer_error }}</p>{% endif %}
+              <div class="ticket-composer__footer">
+                <p class="audience-guidance audience-guidance--internal ticket-composer__footer-note">{{ t("ops.detail.internal_audience") }}</p>
+                <button type="submit" class="button" data-submitting-label="{{ t('button.sending') }}">{{ t("button.add_internal_note") }}</button>
+              </div>
+            </form>
+          </section>
         </section>
-      </section>
+      </div>
     </div>
 
-    <aside class="ops-ticket-detail__sidebar stack" aria-label="{{ t('ops.detail.inspector') }}">
-      {% include "ops_ticket_pending_draft.html" %}
+    <aside class="ops-ticket-detail__sidebar" aria-label="{{ t('ops.detail.inspector') }}">
+      <details class="ops-ticket-inspector" open>
+        <summary>{{ t("ops.detail.inspector_toggle") }}</summary>
+        <div class="ops-ticket-inspector__content stack">
+          {% include "ops_ticket_pending_draft.html" %}
 
-      <section class="panel stack ops-ticket-detail__sidebar-section ops-ticket-controls">
-        <h2>{{ t("ops.detail.ticket_controls") }}</h2>
-        <form method="post" action="/ops/tickets/{{ ticket.reference }}/assign?return_to={{ ops_return_url | default('/ops/board') | urlencode }}" class="stack stack--tight">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <label class="field">
-            <span>{{ t("field.assigned_to") }}</span>
-            <select name="assigned_to_user_id">
-              <option value="">{{ t("common.unassigned") }}</option>
-              {% for user in ops_users %}
-              <option value="{{ user.id }}" {% if assignee and user.id == assignee.id %}selected{% endif %}>{{ user.display_name }}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <button type="submit" class="button">{{ t("button.save_assignment") }}</button>
-        </form>
-        <form method="post" action="/ops/tickets/{{ ticket.reference }}/set-status?return_to={{ ops_return_url | default('/ops/board') | urlencode }}" class="stack stack--tight" data-status-form data-confirm-ai="{{ t('ops.board.confirm_ai_triage') }}" data-confirm-resolved="{{ t('ops.board.confirm_resolved') }}">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <label class="field">
-            <span>{{ t("field.status") }}</span>
-            <select name="next_status">
-              {% for value in status_options %}
-              <option value="{{ value }}" {% if value == ticket.status %}selected{% endif %}>{{ ops_status_label(value) }}</option>
-              {% endfor %}
-            </select>
-            <small>{{ t("ops.detail.status_consequence_hint") }}</small>
-          </label>
-          <button type="submit" class="button button--ghost">{{ t("button.update_status") }}</button>
-        </form>
-      </section>
+          <section class="panel stack ops-ticket-detail__sidebar-section ops-ticket-controls">
+            <h2>{{ t("ops.detail.ticket_controls") }}</h2>
+            <form method="post" action="/ops/tickets/{{ ticket.reference }}/assign?return_to={{ ops_return_url | default('/ops/board') | urlencode }}" class="stack stack--tight">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <label class="field">
+                <span>{{ t("field.assigned_to") }}</span>
+                <select name="assigned_to_user_id">
+                  <option value="">{{ t("common.unassigned") }}</option>
+                  {% for user in ops_users %}
+                  <option value="{{ user.id }}" {% if assignee and user.id == assignee.id %}selected{% endif %}>{{ user.display_name }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <button type="submit" class="button">{{ t("button.save_assignment") }}</button>
+            </form>
+            <form method="post" action="/ops/tickets/{{ ticket.reference }}/set-status?return_to={{ ops_return_url | default('/ops/board') | urlencode }}" class="stack stack--tight" data-status-form data-confirm-ai="{{ t('ops.board.confirm_ai_triage') }}" data-confirm-resolved="{{ t('ops.board.confirm_resolved') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <label class="field">
+                <span>{{ t("field.status") }}</span>
+                <select name="next_status">
+                  {% for value in status_options %}
+                  <option value="{{ value }}" {% if value == ticket.status %}selected{% endif %}>{{ ops_status_label(value) }}</option>
+                  {% endfor %}
+                </select>
+                <small>{{ t("ops.detail.status_consequence_hint") }}</small>
+              </label>
+              <button type="submit" class="button button--ghost">{{ t("button.update_status") }}</button>
+            </form>
+          </section>
 
-      {% include "ops_ticket_analysis.html" %}
+          {% include "ops_ticket_analysis.html" %}
 
-      <details class="panel ops-ticket-detail__sidebar-section inspector-action">
-        <summary>{{ t("button.rerun_ai") }}</summary>
-        <form method="post" action="/ops/tickets/{{ ticket.reference }}/rerun-ai?return_to={{ ops_return_url | default('/ops/board') | urlencode }}" class="stack stack--tight">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <label class="field">
-            <span>{{ t("field.route_ai_to_specialist") }}</span>
-            <select name="forced_route_target_id">
-              <option value="">{{ t("button.use_normal_routing") }}</option>
-              {% for option in rerun_specialist_options %}
-              <option value="{{ option.route_target_id }}">{{ option.route_target_label }}{% if option.specialist_display_name != option.route_target_label %} · {{ option.specialist_display_name }}{% endif %}</option>
-              {% endfor %}
-            </select>
-          </label>
-          <button type="submit" class="button">{{ t("button.rerun_ai") }}</button>
-        </form>
+          <details class="panel ops-ticket-detail__sidebar-section inspector-action">
+            <summary>{{ t("button.rerun_ai") }}</summary>
+            <form method="post" action="/ops/tickets/{{ ticket.reference }}/rerun-ai?return_to={{ ops_return_url | default('/ops/board') | urlencode }}" class="stack stack--tight">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <label class="field">
+                <span>{{ t("field.route_ai_to_specialist") }}</span>
+                <select name="forced_route_target_id">
+                  <option value="">{{ t("button.use_normal_routing") }}</option>
+                  {% for option in rerun_specialist_options %}
+                  <option value="{{ option.route_target_id }}">{{ option.route_target_label }}{% if option.specialist_display_name != option.route_target_label %} · {{ option.specialist_display_name }}{% endif %}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <button type="submit" class="button">{{ t("button.rerun_ai") }}</button>
+            </form>
+          </details>
+        </div>
       </details>
     </aside>
   </section>

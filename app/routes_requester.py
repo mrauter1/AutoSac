@@ -10,7 +10,13 @@ from sqlalchemy.orm import Session
 from starlette.formparsers import MultiPartException
 
 from app.i18n import get_translator, resolve_ui_locale
-from app.auth import get_current_user, get_required_auth_session, require_requester_user, validate_csrf_token
+from app.auth import (
+    get_current_user,
+    get_required_auth_session,
+    require_ops_user,
+    require_requester_user,
+    validate_csrf_token,
+)
 from app.requester_view import build_requester_ticket_detail_context
 from app.ticket_live import if_none_match_matches, load_ticket_live_state, ticket_live_representation_etag
 from app.ui import build_template_context, is_htmx_request, templates
@@ -40,6 +46,20 @@ def _ticket_detail_path(*, current_user: User, reference: str) -> str:
     if can_access_all_tickets(current_user):
         return f"/ops/tickets/{reference}"
     return f"/app/tickets/{reference}"
+
+
+def _ticket_creation_paths(*, current_user: User) -> dict[str, str]:
+    if can_access_all_tickets(current_user):
+        return {
+            "new_ticket_path": "/ops/tickets/new",
+            "ticket_create_action": "/ops/tickets",
+            "ticket_list_path": "/ops/board",
+        }
+    return {
+        "new_ticket_path": "/app/tickets/new",
+        "ticket_create_action": "/app/tickets",
+        "ticket_list_path": "/app/tickets",
+    }
 
 
 def _load_requester_ticket_or_404(db: Session, *, reference: str, requester_id) -> Ticket:
@@ -130,6 +150,7 @@ def requester_ticket_list(
     db: Session = Depends(db_session_dependency),
 ):
     db.commit()
+    creation_paths = _ticket_creation_paths(current_user=current_user)
     return templates.TemplateResponse(
         request,
         "requester_ticket_list.html",
@@ -137,12 +158,21 @@ def requester_ticket_list(
             request=request,
             current_user=current_user,
             auth_session=auth_session,
-            extra={"tickets": _ticket_list_rows(db, requester_id=current_user.id)},
+            extra={
+                "tickets": _ticket_list_rows(db, requester_id=current_user.id),
+                "new_ticket_path": creation_paths["new_ticket_path"],
+            },
         ),
     )
 
 
-@router.get("/app/tickets/new", response_class=HTMLResponse)
+@router.get(
+    "/ops/tickets/new",
+    response_class=HTMLResponse,
+    name="ops_ticket_new_page",
+    dependencies=[Depends(require_ops_user)],
+)
+@router.get("/app/tickets/new", response_class=HTMLResponse, name="requester_ticket_new_page")
 def requester_ticket_new_page(
     request: Request,
     current_user: User = Depends(require_requester_user),
@@ -150,14 +180,22 @@ def requester_ticket_new_page(
     db: Session = Depends(db_session_dependency),
 ):
     db.commit()
+    creation_paths = _ticket_creation_paths(current_user=current_user)
     return templates.TemplateResponse(
         request,
         "requester_ticket_new.html",
-        build_template_context(request=request, current_user=current_user, auth_session=auth_session),
+        build_template_context(
+            request=request,
+            current_user=current_user,
+            auth_session=auth_session,
+            extra=creation_paths,
+            ui_switch_path=creation_paths["new_ticket_path"],
+        ),
     )
 
 
-@router.post("/app/tickets")
+@router.post("/ops/tickets", name="ops_ticket_create", dependencies=[Depends(require_ops_user)])
+@router.post("/app/tickets", name="requester_ticket_create")
 async def requester_ticket_create(
     request: Request,
     current_user: User = Depends(require_requester_user),
@@ -168,6 +206,7 @@ async def requester_ticket_create(
     title = ""
     description = ""
     urgent = False
+    creation_paths = _ticket_creation_paths(current_user=current_user)
     try:
         title, description, urgent, csrf_token, upload_attachments = await _parse_ticket_create_form(
             request,
@@ -187,12 +226,13 @@ async def requester_ticket_create(
                 current_user=current_user,
                 auth_session=auth_session,
                 extra={
+                    **creation_paths,
                     "error": str(exc),
                     "form_title": title,
                     "form_description": description,
                     "form_urgent": urgent,
                 },
-                ui_switch_path="/app/tickets/new",
+                ui_switch_path=creation_paths["new_ticket_path"],
             ),
             status_code=status.HTTP_400_BAD_REQUEST,
         )

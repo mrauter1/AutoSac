@@ -4,6 +4,8 @@ This report documents the implemented architecture of the current working tree. 
 
 For a visual, searchable, and interactive entry point, open the dependency-free [Architecture Atlas](index.html) directly in a browser.
 
+The standalone [Ops ticket layout options](ops-ticket-layout-options.html) is a non-runtime comparison artifact for four bounded conversation layouts with a collapsible inspector on either side. Option A is marked as the selected production treatment.
+
 ## Report map
 
 | Document | Contents |

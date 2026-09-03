@@ -22,7 +22,7 @@
             <a href="/ops"{% if request.url.path == '/ops' %} aria-current="page"{% endif %}>{{ t("base.nav.queue") }}</a>
             <a href="/ops/board"{% if request.url.path == '/ops/board' %} aria-current="page"{% endif %}>{{ t("base.nav.board") }}</a>
             <a href="/app/tickets"{% if request.url.path == '/app/tickets' %} aria-current="page"{% endif %}>{{ t("base.nav.my_tickets") }}</a>
-            <a href="/app/tickets/new"{% if request.url.path == '/app/tickets/new' %} aria-current="page"{% endif %}>{{ t("base.nav.new_ticket") }}</a>
+            <a href="/ops/tickets/new"{% if request.url.path in ['/ops/tickets/new', '/app/tickets/new'] %} aria-current="page"{% endif %}>{{ t("base.nav.new_ticket") }}</a>
             <a href="/ops/users"{% if request.url.path == '/ops/users' %} aria-current="page"{% endif %}>{{ t("base.nav.users") }}</a>
             {% if is_admin_user %}
             <a href="/ops/integrations/slack"{% if request.url.path == '/ops/integrations/slack' %} aria-current="page"{% endif %}>{{ t("base.nav.slack") }}</a>
@@ -62,7 +62,7 @@
         if (!menu) {
           return;
         }
-        const mobileMenu = window.matchMedia("(max-width: 720px)");
+        const mobileMenu = window.matchMedia("(max-width: 959px)");
         const synchronizeMenu = () => {
           menu.open = !mobileMenu.matches;
         };

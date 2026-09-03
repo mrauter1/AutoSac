@@ -14,7 +14,7 @@ AutoSac does not need a frontend rewrite. Its server-rendered FastAPI/Jinja/HTMX
 The recommended direction is:
 
 - Turn the Board into a full-width, horizontally navigable workspace with compact, information-dense cards, persistent filters, and safe cross-status movement. Every drag operation must also be available through an ordinary **Move** command that works with keyboard, touch, and JavaScript disabled.
-- Turn ticket pages into centered conversations with a natural, sticky composer and an in-thread AI-working placeholder. Keep operator metadata and analysis in a secondary inspector rather than interleaving them with the conversation.
+- Turn ticket pages into conversation-focused workspaces with a natural composer and an in-thread AI-working placeholder. Keep operator metadata and analysis in a compact, collapsible secondary inspector rather than interleaving them with the conversation.
 - Make audience boundaries visible: public, internal, AI, and system entries must differ through words, icons/shapes, position, and color—not color alone. Requesters must continue to receive a server-side public-only projection.
 - Preserve the existing live-update controller and fragment contracts. It must continue to update the header, ledger, analysis, and pending draft without replacing the composer, stealing focus, or moving a reader who is reviewing older content.
 - Introduce a small token layer and page-specific CSS/JavaScript, but no SPA, component framework, design-system dependency, WebSocket infrastructure, or database migration.
@@ -137,17 +137,17 @@ NN/g's usability heuristics support visibility of system status, recognition ove
 Use a stable shell with three conceptual layers:
 
 ```text
-┌ slim application navigation ┐ ┌──────────────── work surface ────────────────┐
-│ AutoSac                     │ │ page identity / context / primary actions    │
-│ My tickets or Ops           │ │                                               │
-│ Board                       │ │ board OR centered conversation + inspector   │
-│ Admin (authorized only)     │ │                                               │
-│ locale / account            │ │                                               │
-└─────────────────────────────┘ └───────────────────────────────────────────────┘
+┌──────────────── compact application header ─────────────────┐
+│ AutoSac · destinations · authorized admin · locale · account │
+└───────────────────────────────────────────────────────────────┘
+┌────────────────────── work surface ──────────────────────────┐
+│ page identity / context / primary actions                    │
+│ Board OR conversation + collapsible inspector                │
+└───────────────────────────────────────────────────────────────┘
 ```
 
-- Desktop: a slim left rail (about 208–224px) and a fluid work surface. Board pages use the full work-surface width; ticket conversation width remains constrained.
-- Tablet: compact rail or top-level menu, conversation plus collapsible inspector.
+- Desktop: a compact horizontal header (about 48px) and a fluid work surface. Board pages use the full work-surface width; ticket messages retain a readable line-length ceiling.
+- Tablet: compact top-level menu, conversation plus collapsible inspector.
 - Mobile: one page header with an accessible navigation disclosure; one content column. Do not make the whole page horizontally scroll. The Board alone may use horizontal column scrolling because it is intrinsically two-dimensional; the List view remains the reflow-safe alternative.
 - Mark the current destination with visible styling and `aria-current="page"`.
 - Preserve URL query parameters when switching Board/List or returning from a ticket. The URL remains the shareable source of filter truth.
@@ -254,10 +254,10 @@ Retain current filters: route, assignee, urgent, unassigned, created by me, need
 
 Use one document scroll, not nested scrolling regions.
 
-- Center conversation content at approximately 760–820px for readable line length.
+- Keep requester conversations near 760–820px. In Ops, bound the main column at 920px and center the ledger, live status, and composer in one 800px conversation rail. Ordinary Ops messages use at most 78% of that rail.
 - Use open vertical spacing instead of wrapping every event in a large panel.
-- Put the composer immediately after the conversation and make it sticky near the viewport bottom when space permits. Add `scroll-padding-bottom` so focused content is never hidden behind it.
-- Keep the ticket title/reference, status, and primary navigation in a compact sticky header. Secondary metadata moves to an inspector/details region.
+- Put the composer immediately after the conversation in normal document flow. Preserve draft focus and scroll position when live fragments update around it.
+- Keep the ticket title/reference, status, and primary navigation in a compact header in normal document flow. Secondary metadata moves to an inspector/details region.
 
 ### 9.2 Event hierarchy
 
@@ -307,16 +307,19 @@ Ticket header: Back to my tickets · T-000059 · status · Resolve
 ### 11.1 Desktop composition
 
 ```text
-Back to Board · T-000059 · status · assignee · primary actions
-┌──────────── centered conversation ────────────┐ ┌─ inspector ───────┐
-│ public/internal/system chronological ledger   │ │ metadata          │
-│ provisional AI turn / new update              │ │ AI analysis       │
-│ unified-looking audience composer             │ │ pending draft     │
-└───────────────────────────────────────────────┘ │ advanced controls │
-                                                  └───────────────────┘
+┌──────────────── main: max 920px ──────────────┐ ┌─ inspector: 268px ┐
+│ Back · T-000059 · status · primary actions    │ │ metadata          │
+│ ┌──────── conversation rail: max 800px ─────┐ │ │ AI analysis       │
+│ │ anchored public/internal/system ledger     │ │ │ pending draft     │
+│ │ provisional AI turn / new update           │ │ │ advanced controls │
+│ │ unified-looking audience composer          │ │ └───────────────────┘
+│ └────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────┘
 ```
 
-The inspector is sticky on wide screens, enters normal document flow below the conversation on narrow screens, and uses native disclosures for secondary sections. Do not start with a complex off-canvas drawer.
+The selected desktop treatment is Option A from the standalone layout study: AI and support messages share a stable left edge, requester messages share a stable right edge, and internal/provisional entries span the conversation rail. The ticket status header occupies the full main column above that rail, so it always has exactly the same width as the main workspace.
+
+The inspector remains a narrow, default-open native disclosure on the right and may be sticky below the compact application header on wide screens. Closing it reduces its grid column to the summary control. It enters normal document flow at full width below the conversation on narrow screens. Its live-updated content remains mounted while closed. Do not add a complex off-canvas drawer, resizing handle, or persisted UI state.
 
 Priority in the inspector:
 
@@ -409,8 +412,8 @@ Guidance:
 
 Test layout behavior at content-driven breakpoints rather than targeting devices:
 
-- **Wide (about 1200px+):** left navigation, fluid Board; conversation plus inspector.
-- **Medium (about 768–1199px):** compact navigation; inspector enters collapsible flow or narrower side region.
+- **Wide (960px+):** compact horizontal top navigation, fluid Board; conversation plus collapsible inspector.
+- **Medium (about 768–959px):** compact disclosure navigation; inspector enters full-width normal flow below the conversation.
 - **Narrow (below about 768px):** one-column tickets; Board horizontal workspace plus status jump; List alternative prominent.
 - **Reflow audit:** 320 CSS px and 400% zoom. Only the Board canvas may require two-dimensional scrolling; card contents and ticket pages must reflow.
 

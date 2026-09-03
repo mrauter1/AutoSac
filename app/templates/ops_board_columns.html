@@ -5,6 +5,7 @@
 <section class="board-empty" role="status">
   <h2>{{ t("ops.rows.empty_heading") }}</h2>
   <p>{{ t("ops.rows.empty_body") }}</p>
+  <a class="button board-column__create" href="/ops/tickets/new">{{ t("button.open_ticket") }}</a>
   {% if active_filter_count | default(0) %}<a class="button button--ghost" href="/ops/board">{{ t("filters.clear_all") }}</a>{% endif %}
 </section>
 {% else %}
@@ -26,6 +27,9 @@
       </div>
       <span class="column-count" aria-label="{{ t('ops.board.ticket_count', count=grouped_rows[status] | length) }}">{{ grouped_rows[status] | length }}</span>
     </div>
+    {% if status == "new" %}
+    <a class="button board-column__create" href="/ops/tickets/new">{{ t("button.open_ticket") }}</a>
+    {% endif %}
     <div class="ops-column__body">
       {% for row in grouped_rows[status] %}
       {% set ticket = row.ticket %}

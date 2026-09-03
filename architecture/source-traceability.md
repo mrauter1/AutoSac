@@ -49,6 +49,7 @@
 ### Operations/admin surface
 
 - `GET /ops`, `GET /ops/board`
+- `GET /ops/tickets/new`, `POST /ops/tickets`
 - `GET /ops/tickets/{reference}`
 - `POST /ops/tickets/{reference}/assign`
 - `POST /ops/tickets/{reference}/set-status`
@@ -63,6 +64,10 @@
 - `POST /ops/users/{user_id}/set-active`
 - `GET|POST /ops/integrations/slack`
 - `POST /ops/integrations/slack/disconnect`
+
+The requester and Ops new-ticket endpoints are role-appropriate aliases over
+the same creation handler, template, validation, attachment, and transaction
+workflow. Successful creation redirects to the matching ticket-detail surface.
 
 `shared/contracts.APP_ROUTES` contains the original core route contract but does not list newer user-management, Slack-management, or locale endpoints. The route decorators are the authoritative current surface.
 
