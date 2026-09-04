@@ -36,6 +36,7 @@
         >
           {% if actions_enabled %}
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="return_to" value="{{ requester_return_to | default('/app/tickets') }}">
           {% endif %}
           <label class="field">
             <span>{{ t("field.message") }}</span>

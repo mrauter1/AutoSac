@@ -1,0 +1,64 @@
+<div id="requester-ticket-index-results">
+  <div class="ticket-index__summary">
+    <span role="status" aria-live="polite">{{ t("filters.result_count", count=result_count) }}</span>
+    {% if filter_chips %}
+    <div class="filter-chips" aria-label="{{ t('filters.active') }}">
+      {% for chip in filter_chips %}
+      <a class="filter-chip" href="{{ chip.remaining_url }}">
+        {% if chip.key == "q" %}{{ t("filters.search") }}: {{ chip.value }}
+        {% elif chip.key == "state" %}{{ t("requester.filters.state." ~ chip.value) }}
+        {% elif chip.key == "updated_since_viewed" %}{{ t("filters.updated_since_viewed") }}
+        {% endif %}
+        <span aria-hidden="true">×</span><span class="visually-hidden">{{ t("filters.remove") }}</span>
+      </a>
+      {% endfor %}
+      <a class="filter-chip filter-chip--clear" href="/app/tickets">{{ t("filters.clear_all") }}</a>
+    </div>
+    {% endif %}
+  </div>
+
+  {% if tickets %}
+  <div class="ticket-index__columns ticket-index__columns--requester" aria-hidden="true">
+    <span>{{ t("ticket_index.column.ticket") }}</span>
+    <span>{{ t("ticket_index.column.state") }}</span>
+    <span>{{ t("ticket_index.column.updated") }}</span>
+  </div>
+  <ul class="ticket-index__list">
+    {% for row in tickets %}
+    {% set ticket = row.ticket %}
+    <li>
+      <a class="ticket-index-row ticket-index-row--requester" href="/app/tickets/{{ ticket.reference }}?return_to={{ requester_list_url | urlencode }}">
+        <span class="ticket-index-row__primary">
+          <span class="ticket-ref">{{ ticket.reference }}</span>
+          <strong>{{ ticket.title }}</strong>
+          <span class="ticket-index-row__badges">
+            {% if ticket.urgent %}<span class="urgent-pill">{{ t("common.urgent") }}</span>{% endif %}
+            {% if row.updated_for_user %}<span class="updated-pill">{{ t("common.updated") }}</span>{% endif %}
+          </span>
+        </span>
+        <span class="ticket-index-row__state">
+          <span class="ticket-index-row__mobile-label">{{ t("ticket_index.column.state") }}</span>
+          <span class="status-pill">{{ requester_status_label(ticket.status) }}</span>
+        </span>
+        <time class="ticket-index-row__updated" datetime="{{ format_datetime_iso(ticket.updated_at) }}">
+          <span class="ticket-index-row__mobile-label">{{ t("ticket_index.column.updated") }}</span>
+          {{ format_datetime_utc(ticket.updated_at) }}
+        </time>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% elif active_filter_count %}
+  <section class="ticket-index__empty" role="status">
+    <h2>{{ t("requester.list.no_match_heading") }}</h2>
+    <p>{{ t("requester.list.no_match_body") }}</p>
+    <a class="button button--ghost" href="/app/tickets">{{ t("button.reset") }}</a>
+  </section>
+  {% else %}
+  <section class="ticket-index__empty" role="status">
+    <h2>{{ t("requester.list.empty_heading") }}</h2>
+    <p>{{ t("requester.list.empty_body") }}</p>
+    <a class="button" href="{{ new_ticket_path }}">{{ t("button.create_first_ticket") }}</a>
+  </section>
+  {% endif %}
+</div>

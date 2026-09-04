@@ -960,7 +960,21 @@ def test_ticket_list_uses_role_appropriate_new_ticket_link(
     current_user = SimpleNamespace(id=uuid.uuid4(), display_name="Test User", role=role, is_active=True)
     auth_session = SimpleNamespace(csrf_token="csrf-token")
 
-    monkeypatch.setattr(stack["routes_requester"], "_ticket_list_rows", lambda db, *, requester_id: [])
+    monkeypatch.setattr(
+        stack["routes_requester"],
+        "_requester_list_context",
+        lambda db, *, requester_id, filters: {
+            "tickets": [],
+            "result_count": 0,
+            "filters": filters,
+            "state_options": (),
+            "sort_options": ("updated_desc",),
+            "filter_chips": [],
+            "active_filter_count": 0,
+            "has_query_state": False,
+            "requester_list_url": "/app/tickets",
+        },
+    )
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_requester"].get_current_user] = lambda: current_user
     app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
@@ -1213,7 +1227,21 @@ def test_requester_list_route_does_not_mark_ticket_as_read(monkeypatch):
     auth_session = SimpleNamespace(csrf_token="csrf-token")
     observed = {"view_updates": 0}
 
-    monkeypatch.setattr(stack["routes_requester"], "_ticket_list_rows", lambda db, requester_id: [])
+    monkeypatch.setattr(
+        stack["routes_requester"],
+        "_requester_list_context",
+        lambda db, requester_id, filters: {
+            "tickets": [],
+            "result_count": 0,
+            "filters": filters,
+            "state_options": (),
+            "sort_options": ("updated_desc",),
+            "filter_chips": [],
+            "active_filter_count": 0,
+            "has_query_state": False,
+            "requester_list_url": "/app/tickets",
+        },
+    )
     monkeypatch.setattr(
         stack["routes_requester"],
         "upsert_ticket_view",
@@ -1229,6 +1257,157 @@ def test_requester_list_route_does_not_mark_ticket_as_read(monkeypatch):
 
     assert response.status_code == 200
     assert observed["view_updates"] == 0
+
+
+def test_requester_list_htmx_returns_only_results_fragment(monkeypatch):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+
+    monkeypatch.setattr(
+        stack["routes_requester"],
+        "_requester_list_context",
+        lambda db, requester_id, filters: {
+            "tickets": [],
+            "result_count": 0,
+            "filters": filters,
+            "state_options": ("open", "waiting_on_user", "resolved"),
+            "sort_options": ("updated_desc",),
+            "filter_chips": [],
+            "active_filter_count": 0,
+            "has_query_state": False,
+            "requester_list_url": "/app/tickets",
+        },
+    )
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: requester
+    app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        full = client.get("/app/tickets")
+        fragment = client.get("/app/tickets?sort=updated_desc", headers={"HX-Request": "true"})
+        canonical_redirect = client.get(
+            "/app/tickets?q=&sort=updated_desc",
+            follow_redirects=False,
+        )
+
+    assert full.status_code == 200
+    assert "<html" in full.text
+    assert 'id="requester-ticket-index-results"' in full.text
+    assert fragment.status_code == 200
+    assert "<html" not in fragment.text
+    assert 'id="requester-ticket-index-results"' in fragment.text
+    assert fragment.headers["hx-push-url"] == "/app/tickets"
+    assert canonical_redirect.status_code == 303
+    assert canonical_redirect.headers["location"] == "/app/tickets"
+
+
+def test_requester_detail_and_reply_error_preserve_safe_list_return(monkeypatch, tmp_path):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings(tmp_path)
+    requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(
+        reference="T-000088",
+        id=uuid.uuid4(),
+        title="Printer issue",
+        status="waiting_on_user",
+        urgent=False,
+    )
+
+    def detail_context(*args, **kwargs):
+        return {
+            "ticket": ticket,
+            "timeline": [],
+            "auto_scroll_message_id": None,
+            "reply_body": kwargs.get("reply_body", ""),
+            "interaction_mode": "live",
+            "requester_actions_enabled": True,
+            "requester_live_updates_enabled": True,
+            "live_audience": "requester",
+            "live_state_url": f"/app/tickets/{ticket.reference}/live-state",
+            "live_detail_url": f"/app/tickets/{ticket.reference}",
+            "live_state": SimpleNamespace(
+                active=False,
+                started_at=None,
+                content_version="content-v1",
+            ),
+        }
+
+    async def empty_reply(request, *, settings):
+        return "", "csrf-token", "/app/tickets?q=printer&sort=created_asc", []
+
+    monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(stack["routes_requester"], "build_requester_ticket_detail_context", detail_context)
+    monkeypatch.setattr(stack["routes_requester"], "_parse_requester_message_form", empty_reply)
+    monkeypatch.setattr(stack["routes_requester"], "upsert_ticket_view", lambda *args, **kwargs: None)
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: requester
+    app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_requester"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        detail = client.get(
+            f"/app/tickets/{ticket.reference}",
+            params={"return_to": "/app/tickets?q=printer&sort=created_asc"},
+        )
+        invalid_reply = client.post(
+            f"/app/tickets/{ticket.reference}/reply",
+            data={"csrf_token": "csrf-token"},
+            follow_redirects=False,
+        )
+
+    for response in (detail, invalid_reply):
+        assert response.status_code in {200, 400}
+        assert 'href="/app/tickets?q=printer&amp;sort=created_asc"' in response.text
+        assert 'name="return_to" value="/app/tickets?q=printer&amp;sort=created_asc"' in response.text
+        assert (
+            f'data-detail-url="/app/tickets/{ticket.reference}?return_to=%2Fapp%2Ftickets%3Fq%3Dprinter%26sort%3Dcreated_asc"'
+            in response.text
+        )
+
+
+def test_requester_mutations_redirect_with_sanitized_list_return(monkeypatch, tmp_path):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    settings = _make_settings(tmp_path)
+    requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    ticket = SimpleNamespace(reference="T-000089", id=uuid.uuid4(), title="Ticket", status="waiting_on_user", urgent=False)
+
+    async def valid_reply(request, *, settings):
+        return "Details", "csrf-token", "/app/tickets?state=open&sort=created_asc", []
+
+    monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
+    monkeypatch.setattr(stack["routes_requester"], "_parse_requester_message_form", valid_reply)
+    monkeypatch.setattr(stack["routes_requester"], "build_slack_runtime_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack["routes_requester"], "add_requester_reply", lambda *args, **kwargs: (None, [], None))
+    monkeypatch.setattr(stack["routes_requester"], "resolve_ticket_for_requester", lambda *args, **kwargs: None)
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: requester
+    app.dependency_overrides[stack["routes_requester"].get_required_auth_session] = lambda: auth_session
+    app.dependency_overrides[stack["routes_requester"].get_settings] = lambda: settings
+
+    with stack["TestClient"](app) as client:
+        reply = client.post(f"/app/tickets/{ticket.reference}/reply", follow_redirects=False)
+        resolve = client.post(
+            f"/app/tickets/{ticket.reference}/resolve",
+            data={
+                "csrf_token": "csrf-token",
+                "return_to": "https://evil.example/app/tickets?state=open",
+            },
+            follow_redirects=False,
+        )
+
+    assert reply.headers["location"] == (
+        f"/app/tickets/{ticket.reference}?return_to=%2Fapp%2Ftickets%3Fstate%3Dopen%26sort%3Dcreated_asc"
+    )
+    assert resolve.headers["location"] == f"/app/tickets/{ticket.reference}?return_to=%2Fapp%2Ftickets"
 
 
 def test_requester_detail_route_marks_ticket_as_read(monkeypatch):

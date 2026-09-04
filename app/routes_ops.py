@@ -43,6 +43,13 @@ from app.ticket_live import (
     load_ticket_live_state,
     ticket_live_representation_etag,
 )
+from app.ticket_index import (
+    COMMON_TICKET_SORTS,
+    DEFAULT_TICKET_SORT,
+    common_ticket_order_clauses,
+    escaped_ilike_pattern,
+    normalize_ticket_sort,
+)
 from app.ui import build_template_context, is_htmx_request, templates
 from app.uploads import (
     UploadValidationError,
@@ -107,6 +114,7 @@ router = APIRouter()
 _OPS_DRAFT_REPLY_STATUSES = ("waiting_on_user", "waiting_on_dev_ti", "resolved")
 _OPS_PUBLIC_REPLY_STATUSES = ("ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")
 _OPS_FILTERABLE_STATUSES = ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")
+_OPS_SORTS = COMMON_TICKET_SORTS | {"urgent_first"}
 _MANAGEABLE_USER_ROLES = ("requester", "dev_ti")
 _OPS_FILTER_QUERY_KEYS = frozenset(
     {
@@ -119,6 +127,7 @@ _OPS_FILTER_QUERY_KEYS = frozenset(
         "created_by_me",
         "needs_approval",
         "updated_since_viewed",
+        "sort",
     }
 )
 _OPS_RETURN_PATHS = frozenset({"/ops", "/ops/board"})
@@ -160,10 +169,17 @@ def _filter_query_items(filters: dict[str, object]) -> list[tuple[str, str]]:
         value = str(filters.get(key, "")).strip()
         if value:
             items.append((key, value))
-    for key in ("urgent", "unassigned_only", "created_by_me", "needs_approval", "updated_since_viewed"):
+    for key in ("urgent", "created_by_me", "needs_approval", "updated_since_viewed"):
         if filters.get(key):
             items.append((key, "on"))
+    sort_key = normalize_ticket_sort(str(filters.get("sort", "")), allowed=_OPS_SORTS)
+    if sort_key != DEFAULT_TICKET_SORT:
+        items.append(("sort", sort_key))
     return items
+
+
+def _active_filter_query_items(filters: dict[str, object]) -> list[tuple[str, str]]:
+    return [(key, value) for key, value in _filter_query_items(filters) if key != "sort"]
 
 
 def _ops_view_url(path: str, filters: dict[str, object]) -> str:
@@ -173,7 +189,7 @@ def _ops_view_url(path: str, filters: dict[str, object]) -> str:
 
 def _filter_chips(filters: dict[str, object]) -> list[dict[str, str]]:
     chips: list[dict[str, str]] = []
-    for key, value in _filter_query_items(filters):
+    for key, value in _active_filter_query_items(filters):
         without_key = dict(filters)
         without_key[key] = False if isinstance(filters.get(key), bool) else ""
         chips.append(
@@ -195,11 +211,35 @@ def _sanitize_ops_return_to(value: str | None, *, default: str = "/ops/board") -
         return default
     if len(parsed.query) > 1024:
         return default
-    items = parse_qsl(parsed.query, keep_blank_values=False)
+    items = parse_qsl(parsed.query, keep_blank_values=True)
     keys = [key for key, _ in items]
     if len(keys) != len(set(keys)) or any(key not in _OPS_FILTER_QUERY_KEYS for key in keys):
         return default
-    query = urlencode(items)
+    raw = dict(items)
+    if len(raw.get("q", "")) > 120:
+        return default
+    if raw.get("status", "") and raw["status"] not in _OPS_FILTERABLE_STATUSES:
+        return default
+    if raw.get("sort", DEFAULT_TICKET_SORT) not in _OPS_SORTS:
+        return default
+    for key in ("urgent", "unassigned_only", "created_by_me", "needs_approval", "updated_since_viewed"):
+        if key in raw and raw[key] not in {"on", "true", "1", "yes"}:
+            return default
+    assigned_to = raw.get("assigned_to", "").strip()
+    if not assigned_to and _parse_bool(raw.get("unassigned_only")):
+        assigned_to = "unassigned"
+    normalized = {
+        "q": raw.get("q", "").strip(),
+        "status": raw.get("status", ""),
+        "route_target_id": raw.get("route_target_id", "").strip(),
+        "assigned_to": assigned_to,
+        "urgent": _parse_bool(raw.get("urgent")),
+        "created_by_me": _parse_bool(raw.get("created_by_me")),
+        "needs_approval": _parse_bool(raw.get("needs_approval")),
+        "updated_since_viewed": _parse_bool(raw.get("updated_since_viewed")),
+        "sort": normalize_ticket_sort(raw.get("sort"), allowed=_OPS_SORTS),
+    }
+    query = urlencode(_filter_query_items(normalized))
     return f"{parsed.path}?{query}" if query else parsed.path
 
 
@@ -994,28 +1034,32 @@ def _run_slack_auth_test(*, bot_token: str, timeout_seconds: int):
 
 def _read_filters(request: Request) -> dict[str, object]:
     query = request.query_params
+    assigned_to = query.get("assigned_to", "").strip()
+    if not assigned_to and _parse_bool(query.get("unassigned_only")):
+        assigned_to = "unassigned"
+    status_filter = query.get("status", "").strip()
     return {
         "q": query.get("q", "").strip()[:120],
-        "status": query.get("status", "").strip(),
+        "status": status_filter if status_filter in _OPS_FILTERABLE_STATUSES else "",
         "route_target_id": query.get("route_target_id", "").strip(),
-        "assigned_to": query.get("assigned_to", "").strip(),
+        "assigned_to": assigned_to,
         "urgent": _parse_bool(query.get("urgent")),
-        "unassigned_only": _parse_bool(query.get("unassigned_only")),
         "created_by_me": _parse_bool(query.get("created_by_me")),
         "needs_approval": _parse_bool(query.get("needs_approval")),
         "updated_since_viewed": _parse_bool(query.get("updated_since_viewed")),
+        "sort": normalize_ticket_sort(query.get("sort"), allowed=_OPS_SORTS),
     }
 
 
 def _load_filtered_ticket_rows(db: Session, *, current_user: User, filters: dict[str, object]) -> list[dict[str, object]]:
-    statement = select(Ticket).order_by(Ticket.updated_at.desc())
+    statement = select(Ticket)
     search_filter = str(filters["q"])
     status_filter = str(filters["status"])
     route_target_filter = str(filters["route_target_id"])
     assigned_to_filter = str(filters["assigned_to"])
+    sort_key = normalize_ticket_sort(str(filters.get("sort", "")), allowed=_OPS_SORTS)
     if search_filter:
-        escaped_search = search_filter.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        pattern = f"%{escaped_search}%"
+        pattern = escaped_ilike_pattern(search_filter)
         statement = statement.where(
             or_(
                 Ticket.reference.ilike(pattern, escape="\\"),
@@ -1028,8 +1072,6 @@ def _load_filtered_ticket_rows(db: Session, *, current_user: User, filters: dict
         statement = statement.where(Ticket.route_target_id == route_target_filter)
     if filters["urgent"]:
         statement = statement.where(Ticket.urgent.is_(True))
-    if filters["unassigned_only"]:
-        statement = statement.where(Ticket.assigned_to_user_id.is_(None))
     if filters["created_by_me"]:
         statement = statement.where(Ticket.created_by_user_id == current_user.id)
     if assigned_to_filter:
@@ -1040,6 +1082,15 @@ def _load_filtered_ticket_rows(db: Session, *, current_user: User, filters: dict
                 statement = statement.where(Ticket.assigned_to_user_id == uuid.UUID(assigned_to_filter))
             except ValueError:
                 return []
+
+    if sort_key == "urgent_first":
+        statement = statement.order_by(
+            Ticket.urgent.desc(),
+            Ticket.updated_at.desc(),
+            Ticket.reference_num.desc(),
+        )
+    else:
+        statement = statement.order_by(*common_ticket_order_clauses(sort_key))
 
     tickets = list(db.execute(statement).scalars())
     if not tickets:
@@ -1095,14 +1146,24 @@ def _group_ticket_rows(rows: list[dict[str, object]]) -> dict[str, list[dict[str
     return groups
 
 
-def _ops_filter_context(db: Session, *, current_user: User, filters: dict[str, object]) -> dict[str, object]:
+def _ops_filter_context(
+    db: Session,
+    *,
+    current_user: User,
+    filters: dict[str, object],
+    ui_locale: str = DEFAULT_UI_LOCALE,
+) -> dict[str, object]:
     rows = _load_filtered_ticket_rows(db, current_user=current_user, filters=filters)
     ops_users = _load_ops_users(db)
     route_target_options = _ops_route_target_options()
     board_url = _ops_view_url("/ops/board", filters)
     list_url = _ops_view_url("/ops", filters)
     filter_chips = _filter_chips(filters)
+    translator = get_translator(ui_locale)
+    ops_users.sort(key=lambda user: (user.id != current_user.id, user.display_name.casefold()))
     user_labels = {str(user.id): user.display_name for user in ops_users}
+    user_labels[str(current_user.id)] = translator("common.me")
+    user_labels["unassigned"] = translator("common.unassigned")
     route_labels = {option["id"]: option["label"] for option in route_target_options}
     for chip in filter_chips:
         if chip["key"] == "assigned_to":
@@ -1113,11 +1174,20 @@ def _ops_filter_context(db: Session, *, current_user: User, filters: dict[str, o
         "filters": filters,
         "ops_users": ops_users,
         "status_options": _OPS_FILTERABLE_STATUSES,
+        "sort_options": (
+            "updated_desc",
+            "updated_asc",
+            "created_desc",
+            "created_asc",
+            "urgent_first",
+        ),
         "route_target_options": route_target_options,
         "rows": rows,
         "grouped_rows": _group_ticket_rows(rows),
         "result_count": len(rows),
-        "active_filter_count": len(_filter_query_items(filters)),
+        "active_filter_count": len(_active_filter_query_items(filters)),
+        "secondary_filter_count": sum(bool(filters.get(key)) for key in ("route_target_id", "created_by_me")),
+        "has_query_state": bool(_filter_query_items(filters)),
         "filter_chips": filter_chips,
         "board_url": board_url,
         "list_url": list_url,
@@ -1541,24 +1611,32 @@ def ops_ticket_list(
     db: Session = Depends(db_session_dependency),
 ):
     filters = _read_filters(request)
+    canonical_url = _ops_view_url("/ops", filters)
+    if not is_htmx_request(request) and request.url.query != urlsplit(canonical_url).query:
+        return RedirectResponse(canonical_url, status_code=status.HTTP_303_SEE_OTHER)
+    ui_locale = resolve_ui_locale(request)
     db.commit()
     context = build_template_context(
         request=request,
         current_user=current_user,
         auth_session=auth_session,
         extra={
-            **_ops_filter_context(db, current_user=current_user, filters=filters),
+            **_ops_filter_context(db, current_user=current_user, filters=filters, ui_locale=ui_locale),
             "filters_action": "/ops",
             "filters_target_id": "ops-workspace-results",
             "ticket_return_to": _ops_view_url("/ops", filters),
         },
+        ui_locale=ui_locale,
     )
-    return _template_or_partial_response(
+    response = _template_or_partial_response(
         request,
         template_name="ops_ticket_list.html",
         partial_name="ops_list_results.html",
         context=context,
     )
+    if is_htmx_request(request):
+        response.headers["HX-Push-Url"] = canonical_url
+    return response
 
 
 @router.get("/ops/board", response_class=HTMLResponse)
@@ -1569,23 +1647,31 @@ def ops_board(
     db: Session = Depends(db_session_dependency),
 ):
     filters = _read_filters(request)
+    canonical_url = _ops_view_url("/ops/board", filters)
+    if not is_htmx_request(request) and request.url.query != urlsplit(canonical_url).query:
+        return RedirectResponse(canonical_url, status_code=status.HTTP_303_SEE_OTHER)
+    ui_locale = resolve_ui_locale(request)
     db.commit()
     context = build_template_context(
         request=request,
         current_user=current_user,
         auth_session=auth_session,
         extra={
-            **_ops_filter_context(db, current_user=current_user, filters=filters),
+            **_ops_filter_context(db, current_user=current_user, filters=filters, ui_locale=ui_locale),
             "filters_action": "/ops/board",
             "filters_target_id": "ops-workspace-results",
         },
+        ui_locale=ui_locale,
     )
-    return _template_or_partial_response(
+    response = _template_or_partial_response(
         request,
         template_name="ops_board.html",
         partial_name="ops_board_results.html",
         context=context,
     )
+    if is_htmx_request(request):
+        response.headers["HX-Push-Url"] = canonical_url
+    return response
 
 
 @router.get("/ops/tickets/{reference}", response_class=HTMLResponse)

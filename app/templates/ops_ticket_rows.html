@@ -1,36 +1,55 @@
 <div id="ops-results">
 {% if rows %}
-<section class="ticket-list stack">
-  {% for row in rows %}
-  {% set ticket = row.ticket %}
-  <a class="ticket-card" href="/ops/tickets/{{ ticket.reference }}?return_to={{ ticket_return_to | default('/ops') | urlencode }}">
-    <div class="ticket-card__meta">
-      <span class="ticket-ref">{{ ticket.reference }}</span>
-      <span class="status-pill">{{ ops_status_label(ticket.status) }}</span>
-      {% if row.route_target_display.id %}
-      <span class="status-pill">{{ row.route_target_display.label }}</span>
-      {% endif %}
-      {% if ticket.urgent %}
-      <span class="urgent-pill">{{ t("common.urgent") }}</span>
-      {% endif %}
-      {% if row.updated_for_user %}
-      <span class="updated-pill">{{ t("common.updated") }}</span>
-      {% endif %}
-      {% if row.pending_draft %}
-      <span class="updated-pill">{{ t("ops.rows.needs_approval") }}</span>
-      {% endif %}
-    </div>
-    <h2>{{ ticket.title }}</h2>
-    <p class="muted">{{ t("ops.rows.requester", value=row.creator.display_name if row.creator else unknown_label) }}</p>
-    <p class="muted">{{ t("ops.rows.assigned", value=row.assignee.display_name if row.assignee else unassigned_label) }}</p>
-    <p class="ticket-card__time">{{ t("ops.rows.last_updated", value=format_datetime_utc(ticket.updated_at)) }}</p>
-  </a>
-  {% endfor %}
-</section>
+  <div class="ticket-index__columns ticket-index__columns--ops" aria-hidden="true">
+    <span>{{ t("ticket_index.column.ticket") }}</span>
+    <span>{{ t("ticket_index.column.state") }}</span>
+    <span>{{ t("ticket_index.column.people") }}</span>
+    <span>{{ t("ticket_index.column.updated") }}</span>
+  </div>
+  <ul class="ticket-index__list">
+    {% for row in rows %}
+    {% set ticket = row.ticket %}
+    <li>
+      <a class="ticket-index-row ticket-index-row--ops" href="/ops/tickets/{{ ticket.reference }}?return_to={{ ticket_return_to | default('/ops') | urlencode }}">
+        <span class="ticket-index-row__primary">
+          <span class="ticket-ref">{{ ticket.reference }}</span>
+          <strong>{{ ticket.title }}</strong>
+          <span class="ticket-index-row__badges">
+            {% if ticket.urgent %}<span class="urgent-pill">{{ t("common.urgent") }}</span>{% endif %}
+            {% if row.updated_for_user %}<span class="updated-pill">{{ t("common.updated") }}</span>{% endif %}
+            {% if row.pending_draft %}<span class="updated-pill">{{ t("ops.rows.needs_approval") }}</span>{% endif %}
+          </span>
+        </span>
+        <span class="ticket-index-row__state">
+          <span class="ticket-index-row__mobile-label">{{ t("ticket_index.column.state") }}</span>
+          <span class="status-pill">{{ ops_status_label(ticket.status) }}</span>
+          {% if row.route_target_display.id %}<small>{{ row.route_target_display.label }}</small>{% endif %}
+        </span>
+        <span class="ticket-index-row__people">
+          <span class="ticket-index-row__mobile-label">{{ t("ticket_index.column.people") }}</span>
+          <span>{{ row.creator.display_name if row.creator else unknown_label }}</span>
+          <span aria-hidden="true">→</span>
+          <span>{{ row.assignee.display_name if row.assignee else unassigned_label }}</span>
+        </span>
+        <time class="ticket-index-row__updated" datetime="{{ format_datetime_iso(ticket.updated_at) }}">
+          <span class="ticket-index-row__mobile-label">{{ t("ticket_index.column.updated") }}</span>
+          {{ format_datetime_utc(ticket.updated_at) }}
+        </time>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+{% elif active_filter_count %}
+  <section class="ticket-index__empty" role="status">
+    <h2>{{ t("ops.rows.empty_heading") }}</h2>
+    <p>{{ t("ops.rows.empty_body") }}</p>
+    <a class="button button--ghost" href="{{ filters_action }}">{{ t("button.reset") }}</a>
+  </section>
 {% else %}
-<section class="panel">
-  <h2>{{ t("ops.rows.empty_heading") }}</h2>
-  <p class="muted">{{ t("ops.rows.empty_body") }}</p>
-</section>
+  <section class="ticket-index__empty" role="status">
+    <h2>{{ t("ops.rows.queue_empty_heading") }}</h2>
+    <p>{{ t("ops.rows.queue_empty_body") }}</p>
+    <a class="button" href="/ops/tickets/new">{{ t("button.open_ticket") }}</a>
+  </section>
 {% endif %}
 </div>

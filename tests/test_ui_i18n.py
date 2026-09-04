@@ -186,7 +186,21 @@ def test_requester_page_renders_portuguese_empty_state(monkeypatch):
     requester = SimpleNamespace(id=uuid.uuid4(), display_name="Requester", role="requester")
     auth_session = SimpleNamespace(csrf_token="csrf-token")
 
-    monkeypatch.setattr(stack["routes_requester"], "_ticket_list_rows", lambda db, requester_id: [])
+    monkeypatch.setattr(
+        stack["routes_requester"],
+        "_requester_list_context",
+        lambda db, requester_id, filters: {
+            "tickets": [],
+            "result_count": 0,
+            "filters": filters,
+            "state_options": (),
+            "sort_options": ("updated_desc",),
+            "filter_chips": [],
+            "active_filter_count": 0,
+            "has_query_state": False,
+            "requester_list_url": "/app/tickets",
+        },
+    )
 
     app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
     app.dependency_overrides[stack["routes_requester"].require_requester_user] = lambda: requester
@@ -219,14 +233,18 @@ def test_ops_fragment_renders_portuguese_filters(monkeypatch):
                 "route_target_id": "",
                 "assigned_to": "",
                 "urgent": False,
-                "unassigned_only": False,
                 "created_by_me": False,
                 "needs_approval": False,
                 "updated_since_viewed": False,
+                "sort": "updated_desc",
             },
             "ops_users": [],
             "status_options": [],
             "route_target_options": [],
+            "sort_options": ("updated_desc",),
+            "active_filter_count": 1,
+            "secondary_filter_count": 0,
+            "has_query_state": True,
         },
     )
 
@@ -241,6 +259,73 @@ def test_ops_fragment_renders_portuguese_filters(monkeypatch):
     assert "<html" not in response.text
     assert "Nenhum ticket correspondente" in response.text
     assert "Ajuste os filtros para ampliar a fila." in response.text
+
+
+@pytest.mark.parametrize(
+    ("active_filter_count", "expected_heading", "unexpected_heading"),
+    [
+        (0, "The queue is empty", "No matching tickets"),
+        (1, "No matching tickets", "The queue is empty"),
+    ],
+)
+def test_ops_board_empty_state_distinguishes_empty_queue_from_no_matches(
+    monkeypatch,
+    active_filter_count,
+    expected_heading,
+    unexpected_heading,
+):
+    stack = _load_web_stack()
+    app = stack["create_app"]()
+    db = _RouteDb()
+    ops_user = SimpleNamespace(id=uuid.uuid4(), display_name="Ops", role="dev_ti")
+    auth_session = SimpleNamespace(csrf_token="csrf-token")
+    filters = {
+        "q": "",
+        "status": "",
+        "route_target_id": "",
+        "assigned_to": "",
+        "urgent": False,
+        "created_by_me": False,
+        "needs_approval": False,
+        "updated_since_viewed": False,
+        "sort": "updated_desc",
+    }
+
+    monkeypatch.setattr(
+        stack["routes_ops"],
+        "_ops_filter_context",
+        lambda *args, **kwargs: {
+            "rows": [],
+            "grouped_rows": {
+                key: []
+                for key in ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")
+            },
+            "result_count": 0,
+            "filters": filters,
+            "ops_users": [],
+            "status_options": [],
+            "route_target_options": [],
+            "sort_options": ("updated_desc",),
+            "filter_chips": [],
+            "active_filter_count": active_filter_count,
+            "secondary_filter_count": 0,
+            "has_query_state": bool(active_filter_count),
+            "board_url": "/ops/board",
+            "list_url": "/ops",
+            "ticket_return_to": "/ops/board",
+        },
+    )
+
+    app.dependency_overrides[stack["db_session_dependency"]] = lambda: db
+    app.dependency_overrides[stack["routes_ops"].require_ops_user] = lambda: ops_user
+    app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
+
+    with stack["TestClient"](app) as client:
+        response = client.get("/ops/board", headers={"HX-Request": "true"})
+
+    assert response.status_code == 200
+    assert expected_heading in response.text
+    assert unexpected_heading not in response.text
 
 
 def test_browser_visible_http_error_translates_to_portuguese():
@@ -329,7 +414,7 @@ def test_requester_reply_error_uses_ticket_detail_for_language_switch(monkeypatc
     ticket = SimpleNamespace(reference="T-000123", id=uuid.uuid4(), title="Ticket", status="new", urgent=False)
 
     async def fake_parse_requester_message_form(request, *, settings):
-        return "", "csrf-token", []
+        return "", "csrf-token", "", []
 
     monkeypatch.setattr(stack["routes_requester"], "_load_requester_ticket_or_404", lambda *args, **kwargs: ticket)
     monkeypatch.setattr(stack["routes_requester"], "_parse_requester_message_form", fake_parse_requester_message_form)

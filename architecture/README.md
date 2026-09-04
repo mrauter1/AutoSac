@@ -6,6 +6,8 @@ For a visual, searchable, and interactive entry point, open the dependency-free 
 
 The standalone [Ops ticket layout options](ops-ticket-layout-options.html) is a non-runtime comparison artifact for four bounded conversation layouts with a collapsible inspector on either side. Option A is marked as the selected production treatment.
 
+The implementation-ready [ticket list and queue redesign plan](ticket-list-and-queue-redesign-plan.md) defines the compact requester/Ops list language, visible filter hierarchy, deterministic ordering contract, URL continuity, responsive behavior, and regression boundaries for the next UI phase.
+
 ## Report map
 
 | Document | Contents |

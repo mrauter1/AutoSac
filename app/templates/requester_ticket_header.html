@@ -3,7 +3,7 @@
   class="page-header page-header--card page-header--stack requester-detail__header"
   {% if live_oob %}hx-swap-oob="outerHTML"{% endif %}
 >
-  <a class="ticket-back-link" href="/app/tickets">← {{ t("base.nav.my_tickets") }}</a>
+  <a class="ticket-back-link" href="{{ requester_return_url | default('/app/tickets') }}">← {{ t("base.nav.my_tickets") }}</a>
   <div class="ticket-header__row">
     <div>
       <div class="ticket-card__meta">
@@ -16,7 +16,10 @@
     {% set actions_enabled = requester_actions_enabled | default(false) %}
     {% if ticket.status != "resolved" %}
     <form{% if actions_enabled %} method="post" action="/app/tickets/{{ ticket.reference }}/resolve" data-confirm="{{ t('requester.detail.confirm_resolve') }}"{% else %} aria-disabled="true"{% endif %}>
-      {% if actions_enabled %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+      {% if actions_enabled %}
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="return_to" value="{{ requester_return_to | default('/app/tickets') }}">
+      {% endif %}
       <button type="{{ 'submit' if actions_enabled else 'button' }}" class="button button--ghost"{% if not actions_enabled %} disabled{% endif %}>{{ t("button.mark_resolved") }}</button>
     </form>
     {% endif %}

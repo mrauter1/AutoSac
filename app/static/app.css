@@ -316,6 +316,18 @@ input[type="file"]:focus-visible {
   border: 0 !important;
 }
 
+.filter-chips {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.filter-chip {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .button {
   display: inline-flex;
   align-items: center;
@@ -482,26 +494,6 @@ small {
 .lane-pill--status {
   background: #ece2cf;
   color: #5f4a31;
-}
-
-.ops-filters {
-  margin-bottom: 1.5rem;
-}
-
-.ops-filters__grid,
-.ops-filters__checks {
-  display: grid;
-  gap: 0.9rem;
-}
-
-.ops-filters__grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin-bottom: 1rem;
-}
-
-.ops-filters__checks {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  margin-bottom: 1rem;
 }
 
 .ops-board {

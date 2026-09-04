@@ -44,7 +44,6 @@ def test_ops_filters_read_bounded_search_and_compile_literal_wildcards():
             "status": "",
             "route_target_id": "",
             "assigned_to": "",
-            "unassigned_only": False,
             "created_by_me": False,
             "needs_approval": False,
             "updated_since_viewed": False,
@@ -232,6 +231,7 @@ def test_page_specific_assets_and_reflow_rules_are_present():
     ticket_css = Path("app/static/ticket.css").read_text(encoding="utf-8")
     ticket_new = Path("app/templates/requester_ticket_new.html").read_text(encoding="utf-8")
     requester_list = Path("app/templates/requester_ticket_list.html").read_text(encoding="utf-8")
+    requester_list_results = Path("app/templates/requester_ticket_list_results.html").read_text(encoding="utf-8")
     ops_detail = Path("app/templates/ops_ticket_detail.html").read_text(encoding="utf-8")
     ops_live_fragments = Path("app/templates/ops_ticket_live_fragments.html").read_text(encoding="utf-8")
     codex_turn_detail = Path("app/templates/ops_codex_turn_detail.html").read_text(encoding="utf-8")
@@ -345,7 +345,8 @@ def test_page_specific_assets_and_reflow_rules_are_present():
     assert 'input type="file" name="attachments" multiple' in ticket_new
     assert 'aria-describedby="ticket-create-attachment-hint"' in ticket_new
     assert 'input type="checkbox" name="urgent"' in ticket_new
-    assert requester_list.count('href="{{ new_ticket_path }}"') == 2
+    assert requester_list.count('href="{{ new_ticket_path }}"') == 1
+    assert requester_list_results.count('href="{{ new_ticket_path }}"') == 1
     assert """.ticket-create {
   width: 100%;
   max-width: 50rem;

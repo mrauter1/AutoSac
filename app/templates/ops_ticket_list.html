@@ -1,17 +1,18 @@
 {% extends "base.html" %}
 
 {% block title %}{{ t("ops.list.heading") }} | {{ t("brand.name") }}{% endblock %}
-{% block page_class %} page--workspace{% endblock %}
-{% block page_styles %}<link rel="stylesheet" href="/static/board.css">{% endblock %}
+{% block page_class %} page--workspace page--ticket-index page--ops-ticket-index{% endblock %}
+{% block page_styles %}<link rel="stylesheet" href="/static/board.css"><link rel="stylesheet" href="/static/ticket-list.css">{% endblock %}
 
 {% block body %}
-<div class="workspace-view workspace-view--ops">
-  <section class="page-header page-header--card">
+<div class="workspace-view workspace-view--ops ticket-index">
+  <header class="ticket-index__header">
     <div>
       <p class="eyebrow">{{ t("eyebrow.dev_ti_view") }}</p>
       <h1>{{ t("ops.list.heading") }}</h1>
     </div>
-  </section>
+    <a class="button" href="/ops/tickets/new">{{ t("button.open_ticket") }}</a>
+  </header>
   {% include "ops_list_results.html" %}
 </div>
 {% endblock %}

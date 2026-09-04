@@ -3366,7 +3366,6 @@ def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):
                 "route_target_id": "",
                 "assigned_to": "",
                 "urgent": False,
-                "unassigned_only": False,
                 "created_by_me": False,
                 "needs_approval": False,
                 "updated_since_viewed": False,
@@ -3396,6 +3395,7 @@ def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):
     assert fragment.status_code == 200
     assert "<html" not in fragment.text
     assert 'id="ops-results"' in fragment.text
+    assert fragment.headers["hx-push-url"] == "/ops?status=new"
     assert observed["view_updates"] == 0
     assert db.commit_calls == 2
 
@@ -3419,7 +3419,6 @@ def test_ops_board_route_does_not_mark_ticket_as_read(monkeypatch):
                 "route_target_id": "",
                 "assigned_to": "",
                 "urgent": False,
-                "unassigned_only": False,
                 "created_by_me": False,
                 "needs_approval": False,
                 "updated_since_viewed": False,
@@ -3449,6 +3448,7 @@ def test_ops_board_route_does_not_mark_ticket_as_read(monkeypatch):
     assert fragment.status_code == 200
     assert "<html" not in fragment.text
     assert 'id="ops-results"' in fragment.text
+    assert fragment.headers["hx-push-url"] == "/ops/board?status=new"
     assert observed["view_updates"] == 0
     assert db.commit_calls == 2
 
@@ -5319,7 +5319,7 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert 'hx-target="#{{ filters_target_id }}"' in filters_template
     assert 'hx-swap="outerHTML"' in filters_template
     assert 't("filters.urgent_only")' in filters_template
-    assert 't("filters.unassigned_only")' in filters_template
+    assert 'name="unassigned_only"' not in filters_template
     assert 't("filters.created_by_me")' in filters_template
     assert 't("filters.needs_approval")' in filters_template
     assert 't("filters.updated_since_viewed")' in filters_template
