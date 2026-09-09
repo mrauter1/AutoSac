@@ -214,6 +214,8 @@ The original webhook PRD remains the payload-snapshot reference in `tasks/slack_
 
 ## Deployment
 
+For updates to the existing production checkout at `~/prod/AutoSac`, follow [deploy.md](deploy.md).
+
 For a step-by-step Ubuntu internal server setup with boot-time systemd services and the Ubuntu 24.04 AppArmor / `bwrap` fix for Codex sandboxing, see `docs/ubuntu_internal_server_setup.md`.
 
 For a phone-friendly cloud deployment walkthrough and one-click Render blueprint setup, see `docs_deployment.md` and `render.yaml`.
