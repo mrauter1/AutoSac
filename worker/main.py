@@ -12,13 +12,14 @@ from shared.config import get_settings
 from shared.db import session_scope
 from shared.logging import log_worker_event
 from shared.contracts import WORKSPACE_BOOTSTRAP_VERSION
-from shared.models import AIRun, SystemState
+from shared.models import SystemState
 from shared.security import utc_now
 from shared.slack_dm import load_slack_dm_settings
 from shared.slack_user_sync import request_slack_user_sync
 from shared.ticketing import ensure_system_state_defaults
 from worker.persistent_codex import refresh_persistent_session_leases
 from worker.queue import claim_oldest_pending_run, recover_stale_runs
+from worker.run_ownership import load_owned_running_run
 from worker.slack_delivery import delivery_loop as slack_delivery_loop
 from worker.slack_user_sync import slack_user_sync_loop
 from worker.triage import process_ai_run
@@ -83,10 +84,14 @@ def update_worker_heartbeat(
 
     if active_run_id is None:
         return
-    run = db.get(AIRun, active_run_id)
-    if run is None or run.status != "running":
-        return
-    if run.worker_instance_id != worker_identity.worker_instance_id:
+    # Persistent app-server writers lock AIRun before CodexSession. Preserve
+    # that global order here so heartbeat and stdout persistence cannot deadlock.
+    run = load_owned_running_run(
+        db,
+        run_id=active_run_id,
+        worker_instance_id=worker_identity.worker_instance_id,
+    )
+    if run is None:
         return
     run.last_heartbeat_at = now
     refresh_persistent_session_leases(

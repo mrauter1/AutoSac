@@ -15,9 +15,16 @@ from app import routes_ops, routes_requester
 from app.ticket_index import (
     COMMON_TICKET_SORTS,
     DEFAULT_TICKET_SORT,
+    OPS_DEFAULT_TICKET_STATES,
+    REQUESTER_DEFAULT_TICKET_STATES,
     common_ticket_order_clauses,
     escaped_ilike_pattern,
+    normalize_ticket_states,
     normalize_ticket_sort,
+    split_query_items,
+    statuses_for_ticket_states,
+    ticket_state_for_status,
+    ticket_state_query_items,
 )
 
 
@@ -50,7 +57,7 @@ def _request(**params):
 def _requester_filters(**overrides):
     return {
         "q": "",
-        "state": "",
+        "states": REQUESTER_DEFAULT_TICKET_STATES,
         "sort": DEFAULT_TICKET_SORT,
         "updated_since_viewed": False,
         **overrides,
@@ -60,6 +67,7 @@ def _requester_filters(**overrides):
 def _ops_filters(**overrides):
     return {
         "q": "",
+        "states": OPS_DEFAULT_TICKET_STATES,
         "status": "",
         "route_target_id": "",
         "assigned_to": "",
@@ -100,7 +108,7 @@ def test_ticket_sort_normalization_and_search_escaping_are_bounded_helpers():
         ("created_asc", "tickets.created_at ASC, tickets.reference_num ASC"),
         (
             "needs_reply_first",
-            "CASE WHEN (tickets.status = :status_1) THEN :param_1 ELSE :param_2 END, tickets.updated_at DESC, tickets.reference_num DESC",
+            "CASE WHEN (tickets.status = :status_2) THEN :param_1 ELSE :param_2 END, tickets.updated_at DESC, tickets.reference_num DESC",
         ),
     ],
 )
@@ -157,7 +165,7 @@ def test_requester_query_parser_normalizes_invalid_values_and_builds_canonical_u
 
     assert parsed == {
         "q": "printer",
-        "state": "",
+        "states": REQUESTER_DEFAULT_TICKET_STATES,
         "sort": "updated_desc",
         "updated_since_viewed": True,
     }
@@ -167,7 +175,7 @@ def test_requester_query_parser_normalizes_invalid_values_and_builds_canonical_u
 def test_requester_return_path_is_strict_and_canonical():
     assert routes_requester._sanitize_requester_return_to(
         "/app/tickets?sort=created_asc&state=open&q=printer"
-    ) == "/app/tickets?q=printer&state=open&sort=created_asc"
+    ) == "/app/tickets?q=printer&sort=created_asc"
     assert routes_requester._sanitize_requester_return_to("https://evil.example/app/tickets") == "/app/tickets"
     assert routes_requester._sanitize_requester_return_to("/app/tickets?q=one&q=two") == "/app/tickets"
     assert routes_requester._sanitize_requester_return_to("/app/tickets?q=&q=two") == "/app/tickets"
@@ -266,3 +274,180 @@ def test_ticket_index_styles_keep_labels_accessible_and_bound_popovers_and_chips
     assert "inset-inline-start: auto" in board_css
     assert ".filter-chip {" in app_css
     assert "overflow-wrap: anywhere" in app_css
+
+
+def test_ticket_state_groups_are_canonical_and_cover_raw_statuses():
+    assert statuses_for_ticket_states(("waiting_reply",)) == (
+        "new",
+        "ai_triage",
+        "waiting_on_dev_ti",
+    )
+    assert statuses_for_ticket_states(("waiting_user", "canceled")) == (
+        "waiting_on_user",
+        "canceled",
+    )
+    assert ticket_state_for_status("waiting_on_dev_ti") == "waiting_reply"
+    assert ticket_state_for_status("canceled") == "canceled"
+
+
+def test_ticket_state_selection_normalizes_order_and_uses_audience_defaults():
+    assert normalize_ticket_states([], default=OPS_DEFAULT_TICKET_STATES) == (
+        "waiting_reply",
+        "waiting_user",
+    )
+    assert normalize_ticket_states([""], default=REQUESTER_DEFAULT_TICKET_STATES) == (
+        "waiting_reply",
+        "waiting_user",
+    )
+    assert normalize_ticket_states(
+        ["resolved", "waiting_reply"],
+        default=OPS_DEFAULT_TICKET_STATES,
+    ) == ("waiting_reply", "resolved")
+    assert ticket_state_query_items(
+        REQUESTER_DEFAULT_TICKET_STATES,
+        default=REQUESTER_DEFAULT_TICKET_STATES,
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        ["unknown"],
+        ["resolved", "resolved"],
+        ["resolved", ""],
+    ],
+)
+def test_ticket_state_selection_rejects_ambiguous_or_unknown_values(values):
+    with pytest.raises(ValueError):
+        normalize_ticket_states(values, default=OPS_DEFAULT_TICKET_STATES)
+
+
+def test_query_split_allows_only_declared_repeated_keys():
+    scalar, repeated = split_query_items(
+        [("q", "printer"), ("state", "waiting_reply"), ("state", "resolved")],
+        allowed_keys={"q", "state"},
+        repeated_keys={"state"},
+    )
+
+    assert scalar == {"q": "printer"}
+    assert repeated == {"state": ["waiting_reply", "resolved"]}
+
+    with pytest.raises(ValueError):
+        split_query_items(
+            [("q", "first"), ("q", "second")],
+            allowed_keys={"q", "state"},
+            repeated_keys={"state"},
+        )
+
+
+@pytest.mark.parametrize("path", ["/ops", "/ops/board"])
+def test_ops_defaults_and_explicit_single_state_survive_view_links(path):
+    defaults = routes_ops._read_filters(SimpleNamespace(query_params=QueryParams("")))
+    assert defaults["states"] == ("waiting_reply", "waiting_user")
+    assert routes_ops._ops_view_url(path, defaults) == path
+
+    explicit = routes_ops._read_filters(
+        SimpleNamespace(query_params=QueryParams("state=waiting_reply"))
+    )
+    assert explicit["states"] == ("waiting_reply",)
+    assert routes_ops._ops_view_url(path, explicit) == f"{path}?state=waiting_reply"
+
+
+def test_routes_parse_repeated_states_and_keep_canonical_order():
+    requester = routes_requester._read_requester_filters(
+        SimpleNamespace(query_params=QueryParams("state=resolved&state=waiting_reply"))
+    )
+    ops = routes_ops._read_filters(
+        SimpleNamespace(query_params=QueryParams("state=canceled&state=waiting_user"))
+    )
+    exact_ops = routes_ops._read_filters(
+        SimpleNamespace(query_params=QueryParams("status=waiting_on_user"))
+    )
+    exact_ops_with_default_state = routes_ops._read_filters(
+        SimpleNamespace(
+            query_params=QueryParams("state=waiting_reply&status=waiting_on_user")
+        )
+    )
+    exact_ops_with_invalid_state = routes_ops._read_filters(
+        SimpleNamespace(query_params=QueryParams("state=bogus&status=resolved"))
+    )
+    legacy_requester = routes_requester._read_requester_filters(
+        SimpleNamespace(query_params=QueryParams("state=waiting_on_user"))
+    )
+
+    assert requester["states"] == ("waiting_reply", "resolved")
+    assert routes_requester._requester_list_url(requester) == (
+        "/app/tickets?state=waiting_reply&state=resolved"
+    )
+    assert ops["states"] == ("waiting_user", "canceled")
+    assert exact_ops["states"] == ("waiting_user",)
+    assert routes_ops._ops_view_url("/ops", exact_ops) == "/ops?status=waiting_on_user"
+    assert exact_ops_with_default_state["states"] == ("waiting_user",)
+    assert routes_ops._ops_view_url("/ops", exact_ops_with_default_state) == (
+        "/ops?status=waiting_on_user"
+    )
+    assert exact_ops_with_invalid_state["states"] == ("resolved",)
+    assert routes_ops._ops_view_url("/ops/board", exact_ops_with_invalid_state) == (
+        "/ops/board?status=resolved"
+    )
+    assert legacy_requester["states"] == ("waiting_user",)
+    assert routes_requester._requester_list_url(legacy_requester) == (
+        "/app/tickets?state=waiting_user"
+    )
+
+
+def test_default_ticket_queries_apply_the_expected_group_scope():
+    requester_db = _RecordingDb()
+    routes_requester._load_requester_ticket_rows(
+        requester_db,
+        requester_id=uuid.uuid4(),
+        filters=_requester_filters(),
+    )
+    requester_params = requester_db.statements[0].compile().params
+
+    ops_db = _RecordingDb()
+    routes_ops._load_filtered_ticket_rows(
+        ops_db,
+        current_user=SimpleNamespace(id=uuid.uuid4()),
+        filters=_ops_filters(),
+    )
+    ops_params = ops_db.statements[0].compile().params
+
+    assert ["new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti"] in requester_params.values()
+    assert ["new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti"] in ops_params.values()
+
+
+def test_canceled_status_migration_extends_and_safely_downgrades_constraint():
+    source = Path(
+        "shared/migrations/versions/20260904_0018_ticket_canceled_status.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260904_0018"' in source
+    assert 'down_revision = "20260831_0017"' in source
+    assert '"canceled"' in source
+    assert "SET status = 'resolved'" in source
+
+
+@pytest.mark.parametrize("direction", ["upgrade", "downgrade"])
+def test_canceled_status_migration_uses_existing_constraint_name(direction):
+    import importlib
+    from io import StringIO
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from shared.db import Base
+
+    migration = importlib.import_module(
+        "shared.migrations.versions.20260904_0018_ticket_canceled_status"
+    )
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output, "target_metadata": Base.metadata},
+    )
+    with Operations.context(context):
+        getattr(migration, direction)()
+    sql = output.getvalue()
+    assert "DROP CONSTRAINT ck_tickets_tickets_status" in sql
+    assert "ADD CONSTRAINT ck_tickets_tickets_status CHECK" in sql
+    assert "ck_tickets_ck_tickets" not in sql

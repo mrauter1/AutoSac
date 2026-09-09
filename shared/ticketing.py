@@ -29,6 +29,7 @@ from shared.models import (
     TicketMessage,
     TicketStatusHistory,
     TicketView,
+    TERMINAL_TICKET_STATUSES,
     TICKET_STATUSES,
     User,
 )
@@ -60,6 +61,17 @@ def _lock_ai_run_for_publication(db: Session, *, ai_run_id: uuid.UUID) -> None:
     db.execute(
         select(AIRun)
         .where(AIRun.id == ai_run_id)
+        .with_for_update()
+    ).scalar_one()
+
+
+def _lock_ticket_for_mutation(db: Session, *, ticket: Ticket) -> Ticket:
+    if not isinstance(db, Session):
+        return ticket
+    return db.execute(
+        select(Ticket)
+        .where(Ticket.id == ticket.id)
+        .execution_options(populate_existing=True)
         .with_for_update()
     ).scalar_one()
 
@@ -333,12 +345,19 @@ def _result_scalars_list_compatible(result) -> list:
     return []
 
 
-def supersede_pending_drafts(db: Session, ticket_id: uuid.UUID, keep_draft_id: uuid.UUID | None = None) -> int:
+def supersede_pending_drafts(
+    db: Session,
+    ticket_id: uuid.UUID,
+    keep_draft_id: uuid.UUID | None = None,
+    *,
+    reason: str = "pending_draft_replaced",
+) -> int:
     drafts = _result_scalars_list_compatible(
         db.execute(
             select(AIDraft)
             .where(AIDraft.ticket_id == ticket_id, AIDraft.status == "pending_approval")
             .order_by(AIDraft.created_at.asc(), AIDraft.id.asc())
+            .with_for_update()
         )
     )
     superseded = 0
@@ -355,10 +374,39 @@ def supersede_pending_drafts(db: Session, ticket_id: uuid.UUID, keep_draft_id: u
                 payload_json={
                     "draft_id": str(draft.id),
                     "draft_status": draft.status,
-                    "reason": "pending_draft_replaced",
+                    "reason": reason,
                 },
             )
     return superseded
+
+
+def supersede_pending_ai_runs_for_cancellation(
+    db: Session,
+    *,
+    ticket_id: uuid.UUID,
+    ended_at=None,
+) -> int:
+    canceled_at = ended_at or utc_now()
+    runs = _result_scalars_list_compatible(
+        db.execute(
+            select(AIRun)
+            .where(AIRun.ticket_id == ticket_id, AIRun.status == "pending")
+            .order_by(AIRun.created_at.asc(), AIRun.id.asc())
+            .with_for_update()
+        )
+    )
+    for run in runs:
+        run.status = "superseded"
+        run.ended_at = canceled_at
+        run.error_text = None
+        if _persistent_turn_exists(db, ai_run_id=run.id):
+            _append_turn_outcome_for_message(
+                db,
+                ai_run_id=run.id,
+                outcome_kind="superseded",
+                payload_json={"reason": "ticket_canceled"},
+            )
+    return len(runs)
 
 
 def ensure_system_state_defaults(db: Session, bootstrap_version: str) -> None:
@@ -653,7 +701,7 @@ def add_requester_reply(
         created_at=created_at,
     )
 
-    trigger = "reopen" if ticket.status == "resolved" else "requester_reply"
+    trigger = "reopen" if ticket.status in TERMINAL_TICKET_STATUSES else "requester_reply"
     if ticket.status != "ai_triage":
         record_status_change(
             db,
@@ -885,6 +933,9 @@ def route_ticket_after_ai(
 def process_deferred_requeue(db: Session, *, ticket: Ticket) -> AIRun | None:
     if not ticket.requeue_requested or not ticket.requeue_trigger:
         return None
+    if ticket.status == "canceled":
+        clear_requeue_request(ticket)
+        return None
     if ticket.requeue_trigger in {"requester_reply", "ticket_content"} and ticket.status != "ai_triage":
         clear_requeue_request(ticket)
         return None
@@ -913,7 +964,7 @@ def resolve_ticket_for_requester(
     requester: User,
 ) -> None:
     resolved_at = utc_now()
-    if ticket.status != "resolved":
+    if ticket.status not in TERMINAL_TICKET_STATUSES:
         record_status_change(
             db,
             slack_runtime=slack_runtime,
@@ -1087,6 +1138,19 @@ def set_ticket_status_for_ops(
         request_manual_rerun(db, slack_runtime=slack_runtime, ticket=ticket, actor=actor)
         return
     changed_at = utc_now()
+    if next_status == "canceled":
+        ticket = _lock_ticket_for_mutation(db, ticket=ticket)
+        clear_requeue_request(ticket, touched_at=changed_at)
+        supersede_pending_ai_runs_for_cancellation(
+            db,
+            ticket_id=ticket.id,
+            ended_at=changed_at,
+        )
+        supersede_pending_drafts(
+            db,
+            ticket.id,
+            reason="ticket_canceled",
+        )
     if ticket.status != next_status:
         record_status_change(
             db,
@@ -1112,6 +1176,16 @@ def request_manual_rerun(
 ) -> AIRun | None:
     requested_at = utc_now()
     if has_active_ai_run(db, ticket.id):
+        if ticket.status == "canceled":
+            record_status_change(
+                db,
+                slack_runtime=slack_runtime,
+                ticket=ticket,
+                to_status="ai_triage",
+                changed_by_type="dev_ti",
+                changed_by_user_id=actor.id,
+                changed_at=requested_at,
+            )
         request_requeue(
             ticket,
             "manual_rerun",
@@ -1166,6 +1240,7 @@ def publish_ai_draft_for_ops(
     next_status: str,
     body_markdown: str | None = None,
 ) -> TicketMessage:
+    ticket = _lock_ticket_for_mutation(db, ticket=ticket)
     draft = _lock_ai_draft_for_review(db, draft=draft)
     existing_message = (
         _load_existing_ai_public_message(db, ai_run_id=draft.ai_run_id)
@@ -1174,6 +1249,8 @@ def publish_ai_draft_for_ops(
     )
     if existing_message is not None:
         return existing_message
+    if ticket.status == "canceled":
+        raise ValueError("Canceled tickets cannot publish drafts.")
     if draft.status != "pending_approval":
         raise ValueError("Only pending drafts can be published.")
     if next_status not in {"waiting_on_user", "waiting_on_dev_ti", "resolved"}:
@@ -1240,6 +1317,7 @@ def reject_ai_draft_for_ops(
     draft: AIDraft,
     actor: User,
 ) -> None:
+    ticket = _lock_ticket_for_mutation(db, ticket=ticket)
     draft = _lock_ai_draft_for_review(db, draft=draft)
     if draft.status != "pending_approval":
         raise ValueError("Only pending drafts can be rejected.")

@@ -4441,6 +4441,61 @@ def test_prepare_run_skips_when_last_processed_hash_matches(monkeypatch, tmp_pat
     assert observed["requeue"] == 1
 
 
+def test_prepare_run_supersedes_canceled_ticket_before_freezing_input(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="canceled",
+        requeue_requested=True,
+        requeue_trigger="ticket_content",
+    )
+    context = _make_context(ticket=ticket)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr(
+        "worker.triage.clear_requeue_request",
+        lambda value: (
+            setattr(value, "requeue_requested", False),
+            setattr(value, "requeue_trigger", None),
+        ),
+    )
+    monkeypatch.setattr(
+        "worker.triage._mark_superseded_due_to_stale_input",
+        lambda db, *, run, ticket, reason: (
+            observed.update({"ticket": ticket, "reason": reason}),
+            setattr(run, "status", "superseded"),
+        ),
+    )
+    monkeypatch.setattr(
+        "worker.triage._freeze_run_input",
+        lambda *args, **kwargs: pytest.fail("canceled tickets must not freeze new AI input"),
+    )
+
+    prepared = symbols["_prepare_run"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+    )
+
+    assert prepared is None
+    assert run.status == "superseded"
+    assert ticket.requeue_requested is False
+    assert observed == {"ticket": ticket, "reason": "ticket_canceled"}
+
+
 def test_prepare_run_preserves_forced_specialist_override(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
@@ -5470,6 +5525,69 @@ def test_apply_success_result_supersedes_stale_run_without_publication(monkeypat
     assert run.status == "superseded"
     assert run.ended_at is not None
     assert observed == {"internal": 0, "public": 0, "requeue": 1}
+
+
+def test_apply_success_result_never_publishes_after_ticket_is_canceled(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        reference="T-000008C",
+        title="Canceled while running",
+        status="canceled",
+        urgent=False,
+        requester_language=None,
+        last_processed_hash=None,
+        last_ai_action=None,
+        clarification_rounds=0,
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    context = _make_context(ticket=ticket)
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        input_hash="old-hash",
+        ended_at=None,
+        error_text=None,
+    )
+    fake_db = _FakeDb(run=run)
+    observed = {"internal": 0, "public": 0}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.triage.load_ticket_context", lambda db, ticket_id: context)
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_internal_note",
+        lambda *args, **kwargs: observed.__setitem__("internal", observed["internal"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_public_reply",
+        lambda *args, **kwargs: observed.__setitem__("public", observed["public"] + 1),
+    )
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    symbols["_apply_success_result"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        pipeline_result=_pipeline_result(
+            route_target=_build_route_target(
+                route_target_id="support",
+                kind="direct_ai",
+                mode="fixed",
+                specialist_id="support",
+            ),
+            specialist_payload=_specialist_payload(),
+        ),
+    )
+
+    assert run.status == "superseded"
+    assert observed == {"internal": 0, "public": 0}
 
 
 def test_apply_success_result_app_server_uses_effective_input_hash_after_accepted_steering(monkeypatch, tmp_path):
@@ -6990,6 +7108,64 @@ def test_mark_failed_publishes_internal_failure_note_and_routes_ticket(monkeypat
     assert observed == {"failure_note": 1, "status_changes": 1, "requeue": 1}
 
 
+def test_mark_failed_preserves_canceled_ticket_without_failure_publication(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="canceled",
+        requeue_requested=False,
+        requeue_trigger=None,
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        pipeline_version=None,
+        ended_at=None,
+        error_text=None,
+    )
+    fake_db = _FakeDb(run=run, ticket=ticket)
+    observed = {"failure_note": 0, "status_change": 0, "ticket_locks": 0}
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.triage.session_scope", fake_session_scope)
+    monkeypatch.setattr(
+        "worker.triage._lock_ticket_for_snapshot",
+        lambda db, *, ticket_id: observed.__setitem__(
+            "ticket_locks", observed["ticket_locks"] + 1
+        ),
+    )
+    monkeypatch.setattr("worker.triage.clear_requeue_request", lambda ticket: None)
+    monkeypatch.setattr(
+        "worker.triage._mark_superseded_due_to_stale_input",
+        lambda db, *, run, ticket, reason: setattr(run, "status", "superseded"),
+    )
+    monkeypatch.setattr(
+        "worker.triage.publish_ai_failure_note",
+        lambda *args, **kwargs: observed.__setitem__("failure_note", observed["failure_note"] + 1),
+    )
+    monkeypatch.setattr(
+        "worker.triage.record_status_change",
+        lambda *args, **kwargs: observed.__setitem__("status_change", observed["status_change"] + 1),
+    )
+    monkeypatch.setattr("worker.triage.write_run_manifest_snapshot", lambda *args, **kwargs: None)
+
+    symbols["_mark_failed"](
+        settings,
+        run_id=run.id,
+        worker_instance_id="worker-test",
+        error_text="boom",
+    )
+
+    assert run.status == "superseded"
+    assert ticket.status == "canceled"
+    assert observed == {"failure_note": 0, "status_change": 0, "ticket_locks": 1}
+
+
 def test_mark_failed_raises_when_run_is_no_longer_owned(monkeypatch, tmp_path):
     symbols = _load_worker_symbols()
     settings = _make_settings(tmp_path)
@@ -7483,6 +7659,7 @@ def test_emit_worker_heartbeat_updates_active_run_last_heartbeat(monkeypatch, tm
 
     monkeypatch.setattr("worker.main.session_scope", fake_session_scope)
     monkeypatch.setattr("worker.main.log_worker_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.main.load_owned_running_run", lambda db, **kwargs: run)
 
     symbols["emit_worker_heartbeat"](
         settings,
@@ -7491,6 +7668,107 @@ def test_emit_worker_heartbeat_updates_active_run_last_heartbeat(monkeypatch, tm
     )
 
     assert run.last_heartbeat_at is not None
+
+
+def test_load_owned_running_run_acquires_row_lock():
+    pytest.importorskip("sqlalchemy")
+    from worker.run_ownership import load_owned_running_run
+
+    run = SimpleNamespace(id=uuid.uuid4())
+
+    class RecordingDb:
+        statement = None
+
+        def execute(self, statement):
+            self.statement = statement
+            return _FakeWorkerStateResult([run])
+
+    db = RecordingDb()
+    loaded = load_owned_running_run(
+        db,
+        run_id=run.id,
+        worker_instance_id="worker-owned",
+    )
+
+    assert loaded is run
+    assert db.statement is not None
+    assert db.statement._for_update_arg is not None
+    assert "FOR UPDATE" in str(db.statement)
+
+
+def test_emit_worker_heartbeat_locks_run_before_refreshing_persistent_session_leases(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    run = SimpleNamespace(id=uuid.uuid4(), last_heartbeat_at=None)
+    fake_db = _FakeWorkerStateDb()
+    tracker = symbols["ActiveRunTracker"]()
+    tracker.set_run_id(run.id)
+    worker_identity = symbols["WorkerIdentity"](worker_pid=5555, worker_instance_id="worker-owned")
+    calls = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    def fake_load_owned_running_run(db, *, run_id, worker_instance_id):
+        assert db is fake_db
+        assert run_id == run.id
+        assert worker_instance_id == worker_identity.worker_instance_id
+        calls.append("run_lock")
+        return run
+
+    def fake_refresh_persistent_session_leases(db, *, run_id, worker_instance_id, stale_timeout_seconds):
+        assert db is fake_db
+        assert run_id == run.id
+        assert worker_instance_id == worker_identity.worker_instance_id
+        assert stale_timeout_seconds == settings.ai_run_stale_timeout_seconds
+        assert run.last_heartbeat_at is not None
+        calls.append("session_locks")
+        return 1
+
+    monkeypatch.setattr("worker.main.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.main.log_worker_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.main.load_owned_running_run", fake_load_owned_running_run)
+    monkeypatch.setattr("worker.main.refresh_persistent_session_leases", fake_refresh_persistent_session_leases)
+
+    symbols["emit_worker_heartbeat"](
+        settings,
+        worker_identity=worker_identity,
+        active_run_tracker=tracker,
+    )
+
+    assert calls == ["run_lock", "session_locks"]
+
+
+def test_emit_worker_heartbeat_skips_session_refresh_after_run_ownership_is_lost(monkeypatch, tmp_path):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    active_run_id = uuid.uuid4()
+    fake_db = _FakeWorkerStateDb()
+    tracker = symbols["ActiveRunTracker"]()
+    tracker.set_run_id(active_run_id)
+    worker_identity = symbols["WorkerIdentity"](worker_pid=6666, worker_instance_id="worker-owned")
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.main.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.main.log_worker_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("worker.main.load_owned_running_run", lambda db, **kwargs: None)
+    monkeypatch.setattr(
+        "worker.main.refresh_persistent_session_leases",
+        lambda *args, **kwargs: pytest.fail("lost run ownership must skip persistent session lease refresh"),
+    )
+
+    symbols["emit_worker_heartbeat"](
+        settings,
+        worker_identity=worker_identity,
+        active_run_tracker=tracker,
+    )
+
+    heartbeat_state = fake_db.objects[("SystemState", "worker_heartbeat")]
+    assert heartbeat_state.value_json["active_run_id"] == str(active_run_id)
 
 
 def test_recover_stale_runs_creates_replacement_run_and_fails_running_steps(monkeypatch, tmp_path):
@@ -7563,6 +7841,100 @@ def test_recover_stale_runs_creates_replacement_run_and_fails_running_steps(monk
     assert observed["create_pending_kwargs"]["recovered_from_run_id"] == run.id
     assert observed["create_pending_kwargs"]["recovery_attempt_count"] == 1
     assert observed["manifest_run_ids"] == [run.id, replacement_run.id]
+
+
+def test_recover_stale_run_cleans_persistent_state_without_retrying_canceled_ticket(
+    monkeypatch, tmp_path
+):
+    symbols = _load_worker_symbols()
+    settings = _make_settings(tmp_path)
+    ticket = SimpleNamespace(
+        id=uuid.uuid4(),
+        status="canceled",
+        requeue_requested=True,
+        requeue_trigger="ticket_content",
+        updated_at=None,
+    )
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        status="running",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=11),
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+        last_heartbeat_at=None,
+        ended_at=None,
+        error_text=None,
+    )
+    step = SimpleNamespace(
+        ai_run_id=run.id,
+        step_index=1,
+        status="running",
+        error_text=None,
+        ended_at=None,
+    )
+    fake_db = _QueueRecoveryDb(
+        stale_runs=[run],
+        steps_by_run_id={run.id: [step]},
+        tickets_by_id={ticket.id: ticket},
+    )
+    manifests = []
+    persistent_cleanup_calls = []
+    lock_and_cleanup_order = []
+
+    @contextmanager
+    def fake_session_scope(_settings):
+        yield fake_db
+
+    monkeypatch.setattr("worker.queue.session_scope", fake_session_scope)
+    monkeypatch.setattr("worker.queue.log_worker_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "worker.queue._lock_ticket_for_recovery",
+        lambda db, *, ticket_id: (
+            lock_and_cleanup_order.append("ticket"),
+            ticket,
+        )[1],
+    )
+    monkeypatch.setattr(
+        "worker.queue.clear_requeue_request",
+        lambda value: (
+            setattr(value, "requeue_requested", False),
+            setattr(value, "requeue_trigger", None),
+        ),
+    )
+    monkeypatch.setattr(
+        "worker.queue.create_pending_ai_run",
+        lambda *args, **kwargs: pytest.fail("canceled stale run must not be retried"),
+    )
+    monkeypatch.setattr(
+        "worker.queue.handle_stale_persistent_run",
+        lambda db, *, run, stale_timeout_seconds: (
+            lock_and_cleanup_order.append("persistent"),
+            persistent_cleanup_calls.append(
+                {
+                    "run": run,
+                    "stale_timeout_seconds": stale_timeout_seconds,
+                }
+            ),
+            True,
+        )[2],
+    )
+    monkeypatch.setattr(
+        "worker.queue.write_run_manifest_snapshot",
+        lambda _settings, run_id: manifests.append(run_id),
+    )
+
+    assert symbols["recover_stale_runs"](settings) == 1
+    assert run.status == "superseded"
+    assert run.error_text is None
+    assert ticket.requeue_requested is False
+    assert persistent_cleanup_calls == [
+        {
+            "run": run,
+            "stale_timeout_seconds": settings.ai_run_stale_timeout_seconds,
+        }
+    ]
+    assert lock_and_cleanup_order == ["ticket", "persistent"]
+    assert manifests == [run.id]
 
 
 def test_recover_stale_runs_honors_deferred_requeue(monkeypatch, tmp_path):

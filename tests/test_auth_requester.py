@@ -318,7 +318,8 @@ def test_create_requester_ticket_creates_initial_records(monkeypatch, tmp_path):
     assert run is pending_run
 
 
-def test_add_requester_reply_reopens_and_requeues(monkeypatch, tmp_path):
+@pytest.mark.parametrize("terminal_status", ["resolved", "canceled"])
+def test_add_requester_reply_reopens_and_requeues(monkeypatch, tmp_path, terminal_status):
     symbols = _load_ticketing_symbols()
     from shared.security import utc_now
 
@@ -338,9 +339,9 @@ def test_add_requester_reply_reopens_and_requeues(monkeypatch, tmp_path):
         reference="T-000001",
         title="Closed ticket",
         created_by_user_id=requester.id,
-        status="resolved",
+        status=terminal_status,
         urgent=False,
-        resolved_at=utc_now(),
+        resolved_at=utc_now() if terminal_status == "resolved" else None,
     )
     existing_view = symbols["TicketView"](user_id=requester.id, ticket_id=ticket.id, last_viewed_at=utc_now())
     fake_db.existing[(requester.id, ticket.id)] = existing_view
@@ -365,7 +366,7 @@ def test_add_requester_reply_reopens_and_requeues(monkeypatch, tmp_path):
     assert ticket.resolved_at is None
     assert ticket.requeue_requested is True
     assert ticket.requeue_trigger == "reopen"
-    assert history[0].from_status == "resolved"
+    assert history[0].from_status == terminal_status
     assert history[0].to_status == "ai_triage"
     assert fake_db.existing[(requester.id, ticket.id)].last_viewed_at >= existing_view.last_viewed_at
 
@@ -1259,7 +1260,8 @@ def test_requester_list_route_does_not_mark_ticket_as_read(monkeypatch):
     assert observed["view_updates"] == 0
 
 
-def test_requester_list_htmx_returns_only_results_fragment(monkeypatch):
+@pytest.mark.parametrize("automatic", [False, True])
+def test_requester_list_htmx_returns_only_results_fragment(monkeypatch, automatic):
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
@@ -1287,7 +1289,7 @@ def test_requester_list_htmx_returns_only_results_fragment(monkeypatch):
 
     with stack["TestClient"](app) as client:
         full = client.get("/app/tickets")
-        fragment = client.get("/app/tickets?sort=updated_desc", headers={"HX-Request": "true"})
+        fragment = client.get("/app/tickets?sort=updated_desc", headers={"HX-Request": "true", "X-Ticket-Auto-Filter": str(automatic).lower()})
         canonical_redirect = client.get(
             "/app/tickets?q=&sort=updated_desc",
             follow_redirects=False,
@@ -1299,7 +1301,8 @@ def test_requester_list_htmx_returns_only_results_fragment(monkeypatch):
     assert fragment.status_code == 200
     assert "<html" not in fragment.text
     assert 'id="requester-ticket-index-results"' in fragment.text
-    assert fragment.headers["hx-push-url"] == "/app/tickets"
+    assert fragment.headers["hx-replace-url" if automatic else "hx-push-url"] == "/app/tickets"
+    assert ("hx-push-url" if automatic else "hx-replace-url") not in fragment.headers
     assert canonical_redirect.status_code == 303
     assert canonical_redirect.headers["location"] == "/app/tickets"
 
@@ -1405,9 +1408,25 @@ def test_requester_mutations_redirect_with_sanitized_list_return(monkeypatch, tm
         )
 
     assert reply.headers["location"] == (
-        f"/app/tickets/{ticket.reference}?return_to=%2Fapp%2Ftickets%3Fstate%3Dopen%26sort%3Dcreated_asc"
+        f"/app/tickets/{ticket.reference}?return_to=%2Fapp%2Ftickets%3Fsort%3Dcreated_asc"
     )
     assert resolve.headers["location"] == f"/app/tickets/{ticket.reference}?return_to=%2Fapp%2Ftickets"
+
+
+def test_requester_return_to_supports_canonical_repeated_state_filters():
+    stack = _load_web_stack()
+    sanitize = stack["routes_requester"]._sanitize_requester_return_to
+
+    assert sanitize(
+        "/app/tickets?state=resolved&state=waiting_reply&q=printer"
+    ) == "/app/tickets?q=printer&state=waiting_reply&state=resolved"
+    assert sanitize(
+        "/app/tickets?state=waiting_reply&state=waiting_reply"
+    ) == "/app/tickets"
+    assert sanitize("/app/tickets?state=unknown") == "/app/tickets"
+    assert sanitize("/app/tickets?state=waiting_on_user") == (
+        "/app/tickets?state=waiting_user"
+    )
 
 
 def test_requester_detail_route_marks_ticket_as_read(monkeypatch):

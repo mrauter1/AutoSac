@@ -61,7 +61,7 @@ def smoke_check() -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the Stage 1 web app.")
+    parser = argparse.ArgumentParser(description="Run the AutoSac web app.")
     parser.add_argument("--check", action="store_true", help="Run a deterministic smoke check and exit.")
     args = parser.parse_args()
     if args.check:

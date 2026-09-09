@@ -103,7 +103,8 @@ body {
 }
 
 .brand {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   font-weight: 700;
   letter-spacing: -0.03em;
 }
@@ -259,6 +260,82 @@ body {
 .checkbox > span {
   color: var(--app-text);
   font-weight: 600;
+}
+
+.ticket-state-filter {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.ticket-filter-feedback {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+[data-ticket-filter-results] {
+  position: relative;
+}
+
+.ticket-filter-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background: color-mix(in srgb, var(--surface) 65%, transparent);
+  cursor: progress;
+}
+
+.ticket-filter-overlay:not([hidden]) {
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  padding-top: min(3rem, 5%);
+}
+
+.ticket-filter-spinner {
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 3px solid var(--border);
+  border-top-color: var(--text-muted);
+  border-radius: 50%;
+  animation: ticket-filter-spin 0.75s linear infinite;
+}
+
+@keyframes ticket-filter-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ticket-filter-spinner { animation: none; }
+}
+
+.ticket-state-filter legend {
+  margin-bottom: 0.28rem;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.ticket-state-filter__options {
+  display: flex;
+  min-height: 2.15rem;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.65rem;
+  padding: 0.28rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.ticket-state-filter__options .checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.76rem;
+  white-space: nowrap;
 }
 
 input,
@@ -672,6 +749,39 @@ small {
 
 .page--workspace {
   max-width: 1180px;
+}
+
+/* Shared index header for requester tickets, Ops List and Ops Board. */
+.ticket-index__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.ticket-index__header h1,
+.ticket-index__header p {
+  margin-bottom: 0;
+}
+
+.ticket-index__header h1 {
+  font-size: clamp(1.35rem, 2vw, 1.75rem);
+}
+
+.ticket-index__header .button {
+  min-height: 2.15rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 8px;
+  font-size: 0.82rem;
+}
+
+@media (max-width: 560px) {
+  .ticket-index__header {
+    align-items: center;
+  }
 }
 
 .page--auth {

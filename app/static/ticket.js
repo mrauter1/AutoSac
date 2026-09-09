@@ -69,6 +69,8 @@
         confirmation = form.dataset.confirmAi || "";
       } else if (statusField && statusField.value === "resolved") {
         confirmation = form.dataset.confirmResolved || "";
+      } else if (statusField && statusField.value === "canceled") {
+        confirmation = form.dataset.confirmCanceled || "";
       }
     }
     if (confirmation && !window.confirm(confirmation)) {

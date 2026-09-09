@@ -1,6 +1,6 @@
-# AutoSac Stage 1
+# AutoSac - Sistema de Suporte Interno
 
-AutoSac Stage 1 is an internal ticket triage app built around server-rendered FastAPI pages, PostgreSQL-backed server-side sessions, and a separate worker that runs Codex in a read-only workspace. The product scope is intentionally narrow:
+AutoSac is an internal ticket triage app built around server-rendered FastAPI pages, PostgreSQL-backed server-side sessions, and a separate worker that runs Codex in a read-only workspace. The product scope is intentionally narrow:
 
 - Requesters create tickets, reply, and resolve their own requests.
 - Dev/TI and admins work the queue from `/ops` and `/ops/board`.

@@ -23,7 +23,15 @@ from shared.db import Base
 from shared.security import utc_now
 
 USER_ROLES = ("requester", "dev_ti", "admin")
-TICKET_STATUSES = ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")
+TICKET_STATUSES = (
+    "new",
+    "ai_triage",
+    "waiting_on_user",
+    "waiting_on_dev_ti",
+    "resolved",
+    "canceled",
+)
+TERMINAL_TICKET_STATUSES = frozenset({"resolved", "canceled"})
 IMPACT_LEVELS = ("low", "medium", "high", "unknown")
 AUTHOR_TYPES = ("requester", "dev_ti", "ai", "system")
 VISIBILITIES = ("public", "internal")

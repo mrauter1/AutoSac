@@ -20,6 +20,7 @@ from shared.permissions import ADMIN_ROLE, DEV_TI_ROLE
 from shared.security import utc_now
 from shared.ticketing import (
     apply_ai_route_target,
+    clear_requeue_request,
     create_ai_draft,
     process_deferred_requeue,
     publish_ai_failure_note,
@@ -129,6 +130,15 @@ def _prepare_run(settings: Settings, *, run_id, worker_instance_id: str) -> Prep
         # lock is released before router or Codex execution begins.
         _lock_ticket_for_snapshot(db, ticket_id=run.ticket_id)
         context = load_ticket_context(db, run.ticket_id)
+        if context.ticket.status == "canceled":
+            clear_requeue_request(context.ticket)
+            _mark_superseded_due_to_stale_input(
+                db,
+                run=run,
+                ticket=context.ticket,
+                reason="ticket_canceled",
+            )
+            return None
         current_fingerprint, _ = _freeze_run_input(
             db,
             settings=settings,
@@ -463,12 +473,16 @@ def _apply_success_result(
         )
 
         turn = load_codex_turn_for_ai_run(db, ai_run_id=run.id)
-        publication_blocker = _app_server_turn_publication_blocker(
-            db,
-            settings=settings,
-            context=context,
-            run=run,
-            turn=turn,
+        publication_blocker = (
+            "ticket_canceled"
+            if context.ticket.status == "canceled"
+            else _app_server_turn_publication_blocker(
+                db,
+                settings=settings,
+                context=context,
+                run=run,
+                turn=turn,
+            )
         )
         freshness_baseline_hash = (
             turn.effective_input_hash
@@ -634,15 +648,25 @@ def _mark_failed(settings: Settings, *, run_id, worker_instance_id: str, error_t
             raise RunOwnershipLost(
                 f"Run {run_id} is no longer running for worker {worker_instance_id} during failure handling."
             )
+        _lock_ticket_for_snapshot(db, ticket_id=run.ticket_id)
         ticket = db.get(Ticket, run.ticket_id)
         failed_at = utc_now()
         if getattr(run, "pipeline_version", None) is None:
             run.pipeline_version = PIPELINE_VERSION
-        run.status = "failed"
-        run.ended_at = failed_at
-        run.error_text = error_text
+        if ticket is not None and ticket.status == "canceled":
+            clear_requeue_request(ticket)
+            _mark_superseded_due_to_stale_input(
+                db,
+                run=run,
+                ticket=ticket,
+                reason="ticket_canceled",
+            )
+        else:
+            run.status = "failed"
+            run.ended_at = failed_at
+            run.error_text = error_text
 
-        if ticket is not None:
+        if ticket is not None and ticket.status != "canceled":
             publish_ai_failure_note(
                 db,
                 ticket=ticket,

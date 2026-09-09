@@ -10,6 +10,19 @@ import pytest
 from shared.config import Settings
 
 
+def test_application_brand_is_consistent_across_locales_and_api():
+    from app.branding import APP_NAME
+    from app.i18n import SUPPORTED_UI_LOCALES, get_translator
+    from app.main import create_app
+
+    assert APP_NAME == "AutoSac - Sistema de Suporte Interno"
+    for locale in SUPPORTED_UI_LOCALES:
+        translate = get_translator(locale)
+        assert translate("brand.name") == APP_NAME
+        assert "Stage 1" not in translate("login.subtitle")
+    assert create_app().openapi()["info"]["title"] == APP_NAME
+
+
 class _RouteDb:
     def __init__(self):
         self.commit_calls = 0
@@ -175,6 +188,8 @@ def test_login_page_renders_portuguese_from_accept_language(monkeypatch, tmp_pat
 
     assert response.status_code == 200
     assert '<html lang="pt-BR">' in response.text
+    assert "AutoSac - Sistema de Suporte Interno" in response.text
+    assert "Stage 1" not in response.text
     assert "Acesso interno" in response.text
     assert "Entrar" in response.text
 
@@ -212,10 +227,13 @@ def test_requester_page_renders_portuguese_empty_state(monkeypatch):
     assert response.status_code == 200
     assert '<html lang="pt-BR">' in response.text
     assert "Meus tickets" in response.text
-    assert "Criar seu primeiro ticket" in response.text
+    assert "Nenhum ticket ativo" in response.text
+    assert "Abra um novo ticket ou selecione Resolvidos ou Cancelados" in response.text
+    assert "Abrir ticket" in response.text
 
 
-def test_ops_fragment_renders_portuguese_filters(monkeypatch):
+@pytest.mark.parametrize("path", ["/ops", "/ops/board"])
+def test_ops_fragment_renders_portuguese_filters(monkeypatch, path):
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
@@ -229,7 +247,7 @@ def test_ops_fragment_renders_portuguese_filters(monkeypatch):
             "rows": [],
             "grouped_rows": {key: [] for key in ("new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved")},
             "filters": {
-                "status": "",
+                "status": "new",
                 "route_target_id": "",
                 "assigned_to": "",
                 "urgent": False,
@@ -239,11 +257,11 @@ def test_ops_fragment_renders_portuguese_filters(monkeypatch):
                 "sort": "updated_desc",
             },
             "ops_users": [],
-            "status_options": [],
+            "status_options": ["new"],
             "route_target_options": [],
             "sort_options": ("updated_desc",),
             "active_filter_count": 1,
-            "secondary_filter_count": 0,
+            "secondary_filter_count": 1,
             "has_query_state": True,
         },
     )
@@ -253,12 +271,16 @@ def test_ops_fragment_renders_portuguese_filters(monkeypatch):
     app.dependency_overrides[stack["routes_ops"].get_required_auth_session] = lambda: auth_session
 
     with stack["TestClient"](app) as client:
-        response = client.get("/ops?status=new", headers={"HX-Request": "true", "Accept-Language": "pt-BR"})
+        response = client.get(f"{path}?status=new", headers={"HX-Request": "true", "Accept-Language": "pt-BR"})
 
     assert response.status_code == 200
     assert "<html" not in response.text
-    assert "Nenhum ticket correspondente" in response.text
-    assert "Ajuste os filtros para ampliar a fila." in response.text
+    assert '<details class="ops-filter-disclosure">' in response.text
+    assert '<span class="filter-count">1</span>' in response.text
+    assert '<option value="new" selected>' in response.text
+    if path == "/ops":
+        assert "Nenhum ticket correspondente" in response.text
+        assert "Ajuste os filtros para ampliar a fila." in response.text
 
 
 @pytest.mark.parametrize(

@@ -13,7 +13,7 @@ from shared.user_admin import create_user
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Create a local Stage 1 user.")
+    parser = argparse.ArgumentParser(description="Create a local AutoSac user.")
     parser.add_argument("--email", required=True)
     parser.add_argument("--display-name", required=True)
     parser.add_argument("--password", required=True)

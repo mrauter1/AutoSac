@@ -1,6 +1,6 @@
-{% set ordered_statuses = ["new", "ai_triage", "waiting_on_user", "waiting_on_dev_ti", "resolved"] %}
 {% set shown_result_count = result_count | default(rows | default([]) | length) %}
-<div id="ops-results">
+<div id="ops-results" data-ticket-filter-results>
+{% include "ticket_filter_loading.html" %}
 {% if shown_result_count == 0 %}
 <section class="board-empty" role="status">
   {% if active_filter_count | default(0) %}
@@ -15,15 +15,12 @@
 </section>
 {% else %}
 <nav class="board-status-jump" aria-label="{{ t('ops.board.jump_label') }}">
-  {% for status in ordered_statuses %}
-  {% if not filters.status or filters.status == status %}
+  {% for status in visible_statuses %}
   <a href="#board-column-{{ status }}">{{ ops_status_label(status) }} <span>{{ grouped_rows[status] | length }}</span></a>
-  {% endif %}
   {% endfor %}
 </nav>
 <section class="ops-board" aria-label="{{ t('ops.board.heading') }}">
-  {% for status in ordered_statuses %}
-  {% if not filters.status or filters.status == status %}
+  {% for status in visible_statuses %}
   <section id="board-column-{{ status }}" class="ops-column" data-board-column data-status="{{ status }}" aria-labelledby="board-column-title-{{ status }}">
     <div class="ops-column__header">
       <div>
@@ -69,14 +66,14 @@
                 method="post"
                 action="/ops/tickets/{{ ticket.reference }}/set-status"
                 data-board-move-form
-                {% if destination == "ai_triage" %}data-confirm="{{ t('ops.board.confirm_ai_triage') }}"{% elif destination == "resolved" %}data-confirm="{{ t('ops.board.confirm_resolved') }}"{% endif %}
+                {% if destination == "ai_triage" %}data-confirm="{{ t('ops.board.confirm_ai_triage') }}"{% elif destination == "resolved" %}data-confirm="{{ t('ops.board.confirm_resolved') }}"{% elif destination == "canceled" %}data-confirm="{{ t('ops.board.confirm_canceled') }}"{% endif %}
               >
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="next_status" value="{{ destination }}">
                 <input type="hidden" name="return_to" value="{{ ticket_return_to | default('/ops/board') }}">
                 <button type="submit" class="board-move-menu__item">
                   {{ ops_status_label(destination) }}
-                  {% if destination == "ai_triage" %}<span class="visually-hidden"> — {{ t("ops.board.ai_triage_effect") }}</span>{% elif destination == "resolved" %}<span class="visually-hidden"> — {{ t("ops.board.resolved_effect") }}</span>{% endif %}
+                  {% if destination == "ai_triage" %}<span class="visually-hidden"> — {{ t("ops.board.ai_triage_effect") }}</span>{% elif destination == "resolved" %}<span class="visually-hidden"> — {{ t("ops.board.resolved_effect") }}</span>{% elif destination == "canceled" %}<span class="visually-hidden"> — {{ t("ops.board.canceled_effect") }}</span>{% endif %}
                 </button>
               </form>
               {% endif %}
@@ -93,7 +90,6 @@
       {% endfor %}
     </div>
   </section>
-  {% endif %}
   {% endfor %}
 </section>
 {% endif %}

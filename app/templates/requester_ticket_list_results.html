@@ -1,4 +1,5 @@
-<div id="requester-ticket-index-results">
+<div id="requester-ticket-index-results" data-ticket-filter-results>
+  {% include "ticket_filter_loading.html" %}
   <div class="ticket-index__summary">
     <span role="status" aria-live="polite">{{ t("filters.result_count", count=result_count) }}</span>
     {% if filter_chips %}
@@ -6,7 +7,6 @@
       {% for chip in filter_chips %}
       <a class="filter-chip" href="{{ chip.remaining_url }}">
         {% if chip.key == "q" %}{{ t("filters.search") }}: {{ chip.value }}
-        {% elif chip.key == "state" %}{{ t("requester.filters.state." ~ chip.value) }}
         {% elif chip.key == "updated_since_viewed" %}{{ t("filters.updated_since_viewed") }}
         {% endif %}
         <span aria-hidden="true">×</span><span class="visually-hidden">{{ t("filters.remove") }}</span>
@@ -38,7 +38,7 @@
         </span>
         <span class="ticket-index-row__state">
           <span class="ticket-index-row__mobile-label">{{ t("ticket_index.column.state") }}</span>
-          <span class="status-pill">{{ requester_status_label(ticket.status) }}</span>
+          <span class="status-pill">{{ t("requester.filters.state." ~ row.state_group) }}</span>
         </span>
         <time class="ticket-index-row__updated" datetime="{{ format_datetime_iso(ticket.updated_at) }}">
           <span class="ticket-index-row__mobile-label">{{ t("ticket_index.column.updated") }}</span>
@@ -56,9 +56,9 @@
   </section>
   {% else %}
   <section class="ticket-index__empty" role="status">
-    <h2>{{ t("requester.list.empty_heading") }}</h2>
-    <p>{{ t("requester.list.empty_body") }}</p>
-    <a class="button" href="{{ new_ticket_path }}">{{ t("button.create_first_ticket") }}</a>
+    <h2>{{ t("requester.list.no_active_heading") }}</h2>
+    <p>{{ t("requester.list.no_active_body") }}</p>
+    <a class="button" href="{{ new_ticket_path }}">{{ t("button.open_ticket") }}</a>
   </section>
   {% endif %}
 </div>

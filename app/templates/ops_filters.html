@@ -3,6 +3,9 @@
     method="get"
     action="{{ filters_action }}"
     class="ops-filters"
+    data-ticket-filters
+    hx-trigger="submit, ticket-filter-submit"
+    hx-sync="this:replace"
     hx-get="{{ filters_action }}"
     hx-target="#{{ filters_target_id }}"
     hx-swap="outerHTML"
@@ -11,17 +14,19 @@
     <div class="ops-filters__primary">
       <label class="field ops-filter-search" for="ops-filter-q">
         <span>{{ t("filters.search") }}</span>
-        <input id="ops-filter-q" type="search" name="q" value="{{ filters.q }}" placeholder="{{ t('filters.search_placeholder') }}" maxlength="120">
+        <input id="ops-filter-q" type="search" name="q" value="{{ filters.q }}" placeholder="{{ t('filters.search_placeholder') }}" maxlength="120" hx-preserve>
       </label>
-      <label class="field" for="ops-filter-status">
-        <span>{{ t("filters.status") }}</span>
-        <select id="ops-filter-status" name="status">
-          <option value="">{{ t("filters.all_statuses") }}</option>
-          {% for value in status_options %}
-          <option value="{{ value }}"{% if filters.status == value %} selected{% endif %}>{{ ops_status_label(value) }}</option>
+      <fieldset class="ticket-state-filter ops-ticket-state-filter">
+        <legend>{{ t("filters.states") }}</legend>
+        <div class="ticket-state-filter__options">
+          {% for value in state_options %}
+          <label class="checkbox" for="ops-filter-state-{{ value }}">
+            <input id="ops-filter-state-{{ value }}" type="checkbox" name="state" value="{{ value }}"{% if value in filters.states %} checked{% endif %}>
+            <span>{{ t("ops.filters.state." ~ value) }}</span>
+          </label>
           {% endfor %}
-        </select>
-      </label>
+        </div>
+      </fieldset>
       <label class="field" for="ops-filter-assigned">
         <span>{{ t("filters.assigned_to") }}</span>
         <select id="ops-filter-assigned" name="assigned_to">
@@ -49,12 +54,22 @@
         <label class="checkbox" for="ops-filter-approval"><input id="ops-filter-approval" type="checkbox" name="needs_approval"{% if filters.needs_approval %} checked{% endif %}><span>{{ t("filters.needs_approval") }}</span></label>
         <label class="checkbox" for="ops-filter-updated"><input id="ops-filter-updated" type="checkbox" name="updated_since_viewed"{% if filters.updated_since_viewed %} checked{% endif %}><span>{{ t("filters.updated_since_viewed") }}</span></label>
       </div>
-      <details class="ops-filter-disclosure"{% if secondary_filter_count %} open{% endif %}>
+      <details class="ops-filter-disclosure">
         <summary class="button button--ghost">
           {{ t("filters.more") }}{% if secondary_filter_count %} <span class="filter-count">{{ secondary_filter_count }}</span>{% endif %}
         </summary>
         <div class="ops-filter-disclosure__content">
           <div class="ops-filters__grid">
+            <label class="field" for="ops-filter-status">
+              <span>{{ t("filters.exact_status") }}</span>
+              <select id="ops-filter-status" name="status">
+                <option value="">{{ t("filters.all_statuses") }}</option>
+                {% for value in status_options %}
+                <option value="{{ value }}"{% if filters.status == value %} selected{% endif %}>{{ ops_status_label(value) }}</option>
+                {% endfor %}
+              </select>
+              <small>{{ t("filters.exact_status_hint") }}</small>
+            </label>
             <label class="field" for="ops-filter-route">
               <span>{{ t("filters.route_target") }}</span>
               <select id="ops-filter-route" name="route_target_id">
@@ -75,6 +90,7 @@
       {% if has_query_state %}<a class="button button--ghost ops-filters__reset" href="{{ filters_action }}">{{ t("button.reset") }}</a>{% endif %}
     </div>
   </form>
+  {% include "ticket_filter_feedback.html" %}
 
   <div class="ops-toolbar__summary">
     <span role="status" aria-live="polite">{{ t("filters.result_count", count=result_count) }}</span>

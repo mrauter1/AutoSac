@@ -22,12 +22,19 @@ from app.requester_view import build_requester_ticket_detail_context
 from app.ticket_index import (
     COMMON_TICKET_SORTS,
     DEFAULT_TICKET_SORT,
+    REQUESTER_DEFAULT_TICKET_STATES,
+    TICKET_STATE_GROUPS,
     common_ticket_order_clauses,
     escaped_ilike_pattern,
+    normalize_ticket_states,
     normalize_ticket_sort,
+    split_query_items,
+    statuses_for_ticket_states,
+    ticket_state_for_status,
+    ticket_state_query_items,
 )
 from app.ticket_live import if_none_match_matches, load_ticket_live_state, ticket_live_representation_etag
-from app.ui import build_template_context, is_htmx_request, templates
+from app.ui import build_template_context, is_htmx_request, templates, ticket_filter_history_header
 from app.uploads import (
     UploadValidationError,
     get_form_attachments,
@@ -50,7 +57,6 @@ from shared.ticketing import (
 router = APIRouter()
 
 _REQUESTER_FILTER_QUERY_KEYS = frozenset({"q", "state", "sort", "updated_since_viewed"})
-_REQUESTER_STATES = frozenset({"open", "waiting_on_user", "resolved"})
 _REQUESTER_SORTS = COMMON_TICKET_SORTS | {"needs_reply_first"}
 _REQUESTER_LIST_PATH = "/app/tickets"
 
@@ -95,12 +101,25 @@ def _parse_bool(value: str | None) -> bool:
     return value in {"on", "true", "1", "yes"}
 
 
+def _normalize_requester_states(values: list[str]) -> tuple[str, ...]:
+    if values == ["open"]:
+        return REQUESTER_DEFAULT_TICKET_STATES
+    return normalize_ticket_states(
+        ("waiting_user" if value == "waiting_on_user" else value for value in values),
+        default=REQUESTER_DEFAULT_TICKET_STATES,
+    )
+
+
 def _read_requester_filters(request: Request) -> dict[str, object]:
     query = request.query_params
-    state = query.get("state", "").strip()
+    raw_states = query.getlist("state")
+    try:
+        states = _normalize_requester_states(raw_states)
+    except ValueError:
+        states = REQUESTER_DEFAULT_TICKET_STATES
     return {
         "q": query.get("q", "").strip()[:120],
-        "state": state if state in _REQUESTER_STATES else "",
+        "states": states,
         "sort": normalize_ticket_sort(query.get("sort"), allowed=_REQUESTER_SORTS),
         "updated_since_viewed": _parse_bool(query.get("updated_since_viewed")),
     }
@@ -109,12 +128,11 @@ def _read_requester_filters(request: Request) -> dict[str, object]:
 def _requester_query_items(filters: dict[str, object]) -> list[tuple[str, str]]:
     items: list[tuple[str, str]] = []
     query = str(filters.get("q", "")).strip()
-    state = str(filters.get("state", "")).strip()
+    states = tuple(filters.get("states", REQUESTER_DEFAULT_TICKET_STATES))
     sort_key = normalize_ticket_sort(str(filters.get("sort", "")), allowed=_REQUESTER_SORTS)
     if query:
         items.append(("q", query))
-    if state:
-        items.append(("state", state))
+    items.extend(ticket_state_query_items(states, default=REQUESTER_DEFAULT_TICKET_STATES))
     if filters.get("updated_since_viewed"):
         items.append(("updated_since_viewed", "on"))
     if sort_key != DEFAULT_TICKET_SORT:
@@ -134,6 +152,8 @@ def _requester_list_url(filters: dict[str, object]) -> str:
 def _requester_filter_chips(filters: dict[str, object]) -> list[dict[str, str]]:
     chips: list[dict[str, str]] = []
     for key, value in _requester_active_filter_items(filters):
+        if key == "state":
+            continue
         remaining = dict(filters)
         remaining[key] = False if isinstance(filters.get(key), bool) else ""
         chips.append(
@@ -155,27 +175,32 @@ def _sanitize_requester_return_to(value: str | None) -> str:
         return _REQUESTER_LIST_PATH
     if len(parsed.query) > 1024:
         return _REQUESTER_LIST_PATH
-    items = parse_qsl(parsed.query, keep_blank_values=True)
-    keys = [key for key, _ in items]
-    if len(keys) != len(set(keys)) or any(key not in _REQUESTER_FILTER_QUERY_KEYS for key in keys):
+    try:
+        values, repeated = split_query_items(
+            parse_qsl(parsed.query, keep_blank_values=True),
+            allowed_keys=_REQUESTER_FILTER_QUERY_KEYS,
+            repeated_keys={"state"},
+        )
+    except ValueError:
         return _REQUESTER_LIST_PATH
-    values = dict(items)
     query_value = values.get("q", "")
-    state = values.get("state", "")
     sort_key = values.get("sort", DEFAULT_TICKET_SORT)
     updated = values.get("updated_since_viewed")
     if len(query_value) > 120:
-        return _REQUESTER_LIST_PATH
-    if state and state not in _REQUESTER_STATES:
         return _REQUESTER_LIST_PATH
     if sort_key not in _REQUESTER_SORTS:
         return _REQUESTER_LIST_PATH
     if updated is not None and updated not in {"on", "true", "1", "yes"}:
         return _REQUESTER_LIST_PATH
+    raw_states = repeated["state"]
+    try:
+        states = _normalize_requester_states(raw_states)
+    except ValueError:
+        return _REQUESTER_LIST_PATH
     return _requester_list_url(
         {
             "q": query_value.strip(),
-            "state": state,
+            "states": states,
             "sort": sort_key,
             "updated_since_viewed": updated is not None,
         }
@@ -243,7 +268,7 @@ def _load_requester_ticket_rows(
 ) -> list[dict[str, object]]:
     statement = select(Ticket).where(Ticket.created_by_user_id == requester_id)
     search_filter = str(filters["q"])
-    state_filter = str(filters["state"])
+    states = tuple(filters["states"])
     sort_key = str(filters["sort"])
     if search_filter:
         pattern = escaped_ilike_pattern(search_filter)
@@ -253,10 +278,7 @@ def _load_requester_ticket_rows(
                 Ticket.title.ilike(pattern, escape="\\"),
             )
         )
-    if state_filter == "open":
-        statement = statement.where(Ticket.status != "resolved")
-    elif state_filter:
-        statement = statement.where(Ticket.status == state_filter)
+    statement = statement.where(Ticket.status.in_(statuses_for_ticket_states(states)))
     if sort_key == "needs_reply_first":
         statement = statement.order_by(
             case((Ticket.status == "waiting_on_user", 0), else_=1),
@@ -284,6 +306,7 @@ def _load_requester_ticket_rows(
         rows.append(
             {
                 "ticket": ticket,
+                "state_group": ticket_state_for_status(ticket.status),
                 "updated_for_user": updated_for_user,
             }
         )
@@ -297,7 +320,7 @@ def _requester_list_context(db: Session, *, requester_id, filters: dict[str, obj
         "tickets": rows,
         "result_count": len(rows),
         "filters": filters,
-        "state_options": ("open", "waiting_on_user", "resolved"),
+        "state_options": TICKET_STATE_GROUPS,
         "sort_options": (
             "updated_desc",
             "updated_asc",
@@ -306,7 +329,9 @@ def _requester_list_context(db: Session, *, requester_id, filters: dict[str, obj
             "needs_reply_first",
         ),
         "filter_chips": _requester_filter_chips(filters),
-        "active_filter_count": len(_requester_active_filter_items(filters)),
+        "active_filter_count": len(
+            {key for key, _ in _requester_query_items(filters) if key != "sort"}
+        ),
         "has_query_state": bool(query_items),
         "requester_list_url": _requester_list_url(filters),
     }
@@ -337,10 +362,10 @@ def requester_ticket_list(
         },
     )
     htmx_request = is_htmx_request(request)
-    template_name = "requester_ticket_list_results.html" if htmx_request else "requester_ticket_list.html"
+    template_name = "requester_ticket_list_workspace.html" if htmx_request else "requester_ticket_list.html"
     response = templates.TemplateResponse(request, template_name, context)
     if htmx_request:
-        response.headers["HX-Push-Url"] = canonical_url
+        response.headers[ticket_filter_history_header(request)] = canonical_url
     return response
 
 

@@ -105,7 +105,7 @@
               </label>
               <button type="submit" class="button">{{ t("button.save_assignment") }}</button>
             </form>
-            <form method="post" action="/ops/tickets/{{ ticket.reference }}/set-status?return_to={{ ops_return_url | default('/ops/board') | urlencode }}" class="stack stack--tight" data-status-form data-confirm-ai="{{ t('ops.board.confirm_ai_triage') }}" data-confirm-resolved="{{ t('ops.board.confirm_resolved') }}">
+            <form method="post" action="/ops/tickets/{{ ticket.reference }}/set-status?return_to={{ ops_return_url | default('/ops/board') | urlencode }}" class="stack stack--tight" data-status-form data-confirm-ai="{{ t('ops.board.confirm_ai_triage') }}" data-confirm-resolved="{{ t('ops.board.confirm_resolved') }}" data-confirm-canceled="{{ t('ops.board.confirm_canceled') }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <label class="field">
                 <span>{{ t("field.status") }}</span>

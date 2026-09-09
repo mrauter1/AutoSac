@@ -227,7 +227,8 @@
 
     async submitMove(form, reference) {
       const card = form.closest("[data-board-card]");
-      if (this.submitting || this.isCardLocked(card)) {
+      if (this.submitting || this.isCardLocked(card)
+          || this.root.querySelector('[data-ticket-filters][aria-busy="true"]')) {
         return;
       }
       const confirmation = form.dataset.confirm;
@@ -246,6 +247,11 @@
       this.submitting = true;
       this.hideFeedback();
       this.lockCard(card);
+      // Keep filter requests and the post-move refresh from replacing each other.
+      const filterControls = this.root.querySelectorAll(
+        "[data-ticket-filters] input:not(:disabled), [data-ticket-filters] select:not(:disabled), [data-ticket-filters] button:not(:disabled)"
+      );
+      filterControls.forEach((control) => { control.disabled = true; });
 
       try {
         let response;
@@ -283,6 +289,7 @@
         }
       } finally {
         this.submitting = false;
+        filterControls.forEach((control) => { control.disabled = false; });
       }
     }
 
@@ -313,6 +320,10 @@
         throw new Error(this.root.dataset.boardErrorLabel);
       }
       current.replaceWith(replacement);
+      if (window.htmx) {
+        window.htmx.process(replacement);
+        window.htmx.trigger(replacement, "htmx:load");
+      }
       this.enableDraggableCards();
       const escapedReference = window.CSS && window.CSS.escape ? window.CSS.escape(reference || "") : reference;
       const updatedCard = escapedReference

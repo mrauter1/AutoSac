@@ -14,46 +14,6 @@
     <a class="button" href="{{ new_ticket_path }}">{{ t("button.open_ticket") }}</a>
   </header>
 
-  <form
-    method="get"
-    action="/app/tickets"
-    class="ticket-index__controls requester-ticket-filters"
-    hx-get="/app/tickets"
-    hx-target="#requester-ticket-index-results"
-    hx-swap="outerHTML"
-    hx-push-url="true"
-  >
-    <label class="field ticket-index-filter--search" for="requester-filter-q">
-      <span>{{ t("filters.search") }}</span>
-      <input id="requester-filter-q" type="search" name="q" value="{{ filters.q }}" placeholder="{{ t('filters.search_placeholder') }}" maxlength="120">
-    </label>
-    <label class="field" for="requester-filter-state">
-      <span>{{ t("requester.filters.state") }}</span>
-      <select id="requester-filter-state" name="state">
-        <option value="">{{ t("requester.filters.all_states") }}</option>
-        {% for value in state_options %}
-        <option value="{{ value }}"{% if filters.state == value %} selected{% endif %}>{{ t("requester.filters.state." ~ value) }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label class="field" for="requester-filter-sort">
-      <span>{{ t("filters.sort") }}</span>
-      <select id="requester-filter-sort" name="sort">
-        {% for value in sort_options %}
-        <option value="{{ value }}"{% if filters.sort == value %} selected{% endif %}>{{ t("filters.sort." ~ value) }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label class="checkbox ticket-index-filter--check" for="requester-filter-updated">
-      <input id="requester-filter-updated" type="checkbox" name="updated_since_viewed"{% if filters.updated_since_viewed %} checked{% endif %}>
-      <span>{{ t("filters.updated_since_viewed") }}</span>
-    </label>
-    <div class="ticket-index__filter-actions">
-      <button type="submit" class="button">{{ t("button.apply_filters") }}</button>
-      {% if has_query_state %}<a class="button button--ghost" href="/app/tickets">{{ t("button.reset") }}</a>{% endif %}
-    </div>
-  </form>
-
-  {% include "requester_ticket_list_results.html" %}
+  {% include "requester_ticket_list_workspace.html" %}
 </div>
 {% endblock %}

@@ -67,6 +67,17 @@ def test_ops_return_path_allows_only_queue_views_and_filter_keys():
     assert routes_ops._sanitize_ops_return_to("/ops/board?q=one&q=two") == "/ops/board"
 
 
+def test_ops_views_share_the_header_without_losing_their_titles():
+    for name, heading in (("ops_board.html", "ops.board.heading"),
+                          ("ops_ticket_list.html", "ops.list.heading")):
+        page = Path(f"app/templates/{name}").read_text(encoding="utf-8")
+        assert '{% include "ops_workspace_header.html" %}' in page
+        assert f'heading_key = "{heading}"' in page
+    header = Path("app/templates/ops_workspace_header.html").read_text(encoding="utf-8")
+    assert 'class="ticket-index__header"' in header
+    assert 'href="/ops/tickets/new"' in header
+
+
 def test_board_progressive_enhancement_contract_is_explicit():
     page = Path("app/templates/ops_board.html").read_text(encoding="utf-8")
     board = Path("app/templates/ops_board_columns.html").read_text(encoding="utf-8")

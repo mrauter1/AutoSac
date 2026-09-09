@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import browser_login_redirect, should_redirect_browser_to_login
+from app.branding import APP_NAME
 from app.i18n import resolve_ui_locale, translate_error_text
 from app.routes_auth import router as auth_router
 from app.routes_ops import router as ops_router
@@ -21,7 +22,7 @@ from shared.workspace import verify_workspace_contract_paths
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Stage 1 AI Triage MVP")
+    app = FastAPI(title=APP_NAME)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     app.include_router(auth_router)

@@ -1,0 +1,49 @@
+<div id="requester-ticket-workspace-results">
+  <form
+    method="get"
+    action="/app/tickets"
+    class="ticket-index__controls requester-ticket-filters"
+    data-ticket-filters
+    hx-trigger="submit, ticket-filter-submit"
+    hx-sync="this:replace"
+    hx-get="/app/tickets"
+    hx-target="#requester-ticket-workspace-results"
+    hx-swap="outerHTML"
+    hx-push-url="true"
+  >
+    <label class="field ticket-index-filter--search" for="requester-filter-q">
+      <span>{{ t("filters.search") }}</span>
+      <input id="requester-filter-q" type="search" name="q" value="{{ filters.q }}" placeholder="{{ t('filters.search_placeholder') }}" maxlength="120" hx-preserve>
+    </label>
+    <fieldset class="ticket-state-filter requester-ticket-state-filter">
+      <legend>{{ t("requester.filters.state") }}</legend>
+      <div class="ticket-state-filter__options">
+        {% for value in state_options %}
+        <label class="checkbox" for="requester-filter-state-{{ value }}">
+          <input id="requester-filter-state-{{ value }}" type="checkbox" name="state" value="{{ value }}"{% if value in filters.states %} checked{% endif %}>
+          <span>{{ t("requester.filters.state." ~ value) }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </fieldset>
+    <label class="field" for="requester-filter-sort">
+      <span>{{ t("filters.sort") }}</span>
+      <select id="requester-filter-sort" name="sort">
+        {% for value in sort_options %}
+        <option value="{{ value }}"{% if filters.sort == value %} selected{% endif %}>{{ t("filters.sort." ~ value) }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="checkbox ticket-index-filter--check" for="requester-filter-updated">
+      <input id="requester-filter-updated" type="checkbox" name="updated_since_viewed"{% if filters.updated_since_viewed %} checked{% endif %}>
+      <span>{{ t("filters.updated_since_viewed") }}</span>
+    </label>
+    <div class="ticket-index__filter-actions">
+      <button type="submit" class="button">{{ t("button.apply_filters") }}</button>
+      {% if has_query_state %}<a class="button button--ghost" href="/app/tickets">{{ t("button.reset") }}</a>{% endif %}
+    </div>
+  </form>
+  {% include "ticket_filter_feedback.html" %}
+
+  {% include "requester_ticket_list_results.html" %}
+</div>

@@ -1,26 +1,21 @@
-.page--board {
+/* Shared geometry keeps the filters stable when switching List / Board. */
+.page.page--ops-index {
   width: 100%;
   min-width: 0;
   max-width: none;
+  padding-top: 1.15rem;
   padding-inline: clamp(0.75rem, 1.8vw, 1.5rem);
 }
 
 .board-workspace {
   min-width: 0;
+  gap: 0.75rem;
   grid-template-columns: minmax(0, 1fr);
 }
 
 #ops-workspace-results {
   min-width: 0;
   max-width: 100%;
-}
-
-.board-page-header {
-  margin-bottom: 0.75rem;
-}
-
-.board-page-header h1 {
-  margin-bottom: 0;
 }
 
 .ops-toolbar {
@@ -56,7 +51,7 @@
 
 .ops-filters__primary {
   display: grid;
-  grid-template-columns: minmax(14rem, 2fr) repeat(3, minmax(9rem, 1fr)) auto;
+  grid-template-columns: minmax(13rem, 1.5fr) minmax(23rem, 2fr) repeat(2, minmax(9rem, 1fr)) auto;
   align-items: end;
   gap: 0.5rem;
 }
@@ -485,7 +480,7 @@
 
 @media (max-width: 1120px) {
   .ops-filters__primary {
-    grid-template-columns: minmax(14rem, 2fr) repeat(2, minmax(9rem, 1fr));
+    grid-template-columns: minmax(14rem, 2fr) minmax(22rem, 2fr) minmax(9rem, 1fr);
   }
 
   .ops-filters__apply {
@@ -507,6 +502,10 @@
   .ops-filter-search {
     min-width: 0;
     max-width: none;
+    grid-column: 1 / -1;
+  }
+
+  .ops-ticket-state-filter {
     grid-column: 1 / -1;
   }
 
@@ -559,6 +558,10 @@
   }
 
   .ops-filter-search {
+    grid-column: auto;
+  }
+
+  .ops-ticket-state-filter {
     grid-column: auto;
   }
 

@@ -14,7 +14,7 @@
       <h1>{{ ticket.title }}</h1>
     </div>
     {% set actions_enabled = requester_actions_enabled | default(false) %}
-    {% if ticket.status != "resolved" %}
+    {% if ticket.status not in ["resolved", "canceled"] %}
     <form{% if actions_enabled %} method="post" action="/app/tickets/{{ ticket.reference }}/resolve" data-confirm="{{ t('requester.detail.confirm_resolve') }}"{% else %} aria-disabled="true"{% endif %}>
       {% if actions_enabled %}
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

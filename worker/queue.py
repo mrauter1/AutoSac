@@ -97,6 +97,17 @@ def _mark_running_steps_failed(db: Session, *, run_id, error_text: str, failed_a
         step.ended_at = failed_at
 
 
+def _lock_ticket_for_recovery(db: Session, *, ticket_id):
+    if not isinstance(db, Session):
+        return db.get(Ticket, ticket_id)
+    return db.execute(
+        select(Ticket)
+        .where(Ticket.id == ticket_id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    ).scalar_one_or_none()
+
+
 def recover_stale_runs(settings: Settings) -> int:
     stale_before = utc_now() - timedelta(seconds=settings.ai_run_stale_timeout_seconds)
     manifest_run_ids: list = []
@@ -126,12 +137,25 @@ def recover_stale_runs(settings: Settings) -> int:
             run.error_text = error_text
             _mark_running_steps_failed(db, run_id=run.id, error_text=error_text, failed_at=failed_at)
             _append_manifest_run_id(manifest_run_ids, run.id)
-            if handle_stale_persistent_run(
+            ticket = _lock_ticket_for_recovery(db, ticket_id=run.ticket_id)
+            persistent_run_recovered = handle_stale_persistent_run(
                 db,
                 run=run,
                 stale_timeout_seconds=settings.ai_run_stale_timeout_seconds,
-            ):
-                ticket = db.get(Ticket, run.ticket_id)
+            )
+            if ticket is not None and ticket.status == "canceled":
+                run.status = "superseded"
+                run.error_text = None
+                clear_requeue_request(ticket)
+                log_worker_event(
+                    "stale_run_superseded_for_canceled_ticket",
+                    run_id=str(run.id),
+                    ticket_id=str(ticket.id),
+                    persistent_run_recovered=persistent_run_recovered,
+                )
+                recovered_count += 1
+                continue
+            if persistent_run_recovered:
                 if ticket is None:
                     log_worker_event(
                         "stale_persistent_run_retained_without_ticket",
@@ -199,7 +223,6 @@ def recover_stale_runs(settings: Settings) -> int:
                 )
                 recovered_count += 1
                 continue
-            ticket = db.get(Ticket, run.ticket_id)
             if ticket is None:
                 log_worker_event(
                     "stale_run_recovered_without_ticket",

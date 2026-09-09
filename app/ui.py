@@ -92,6 +92,14 @@ def request_next_path(request) -> str | None:
     return sanitize_next_path(current)
 
 
+def ticket_filter_history_header(request) -> str:
+    return (
+        "HX-Replace-Url"
+        if request.headers.get("X-Ticket-Auto-Filter") == "true"
+        else "HX-Push-Url"
+    )
+
+
 def is_html_navigation_request(request) -> bool:
     if request.method not in {"GET", "HEAD"}:
         return False

@@ -1,19 +1,25 @@
-<div id="ops-results">
+<div id="ops-results" data-ticket-filter-results>
+{% include "ticket_filter_loading.html" %}
 {% if rows %}
+  <label class="ops-list-options" data-ops-summary-option hidden>
+    <input type="checkbox" data-ops-summary-toggle aria-controls="ops-ticket-list">
+    {{ t("ops.rows.show_summary") }}
+  </label>
   <div class="ticket-index__columns ticket-index__columns--ops" aria-hidden="true">
-    <span>{{ t("ticket_index.column.ticket") }}</span>
     <span>{{ t("ticket_index.column.state") }}</span>
     <span>{{ t("ticket_index.column.people") }}</span>
+    <span>{{ t("ops.rows.last_message") }}</span>
     <span>{{ t("ticket_index.column.updated") }}</span>
   </div>
-  <ul class="ticket-index__list">
+  <ul class="ticket-index__list" id="ops-ticket-list">
     {% for row in rows %}
     {% set ticket = row.ticket %}
+    {% set preview = (list_previews | default({})).get(ticket.id, {}) %}
     <li>
       <a class="ticket-index-row ticket-index-row--ops" href="/ops/tickets/{{ ticket.reference }}?return_to={{ ticket_return_to | default('/ops') | urlencode }}">
         <span class="ticket-index-row__primary">
           <span class="ticket-ref">{{ ticket.reference }}</span>
-          <strong>{{ ticket.title }}</strong>
+          <strong title="{{ ticket.title }}">{{ ticket.title }}</strong>
           <span class="ticket-index-row__badges">
             {% if ticket.urgent %}<span class="urgent-pill">{{ t("common.urgent") }}</span>{% endif %}
             {% if row.updated_for_user %}<span class="updated-pill">{{ t("common.updated") }}</span>{% endif %}
@@ -31,10 +37,23 @@
           <span aria-hidden="true">→</span>
           <span>{{ row.assignee.display_name if row.assignee else unassigned_label }}</span>
         </span>
+        <span class="ops-list-message">
+          <span class="ticket-index-row__mobile-label">{{ t("ops.rows.last_message") }}</span>
+          {% if preview.get('message') %}
+          <span class="ops-list-message__excerpt">
+            <span class="ops-list-message__author">{{ preview.message.author_name or ops_author_label(preview.message.author_type) }} · {{ t("ops.rows.visibility." ~ preview.message.visibility) }}:</span>
+            {{ preview.message.excerpt or t("ops.rows.empty_message") }}
+          </span>
+          {% else %}<span>{{ t("ops.rows.no_messages") }}</span>{% endif %}
+        </span>
         <time class="ticket-index-row__updated" datetime="{{ format_datetime_iso(ticket.updated_at) }}">
           <span class="ticket-index-row__mobile-label">{{ t("ticket_index.column.updated") }}</span>
           {{ format_datetime_utc(ticket.updated_at) }}
         </time>
+        <span class="ops-list-summary" hidden>
+          <span>{{ t("ops.rows.internal_summary") }}:</span>
+          {{ preview.get('summary') or t("ops.rows.no_summary") }}
+        </span>
       </a>
     </li>
     {% endfor %}

@@ -1076,6 +1076,67 @@ def test_set_ticket_status_for_ops_records_resolve_history_and_rejects_invalid_s
         )
 
 
+def test_set_ticket_status_for_ops_cancels_deferred_work_and_pending_drafts(monkeypatch):
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    slack_runtime = _make_slack_runtime()
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=611,
+        reference="T-000611",
+        title="Cancel safely",
+        created_by_user_id=uuid.uuid4(),
+        status="waiting_on_dev_ti",
+        urgent=False,
+        requeue_requested=True,
+        requeue_trigger="ticket_content",
+        requeue_source_message_id=uuid.uuid4(),
+    )
+    observed = {"lock_order": []}
+    monkeypatch.setattr(
+        "shared.ticketing._lock_ticket_for_mutation",
+        lambda db, *, ticket: (
+            observed["lock_order"].append("ticket"),
+            ticket,
+        )[1],
+    )
+    monkeypatch.setattr(
+        "shared.ticketing.supersede_pending_drafts",
+        lambda db, ticket_id, *, reason: (
+            observed["lock_order"].append("drafts"),
+            observed.update({"ticket_id": ticket_id, "reason": reason}),
+        ),
+    )
+    monkeypatch.setattr(
+        "shared.ticketing.supersede_pending_ai_runs_for_cancellation",
+        lambda db, *, ticket_id, ended_at: (
+            observed["lock_order"].append("runs"),
+            observed.update({"run_ticket_id": ticket_id, "run_ended_at": ended_at}),
+        ),
+    )
+
+    symbols["set_ticket_status_for_ops"](
+        fake_db,
+        slack_runtime=slack_runtime,
+        ticket=ticket,
+        actor=actor,
+        next_status="canceled",
+    )
+
+    history = [item for item in fake_db.added if isinstance(item, symbols["TicketStatusHistory"])]
+    assert ticket.status == "canceled"
+    assert ticket.resolved_at is None
+    assert ticket.requeue_requested is False
+    assert ticket.requeue_trigger is None
+    assert observed["ticket_id"] == ticket.id
+    assert observed["reason"] == "ticket_canceled"
+    assert observed["run_ticket_id"] == ticket.id
+    assert observed["run_ended_at"] is not None
+    assert observed["lock_order"] == ["ticket", "runs", "drafts"]
+    assert history[0].to_status == "canceled"
+
+
 def test_set_ticket_status_for_ops_ai_triage_delegates_to_manual_rerun(monkeypatch):
     symbols = _load_symbols()
     fake_db = _FakeSession()
@@ -1413,7 +1474,7 @@ def test_clear_matching_ticket_content_requeue_preserves_stronger_control_reques
     assert ticket.requeue_forced_route_target_id == "software_architect"
 
 
-def test_publish_ai_draft_for_ops_creates_ai_message_and_status_change():
+def test_publish_ai_draft_for_ops_creates_ai_message_and_status_change(monkeypatch):
     symbols = _load_symbols()
     fake_db = _FakeSession()
     slack_runtime = _make_slack_runtime()
@@ -1436,6 +1497,15 @@ def test_publish_ai_draft_for_ops_creates_ai_message_and_status_change():
         body_text="This is a safe draft reply.",
         status="pending_approval",
     )
+    lock_order = []
+    monkeypatch.setattr(
+        "shared.ticketing._lock_ticket_for_mutation",
+        lambda db, *, ticket: (lock_order.append("ticket"), ticket)[1],
+    )
+    monkeypatch.setattr(
+        "shared.ticketing._lock_ai_draft_for_review",
+        lambda db, *, draft: (lock_order.append("draft"), draft)[1],
+    )
 
     message = symbols["publish_ai_draft_for_ops"](
         fake_db,
@@ -1454,8 +1524,46 @@ def test_publish_ai_draft_for_ops_creates_ai_message_and_status_change():
     assert draft.reviewed_by_user_id == actor.id
     assert draft.published_message_id == message.id
     assert ticket.status == "waiting_on_user"
+    assert lock_order == ["ticket", "draft"]
     assert history[0].to_status == "waiting_on_user"
     assert fake_db.flush_calls == 3
+
+
+def test_publish_ai_draft_for_ops_rejects_canceled_ticket():
+    symbols = _load_symbols()
+    fake_db = _FakeSession()
+    actor = _make_ops_user(symbols)
+    ticket = symbols["Ticket"](
+        id=uuid.uuid4(),
+        reference_num=81,
+        reference="T-000081",
+        title="Canceled approval",
+        created_by_user_id=uuid.uuid4(),
+        status="canceled",
+        urgent=False,
+    )
+    draft = symbols["AIDraft"](
+        id=uuid.uuid4(),
+        ticket_id=ticket.id,
+        ai_run_id=uuid.uuid4(),
+        kind="public_reply",
+        body_markdown="Stale draft",
+        body_text="Stale draft",
+        status="pending_approval",
+    )
+
+    with pytest.raises(ValueError, match="Canceled tickets cannot publish drafts"):
+        symbols["publish_ai_draft_for_ops"](
+            fake_db,
+            slack_runtime=_make_slack_runtime(),
+            ticket=ticket,
+            draft=draft,
+            actor=actor,
+            next_status="waiting_on_user",
+        )
+
+    assert draft.status == "pending_approval"
+    assert ticket.status == "canceled"
 
 
 def test_publish_ai_draft_for_ops_links_publication_outcome_and_supports_edited_body(monkeypatch):
@@ -1513,7 +1621,7 @@ def test_publish_ai_draft_for_ops_links_publication_outcome_and_supports_edited_
     assert captured["payload_json"]["original_draft_body_markdown"] == "Original draft body."
 
 
-def test_reject_ai_draft_for_ops_marks_review_metadata_without_status_change():
+def test_reject_ai_draft_for_ops_marks_review_metadata_without_status_change(monkeypatch):
     symbols = _load_symbols()
     fake_db = _FakeSession()
     actor = _make_ops_user(symbols)
@@ -1535,6 +1643,15 @@ def test_reject_ai_draft_for_ops_marks_review_metadata_without_status_change():
         body_text="Hold for review.",
         status="pending_approval",
     )
+    lock_order = []
+    monkeypatch.setattr(
+        "shared.ticketing._lock_ticket_for_mutation",
+        lambda db, *, ticket: (lock_order.append("ticket"), ticket)[1],
+    )
+    monkeypatch.setattr(
+        "shared.ticketing._lock_ai_draft_for_review",
+        lambda db, *, draft: (lock_order.append("draft"), draft)[1],
+    )
 
     symbols["reject_ai_draft_for_ops"](fake_db, ticket=ticket, draft=draft, actor=actor)
     history = [item for item in fake_db.added if isinstance(item, symbols["TicketStatusHistory"])]
@@ -1543,6 +1660,7 @@ def test_reject_ai_draft_for_ops_marks_review_metadata_without_status_change():
     assert draft.reviewed_by_user_id == actor.id
     assert draft.reviewed_at is not None
     assert ticket.status == "waiting_on_dev_ti"
+    assert lock_order == ["ticket", "draft"]
     assert history == []
 
 
@@ -3347,7 +3465,8 @@ def test_ops_set_user_active_rejects_invalid_flag(monkeypatch):
     assert db.rollback_calls == 0
 
 
-def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):
+@pytest.mark.parametrize("automatic", [False, True])
+def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch, automatic):
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
@@ -3387,7 +3506,7 @@ def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):
 
     with stack["TestClient"](app) as client:
         response = client.get("/ops")
-        fragment = client.get("/ops?status=new", headers={"HX-Request": "true"})
+        fragment = client.get("/ops?status=new", headers={"HX-Request": "true", "X-Ticket-Auto-Filter": str(automatic).lower()})
 
     assert response.status_code == 200
     assert "<html" in response.text
@@ -3395,12 +3514,14 @@ def test_ops_list_route_does_not_mark_ticket_as_read(monkeypatch):
     assert fragment.status_code == 200
     assert "<html" not in fragment.text
     assert 'id="ops-results"' in fragment.text
-    assert fragment.headers["hx-push-url"] == "/ops?status=new"
+    assert fragment.headers["hx-replace-url" if automatic else "hx-push-url"] == "/ops?status=new"
+    assert ("hx-push-url" if automatic else "hx-replace-url") not in fragment.headers
     assert observed["view_updates"] == 0
     assert db.commit_calls == 2
 
 
-def test_ops_board_route_does_not_mark_ticket_as_read(monkeypatch):
+@pytest.mark.parametrize("automatic", [False, True])
+def test_ops_board_route_does_not_mark_ticket_as_read(monkeypatch, automatic):
     stack = _load_web_stack()
     app = stack["create_app"]()
     db = _RouteDb()
@@ -3440,7 +3561,7 @@ def test_ops_board_route_does_not_mark_ticket_as_read(monkeypatch):
 
     with stack["TestClient"](app) as client:
         response = client.get("/ops/board")
-        fragment = client.get("/ops/board?status=new", headers={"HX-Request": "true"})
+        fragment = client.get("/ops/board?status=new", headers={"HX-Request": "true", "X-Ticket-Auto-Filter": str(automatic).lower()})
 
     assert response.status_code == 200
     assert "<html" in response.text
@@ -3448,7 +3569,8 @@ def test_ops_board_route_does_not_mark_ticket_as_read(monkeypatch):
     assert fragment.status_code == 200
     assert "<html" not in fragment.text
     assert 'id="ops-results"' in fragment.text
-    assert fragment.headers["hx-push-url"] == "/ops/board?status=new"
+    assert fragment.headers["hx-replace-url" if automatic else "hx-push-url"] == "/ops/board?status=new"
+    assert ("hx-push-url" if automatic else "hx-replace-url") not in fragment.headers
     assert observed["view_updates"] == 0
     assert db.commit_calls == 2
 
@@ -4258,6 +4380,20 @@ def test_ops_set_ticket_status_supports_board_json_and_safe_return_paths(monkeyp
     }
     assert redirect_response.headers["location"] == "/ops/board?urgent=on"
     assert unsafe_response.headers["location"] == f"/ops/tickets/{ticket.reference}"
+
+
+def test_ops_return_to_supports_grouped_states_and_infers_exact_status_group():
+    stack = _load_web_stack()
+    sanitize = stack["routes_ops"]._sanitize_ops_return_to
+
+    assert sanitize(
+        "/ops/board?state=canceled&state=waiting_reply&q=printer"
+    ) == "/ops/board?q=printer&state=waiting_reply&state=canceled"
+    assert sanitize("/ops?status=waiting_on_user") == "/ops?status=waiting_on_user"
+    assert sanitize("/ops/board?status=resolved&state=unknown") == (
+        "/ops/board?status=resolved"
+    )
+    assert sanitize("/ops?state=resolved&state=resolved") == "/ops/board"
 
 
 def test_ops_public_reply_validation_returns_preserved_composer_context_after_csrf(monkeypatch):
@@ -5312,7 +5448,8 @@ def test_ops_routes_source_and_templates_keep_internal_and_public_lanes_separate
     assert "add_ops_internal_note" in source
     assert "assign_ticket_for_ops" in source
     assert "set_ticket_status_for_ops" in source
-    assert 't("filters.status")' in filters_template
+    assert 't("filters.exact_status")' in filters_template
+    assert 't("filters.exact_status_hint")' in filters_template
     assert 't("filters.route_target")' in filters_template
     assert 't("filters.assigned_to")' in filters_template
     assert 'hx-get="{{ filters_action }}"' in filters_template
