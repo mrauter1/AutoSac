@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block title %}{{ ticket.reference }} | {{ t("ops.detail.short_title") }} | {{ t("brand.name") }}{% endblock %}
-{% block page_class %} page--ops-ticket-detail page--ticket{% endblock %}
+{% block page_class %} page--ops-ticket-detail page--ticket page--conversation{% endblock %}
 {% block page_styles %}<link rel="stylesheet" href="/static/ticket.css">{% endblock %}
 {% block page_scripts %}<script src="/static/ticket-live.js" defer></script><script src="/static/ticket.js" defer></script>{% endblock %}
 

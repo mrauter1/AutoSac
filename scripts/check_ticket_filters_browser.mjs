@@ -23,11 +23,29 @@ ticket = SimpleNamespace(id='one', reference='T-000059', title='Título longo ' 
 row = dict(ticket=ticket, creator=SimpleNamespace(display_name='Maria'), assignee=None, updated_for_user=True, pending_draft=True, route_target_display=SimpleNamespace(id='ti',label='TI'))
 print(env.get_template('ops_ticket_rows.html').render(rows=[row], list_previews={'one': {'message': {'author_name':'Maria','author_type':'operator','visibility':'internal','excerpt':'<script>alert(1)</script> ' + 'Mensagem longa ' * 15}, 'summary':'Resumo interno ' * 40}}, t=get_translator('pt-BR'), ops_status_label=lambda _: 'Aguardando usuário', ops_author_label=lambda _: 'IA', unknown_label='Desconhecido', unassigned_label='Não atribuído', format_datetime_iso=lambda value:value.isoformat(), format_datetime_utc=lambda _: '09/09/2026 14:32'))
 `], {cwd:root, encoding:'utf8'});
+const requesterPages = JSON.parse(execFileSync(root + '.venv/bin/python', ['-c', `
+import json
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+from app.i18n import get_translator
+env = Environment(loader=FileSystemLoader('app/templates'), autoescape=select_autoescape())
+now = datetime.now(timezone.utc)
+ticket = SimpleNamespace(reference='T-000059', title='Título longo ' * 12, urgent=True, status='waiting_on_user')
+timeline = [dict(kind='message', id='one', author_type='requester', source='web', author_label='Maria', created_at=now, body_html='<p>Mensagem pública</p><pre>' + 'long_code_' * 80 + '</pre>', attachments=[]), dict(kind='message', id='two', author_type='ai', source='ai', author_label='IA', created_at=now, body_html='<p>Resposta pública</p>', attachments=[]), dict(kind='status_change', lane_label='Status', created_at=now, summary='Aguardando sua resposta')]
+pages = {}
+for preview in (False, True):
+    pages['preview' if preview else 'requester'] = env.get_template('requester_ticket_detail.html').render(ticket=ticket, timeline=timeline, requester_actions_enabled=not preview, requester_live_updates_enabled=False, interaction_mode='admin_preview_readonly' if preview else 'requester', reply_body='', t=get_translator('pt-BR'), ui_locale='pt-BR', ui_locale_links={'en':'#','pt-BR':'#'}, csrf_token='test-csrf', requester_status_label=lambda _: 'Aguardando sua resposta', format_datetime_iso=lambda value:value.isoformat(), format_datetime_utc=lambda _: '09/09/2026 14:32')
+print(json.dumps(pages))
+`], {cwd:root, encoding:'utf8'}));
 function fragment(q = '', selected = true) {
  return `<div id="results"><form data-ticket-filters hx-get="/tickets" hx-target="#results" hx-swap="outerHTML" hx-trigger="submit, ticket-filter-submit" hx-sync="this:replace"><input id="search" type="search" name="q" hx-preserve value="${q}"><input type="checkbox" name="state" value="waiting_reply" ${selected ? 'checked' : ''}><select name="status"><option value="">Any</option><option value="resolved">Resolved</option></select><button type="submit">Apply</button></form><p class="ticket-filter-feedback" hidden><span data-filter-error hidden>Error</span></p><div data-ticket-filter-results style="min-height:200px"><div class="ticket-filter-overlay" data-filter-loading role="status" hidden><span class="ticket-filter-spinner"></span><span class="visually-hidden">Loading</span></div><div id="answer">${q}</div></div></div>`;
 }
 const server = createServer((req, res) => {
  const url = new URL(req.url, 'http://localhost');
+ if(url.pathname === '/requester-layout' || url.pathname === '/preview-layout') {
+  res.end(requesterPages[url.pathname === '/preview-layout' ? 'preview' : 'requester']);return;
+ }
  if(url.pathname === '/ops-layout') {
   res.end('<html><head><link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/board.css"><link rel="stylesheet" href="/static/ticket-list.css"><script src="/static/ops-list.js" defer></script></head><body><main class="page page--ops-index">'+opsRows+'</main></body></html>');return;
  }
@@ -153,7 +171,33 @@ try {
    })()`),true,'Last message must receive more width than either metadata column at '+width+'px');
   }
  }
- console.log('PASS: automatic filters, responsive Ops toolbar/header geometry, Ops list layout, escaped previews and persistent summary preference');
+ for (const view of ['requester', 'preview']) {
+  await send('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/${view}-layout`});
+  await sleep(300);
+  const readonly=view==='preview';
+  assert.equal(await evaluate(`document.querySelector('textarea').disabled`),readonly);
+  assert.equal(await evaluate(`document.querySelector('.requester-preview-banner') !== null`),readonly);
+  assert.equal(await evaluate(`document.querySelector('#ticket-composer-region form').hasAttribute('action')`),!readonly);
+  assert.equal(await evaluate(`document.querySelector('#ticket-composer-region [name=csrf_token]') !== null`),!readonly);
+  for (const width of [390, 800, 1440]) {
+   await send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
+   assert.equal(await evaluate(`(() => {
+    const header=document.querySelector('#ticket-status-region').getBoundingClientRect();
+    const ledger=document.querySelector('#ticket-ledger-region').getBoundingClientRect();
+    const composer=document.querySelector('#ticket-composer-region').getBoundingClientRect();
+    const message=getComputedStyle(document.querySelector('.message-card--requester'));
+    const status=getComputedStyle(document.querySelector('.timeline-status__text'));
+    const statusBox=document.querySelector('.timeline-status').getBoundingClientRect();
+    return Math.abs(header.width-ledger.width)<1 && Math.abs(composer.width-ledger.width)<1 && ledger.width<=800
+     && message.fontSize==='14px' && message.justifySelf==='end' && status.fontSize==='11px'
+     && status.textAlign==='center' && statusBox.width<=ledger.width
+     && Math.abs((statusBox.left+statusBox.right)-(ledger.left+ledger.right))<2
+     && (innerWidth<=560 || statusBox.width<ledger.width)
+     && document.documentElement.scrollWidth<=innerWidth;
+   })()`),true,'Compact aligned '+view+' conversation without overflow at '+width+'px');
+  }
+ }
+ console.log('PASS: automatic filters, Ops layout, requester/preview compact layout, readonly controls and persistent summary preference');
 } finally {
  if(chrome.exitCode === null && chrome.signalCode === null) {
   const exited=once(chrome,'exit');

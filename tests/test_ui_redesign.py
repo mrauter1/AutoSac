@@ -271,11 +271,11 @@ def test_page_specific_assets_and_reflow_rules_are_present():
     assert ".ops-ticket-detail__conversation" in ticket_css
     assert "max-width: 57.5rem" in ticket_css
     assert "max-width: 50rem" in ticket_css
-    assert """.page--ticket.page--ops-ticket-detail .ops-ticket-detail__thread {
+    assert """.page--ticket.page--conversation .ticket-thread {
   gap: 0.125rem;
   padding: 0;
 }""" in ticket_css
-    assert """.page--ticket.page--ops-ticket-detail .ticket-thread .message-card {
+    assert """.page--ticket.page--conversation .ticket-thread .message-card {
   width: fit-content;
   max-width: 96%;
   justify-self: start;
@@ -283,29 +283,29 @@ def test_page_specific_assets_and_reflow_rules_are_present():
     assert "justify-self: start" in ticket_css
     assert "justify-self: end" in ticket_css
     assert "justify-self: stretch" in ticket_css
-    assert """.page--ticket.page--ops-ticket-detail .ticket-thread .timeline-status {
-  width: 100%;
-  max-width: none;
-  justify-self: stretch;
+    assert """.page--ticket.page--conversation .ticket-thread .timeline-status {
+  width: fit-content;
+  max-width: 100%;
+  justify-self: center;
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
   justify-items: stretch;
   align-items: center;
   gap: 0.5rem;
   margin-block: 0;""" in ticket_css
-    assert """.page--ticket.page--ops-ticket-detail .ticket-thread .timeline-status__meta {
+    assert """.page--ticket.page--conversation .ticket-thread .timeline-status__meta {
   flex-wrap: nowrap;
-  justify-content: flex-start;""" in ticket_css
-    assert """.page--ticket.page--ops-ticket-detail .ticket-thread .timeline-status__text {
+  justify-content: center;""" in ticket_css
+    assert """.page--ticket.page--conversation .ticket-thread .timeline-status__text {
   min-width: 0;""" in ticket_css
-    assert """.page--ticket.page--ops-ticket-detail .ticket-composer__footer {
+    assert """.page--ticket.page--conversation .ticket-composer__footer {
   display: flex;
   flex-wrap: wrap;
   align-items: center;""" in ticket_css
-    assert """.page--ticket.page--ops-ticket-detail .ticket-composer__footer-note {
+    assert """.page--ticket.page--conversation .ticket-composer__footer-note {
   min-width: 10rem;
   flex: 1 1 12rem;""" in ticket_css
-    assert """.page--ticket.page--ops-ticket-detail .ticket-composer .ticket-composer__attachment-field input[type="file"]:focus-visible {
+    assert """.page--ticket.page--conversation .ticket-composer .ticket-composer__attachment-field input[type="file"]:focus-visible {
   outline: 2px solid var(--focus);""" in ticket_css
     assert ".ops-ticket-inspector[open]" in ticket_css
     assert """.ops-ticket-inspector {
@@ -338,12 +338,11 @@ def test_page_specific_assets_and_reflow_rules_are_present():
     assert "ops-ticket-inspector" not in ops_live_fragments
     assert "ops-ticket-inspector" not in codex_turn_detail
     assert "@media (max-width: 560px)" in ticket_css
-    assert """.requester-detail .ticket-thread .message-card {
-    max-width: 96%;
-    padding-inline: 0.75rem;""" in ticket_css
-    assert """.page--ticket.page--ops-ticket-detail .ticket-thread .timeline-status {
+    assert """.page--ticket.page--conversation .ticket-thread .message-card {
+    max-width: 90%;""" in ticket_css
+    assert """.page--ticket.page--conversation .ticket-thread .timeline-status {
     grid-template-columns: minmax(0, 1fr);""" in ticket_css
-    assert """.page--ticket.page--ops-ticket-detail .ticket-thread .timeline-status__meta {
+    assert """.page--ticket.page--conversation .ticket-thread .timeline-status__meta {
     flex-wrap: wrap;""" in ticket_css
     assert "overflow-y: auto" not in ticket_css
     assert 'page--ticket-create' in ticket_new

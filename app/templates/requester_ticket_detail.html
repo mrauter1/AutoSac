@@ -3,7 +3,7 @@
 {% set live_updates_enabled = requester_live_updates_enabled | default(false) %}
 
 {% block title %}{{ ticket.reference }} | {{ t("brand.name") }}{% endblock %}
-{% block page_class %} page--workspace page--ticket{% endblock %}
+{% block page_class %} page--workspace page--ticket page--conversation{% endblock %}
 {% block page_styles %}<link rel="stylesheet" href="/static/ticket.css">{% endblock %}
 {% block page_scripts %}{% if live_updates_enabled %}<script src="/static/ticket-live.js" defer></script>{% endif %}<script src="/static/ticket.js" defer></script>{% endblock %}
 
@@ -22,8 +22,10 @@
   <section class="requester-detail__layout ticket-conversation-layout">
     {% include "requester_ticket_ledger.html" %}
     {% if live_state is defined %}{% include "ticket_live_status.html" %}{% endif %}
-    <section id="ticket-composer-region" class="ticket-composer stack" data-ticket-composer>
+    <section id="ticket-composer-region" class="ticket-composer" data-ticket-composer>
+      <div class="ticket-composer__header">
         <h2>{{ t("requester.detail.reply_heading") }}</h2>
+      </div>
         <form
           {% if actions_enabled %}
           method="post"
@@ -32,24 +34,26 @@
           {% else %}
           aria-disabled="true"
           {% endif %}
-          class="stack"
+          class="stack ticket-composer__form"
         >
           {% if actions_enabled %}
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="return_to" value="{{ requester_return_to | default('/app/tickets') }}">
           {% endif %}
-          <label class="field">
-            <span>{{ t("field.message") }}</span>
-            <small>{{ t("requester.detail.public_audience") }}</small>
-            <textarea name="body" rows="6"{% if actions_enabled %} required{% else %} disabled{% endif %}>{{ reply_body or '' }}</textarea>
+          <label class="field ticket-composer__message-field">
+            <span class="visually-hidden">{{ t("field.message") }}</span>
+            <textarea name="body" rows="3" aria-describedby="requester-reply-audience"{% if actions_enabled %} required{% else %} disabled{% endif %}>{{ reply_body or '' }}</textarea>
           </label>
           {% if error %}<p class="field-error" role="alert">{{ error }}</p>{% endif %}
-          <label class="field">
-            <span>{{ t("field.attachments") }}</span>
-            <input type="file" name="attachments" multiple{% if not actions_enabled %} disabled{% endif %}>
-            <small>{{ t("hint.attachments_limit") }}</small>
+          <div class="ticket-composer__footer">
+          <label class="field ticket-composer__attachment-field">
+            <span class="visually-hidden">{{ t("field.attachments") }}</span>
+            <input type="file" name="attachments" multiple aria-describedby="requester-attachment-hint"{% if not actions_enabled %} disabled{% endif %}>
+            <small id="requester-attachment-hint" class="visually-hidden">{{ t("hint.attachments_limit") }}</small>
           </label>
+          <p id="requester-reply-audience" class="ticket-composer__footer-note">{{ t("requester.detail.public_audience") }}</p>
           <button type="{{ 'submit' if actions_enabled else 'button' }}" class="button" data-submitting-label="{{ t('button.sending') }}"{% if not actions_enabled %} disabled{% endif %}>{{ t("button.send_reply") }}</button>
+          </div>
         </form>
     </section>
   </section>
