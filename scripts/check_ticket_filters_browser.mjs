@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const requests = [];
+const uploads = [];
 // Run with: CHROME_BIN=/path/to/chrome node scripts/check_ticket_filters_browser.mjs
 const chromeBin = process.env.CHROME_BIN;
 if (!chromeBin) throw new Error('Set CHROME_BIN to a Chromium executable.');
@@ -36,6 +37,8 @@ timeline = [dict(kind='message', id='one', author_type='requester', source='web'
 pages = {}
 for preview in (False, True):
     pages['preview' if preview else 'requester'] = env.get_template('requester_ticket_detail.html').render(ticket=ticket, timeline=timeline, requester_actions_enabled=not preview, requester_live_updates_enabled=False, interaction_mode='admin_preview_readonly' if preview else 'requester', reply_body='', t=get_translator('pt-BR'), ui_locale='pt-BR', ui_locale_links={'en':'#','pt-BR':'#'}, csrf_token='test-csrf', requester_status_label=lambda _: 'Aguardando sua resposta', format_datetime_iso=lambda value:value.isoformat(), format_datetime_utc=lambda _: '09/09/2026 14:32')
+for ops in (False, True):
+    pages['new-ops' if ops else 'new-requester'] = env.get_template('requester_ticket_new.html').render(is_ops_user=ops, ticket_list_path='/ops' if ops else '/app/tickets', ticket_create_action='/ops/tickets/new' if ops else '/app/tickets/new', t=get_translator('pt-BR'), ui_locale='pt-BR', ui_locale_links={'en':'#','pt-BR':'#'}, csrf_token='test-csrf')
 print(json.dumps(pages))
 `], {cwd:root, encoding:'utf8'}));
 function fragment(q = '', selected = true) {
@@ -43,6 +46,14 @@ function fragment(q = '', selected = true) {
 }
 const server = createServer((req, res) => {
  const url = new URL(req.url, 'http://localhost');
+ if(req.method === 'POST' && ['/ops/tickets/new','/app/tickets/new'].includes(url.pathname)) {
+  const chunks=[];
+  req.on('data',chunk=>chunks.push(chunk));
+  req.on('end',()=>{uploads.push({path:url.pathname,body:Buffer.concat(chunks).toString('utf8')});res.end('Created');});return;
+ }
+ if(url.pathname === '/new-ops' || url.pathname === '/new-requester') {
+  res.end(requesterPages[url.pathname.slice(1)]);return;
+ }
  if(url.pathname === '/requester-layout' || url.pathname === '/preview-layout') {
   res.end(requesterPages[url.pathname === '/preview-layout' ? 'preview' : 'requester']);return;
  }
@@ -197,7 +208,44 @@ try {
    })()`),true,'Compact aligned '+view+' conversation without overflow at '+width+'px');
   }
  }
- console.log('PASS: automatic filters, Ops layout, requester/preview compact layout, readonly controls and persistent summary preference');
+ for (const view of ['new-requester','new-ops']) {
+  await send('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/${view}`});await sleep(250);
+  assert.equal(await evaluate(`!document.querySelector('[data-attachment-selection]').hidden`),true);
+  await evaluate(`(() => {const data=new DataTransfer();data.items.add(new File(['reset'],'reset.txt'));const input=document.querySelector('[name=attachments]');input.files=data.files;input.dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('[data-ticket-attachments]').reset();})()`);
+  await sleep(30);
+  assert.equal(await evaluate(`document.querySelector('[name=attachments]').files.length===0 && document.querySelector('[data-attachment-list]').children.length===0`),true);
+  await evaluate(`(() => {
+   const input=document.querySelector('[name=attachments]');
+   const picker=new DataTransfer();picker.items.add(new File(['picker-content'],'picked.txt',{type:'text/plain'}));
+   input.files=picker.files;input.dispatchEvent(new Event('change',{bubbles:true}));
+   const drop=new DataTransfer();drop.items.add(new File(['dropped-content'],'<img src=x>.txt',{type:'text/plain'}));
+   document.querySelector('[name=description]').dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:drop}));
+   const paste=new DataTransfer();paste.items.add(new File(['pasted-content'],'image.png',{type:'image/png'}));
+   document.querySelector('[name=description]').dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:paste}));
+  })()`);
+  assert.deepEqual(await evaluate(`Array.from(new FormData(document.querySelector('[data-ticket-attachments]')).getAll('attachments'),file=>file.name)`),['picked.txt','<img src=x>.txt','image.png']);
+  assert.equal(await evaluate(`document.querySelector('[data-attachment-list] img')===null`),true);
+  assert.equal(await evaluate(`(() => {
+   const data=new DataTransfer();data.setData('text/plain','normal text');
+   const event=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data});
+   document.querySelector('[name=description]').dispatchEvent(event);return !event.defaultPrevented;
+  })()`),true);
+  await evaluate(`document.querySelector('[data-attachment-list] button').click()`);
+  assert.deepEqual(await evaluate(`Array.from(document.querySelector('[name=attachments]').files,file=>file.name)`),['<img src=x>.txt','image.png']);
+  // A second picker selection appends; it must not lose dragged/pasted files.
+  await evaluate(`(() => {const data=new DataTransfer();data.items.add(new File(['second-content'],'second.txt'));const input=document.querySelector('[name=attachments]');input.files=data.files;input.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+  assert.equal(await evaluate(`document.querySelector('[name=attachments]').files.length`),3);
+  await evaluate(`document.querySelector('[name=description]').value='Test description';document.querySelector('[data-ticket-attachments]').requestSubmit()`);
+  await sleep(300);
+  assert.equal(uploads.at(-1).path,view==='new-ops'?'/ops/tickets/new':'/app/tickets/new');
+  for (const text of ['dropped-content','pasted-content','second-content','test-csrf','Test description']) assert.ok(uploads.at(-1).body.includes(text));
+ }
+ await send('Page.enable');
+ const unsupported = await send('Page.addScriptToEvaluateOnNewDocument',{source:'Object.defineProperty(window,"DataTransfer",{value:undefined,configurable:true});'});
+ await send('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/new-requester`});await sleep(250);
+ assert.equal(await evaluate(`document.querySelector('[data-attachment-selection]').hidden && !document.querySelector('[name=attachments]').disabled && document.querySelector('[name=attachments]').multiple`),true,'Unsupported browsers must retain the native picker');
+ await send('Page.removeScriptToEvaluateOnNewDocument',{identifier:unsupported.result.identifier});
+ console.log('PASS: filters, responsive layouts, readonly preview, attachment picker/drop/paste accumulation, removal, text paste and multipart submissions');
 } finally {
  if(chrome.exitCode === null && chrome.signalCode === null) {
   const exited=once(chrome,'exit');
